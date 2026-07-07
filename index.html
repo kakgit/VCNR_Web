@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Live Stream Player</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <main class="app-shell">
+    <section class="hero">
+      <p class="eyebrow">Web App</p>
+      <h1>Live Video Streaming Player</h1>
+      <p class="hero-copy">
+        Play HLS live streams or unlock VCNR-protected video directly in the browser.
+        VCNR passcodes stay on this device while playback is decrypted locally.
+      </p>
+    </section>
+
+    <section class="player-card">
+      <div class="player-frame">
+        <span class="live-pill" id="liveBadge">OFFLINE</span>
+        <video
+          id="video"
+          class="video-player"
+          controls
+          autoplay
+          playsinline
+          muted
+        ></video>
+      </div>
+
+      <form id="streamForm" class="control-panel">
+        <div class="mode-tabs" role="tablist" aria-label="Playback mode">
+          <button type="button" class="mode-tab is-active" data-mode="stream">Stream URL</button>
+          <button type="button" class="mode-tab" data-mode="vcnr">VCNR File</button>
+        </div>
+
+        <section class="mode-panel is-active" data-panel="stream">
+          <label class="field">
+            <span>Stream URL</span>
+            <input
+              id="streamUrl"
+              name="streamUrl"
+              type="url"
+              placeholder="https://example.com/live/stream.m3u8"
+            >
+          </label>
+
+          <div class="button-row">
+            <button type="submit" class="primary-btn">Play Stream</button>
+            <button type="button" id="loadDemo" class="ghost-btn">Load Demo</button>
+          </div>
+        </section>
+
+        <section class="mode-panel" data-panel="vcnr">
+          <label class="field">
+            <span>VCNR URL (optional)</span>
+            <input
+              id="vcnrUrl"
+              name="vcnrUrl"
+              type="url"
+              placeholder="https://example.com/video.vcnr"
+            >
+          </label>
+
+          <div id="sampleBox" class="sample-box hidden" aria-live="polite">
+            <div>
+              <strong>Sample file available</strong>
+              <p id="sampleLabel">Load a hosted sample VCNR file into the URL box.</p>
+            </div>
+            <button type="button" id="sampleLoad" class="ghost-btn">Load Sample File</button>
+          </div>
+
+          <p class="helper-text helper-divider">or choose a local file</p>
+
+          <label class="field">
+            <span>VCNR File</span>
+            <input
+              id="vcnrFile"
+              name="vcnrFile"
+              type="file"
+              accept=".vcnr"
+            >
+          </label>
+
+          <label class="field">
+            <span>Passcode</span>
+            <input
+              id="passcode"
+              name="passcode"
+              type="password"
+              placeholder="Enter the VCNR passcode"
+              autocomplete="current-password"
+            >
+          </label>
+
+          <div class="button-row">
+            <button type="button" id="playVcnr" class="primary-btn">Unlock And Play</button>
+          </div>
+
+          <p class="helper-text">
+            VCNR v3 files are decrypted locally in your browser and streamed as fragmented MP4.
+          </p>
+        </section>
+
+        <div class="button-row">
+          <button type="button" id="stopStream" class="ghost-btn">Stop</button>
+        </div>
+
+        <p id="status" class="status-text">
+          Enter a live stream URL ending in <code>.m3u8</code> to begin.
+        </p>
+      </form>
+    </section>
+
+    <section class="info-grid">
+      <article class="info-card">
+        <h2>Supported</h2>
+        <p>HLS live streams plus VCNR v3 encrypted files with H.264 video and AAC audio.</p>
+      </article>
+      <article class="info-card">
+        <h2>Passcode Flow</h2>
+        <p>VCNR playback derives a PBKDF2 key, authenticates every AES-GCM chunk, then streams the media locally.</p>
+      </article>
+      <article class="info-card">
+        <h2>Best Results</h2>
+        <p>H.264-based VCNR files are the safest choice for broad browser playback compatibility.</p>
+      </article>
+    </section>
+
+    <pre id="metadata" class="metadata-panel" aria-label="VCNR metadata"></pre>
+  </main>
+
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+  <script type="module" src="app.js"></script>
+</body>
+</html>

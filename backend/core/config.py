@@ -6,6 +6,15 @@ from functools import lru_cache
 from pathlib import Path
 
 
+def _normalize_database_url(value: str) -> str:
+  normalized = value.strip()
+  if normalized.startswith("postgres://"):
+    return "postgresql+psycopg://" + normalized[len("postgres://"):]
+  if normalized.startswith("postgresql://"):
+    return "postgresql+psycopg://" + normalized[len("postgresql://"):]
+  return normalized
+
+
 def _load_env_file() -> None:
   env_path = Path(__file__).resolve().parent.parent.parent / ".env"
   if not env_path.exists():
@@ -38,8 +47,10 @@ def get_settings() -> Settings:
     app_host=os.getenv("APP_HOST", "0.0.0.0"),
     app_port=int(os.getenv("APP_PORT", "8000")),
     frontend_origin=os.getenv("FRONTEND_ORIGIN", "http://localhost:8000"),
-    database_url=os.getenv(
-      "DATABASE_URL",
-      "postgresql+psycopg://postgres:postgres@localhost:5432/cineproxima",
+    database_url=_normalize_database_url(
+      os.getenv(
+        "DATABASE_URL",
+        "postgresql+psycopg://postgres:postgres@localhost:5432/cineproxima",
+      )
     ),
   )

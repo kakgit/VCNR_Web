@@ -10,6 +10,7 @@ import secrets
 
 from sqlalchemy.orm import Session
 
+from backend.core.time_utils import is_app_time_reached, parse_app_datetime
 from backend.data.demo_store import ADMIN_STATE, MOVIES, PUBLISH_QUEUE, USERS
 from backend.models import (
   AdminStateRecord,
@@ -201,15 +202,11 @@ def _derive_reservation_close_at(password_publish_at: str | None) -> str | None:
   if not password_publish_at:
     return None
 
-  normalized = str(password_publish_at).strip()
-  for fmt in ("%Y-%m-%dT%H:%M", "%Y-%m-%d %H:%M"):
-    try:
-      parsed = datetime.strptime(normalized, fmt)
-      derived = parsed.timestamp() - (15 * 60)
-      return datetime.fromtimestamp(derived).strftime("%Y-%m-%dT%H:%M")
-    except ValueError:
-      continue
-  return None
+  parsed = parse_app_datetime(password_publish_at)
+  if parsed is None:
+    return None
+  derived = parsed.timestamp() - (15 * 60)
+  return datetime.fromtimestamp(derived, parsed.tzinfo).replace(tzinfo=None).strftime("%Y-%m-%dT%H:%M")
 
 
 REVIEW_FIELD_ORDER = [
@@ -1081,10 +1078,7 @@ def _movie_release_is_live(movie: MovieRecord) -> bool:
   password_publish_at = str(movie.password_publish_at or "").strip()
   if not password_publish_at:
     return False
-  try:
-    return datetime.fromisoformat(password_publish_at) <= datetime.now()
-  except ValueError:
-    return False
+  return is_app_time_reached(password_publish_at)
 
 
 def _sync_live_release_entitlements(session: Session, movies: list[MovieRecord]) -> None:

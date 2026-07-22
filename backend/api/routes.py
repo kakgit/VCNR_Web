@@ -27,6 +27,7 @@ from sqlalchemy.orm import Session
 
 from backend import auth as session_auth
 from backend.core.config import get_settings
+from backend.core.time_utils import app_now, is_app_time_reached, parse_app_datetime
 from backend import persistence
 from backend.data import demo_store
 from backend.db import get_db
@@ -352,12 +353,7 @@ def _viewer_content_manifest_payload(manifest: dict, quality_code: str | None = 
 
 def _download_is_available(movie: dict, manifest: dict | None = None) -> bool:
   delivery_start_at = (manifest or {}).get("delivery_start_at") or movie.get("delivery_start_at")
-  if not delivery_start_at:
-    return False
-  try:
-    return datetime.fromisoformat(str(delivery_start_at)) <= datetime.now()
-  except ValueError:
-    return False
+  return is_app_time_reached(str(delivery_start_at or ""))
 
 
 def _release_is_unlocked(movie: dict) -> bool:
@@ -365,10 +361,7 @@ def _release_is_unlocked(movie: dict) -> bool:
   release_passcode = (movie.get("release_passcode") or "").strip()
   if not password_publish_at or not release_passcode:
     return False
-  try:
-    return datetime.fromisoformat(str(password_publish_at)) <= datetime.now()
-  except ValueError:
-    return False
+  return is_app_time_reached(str(password_publish_at))
 
 
 def _delivery_entitlement_status(movie: dict) -> str:
@@ -613,25 +606,15 @@ def _normalize_datetime_local(value: str | None) -> str:
   if not normalized:
     raise HTTPException(status_code=400, detail="Please choose the upload future start date and time.")
 
-  parsed = None
-  for candidate in (
-    normalized,
-    normalized.replace(" ", "T"),
-  ):
-    try:
-      parsed = datetime.fromisoformat(candidate)
-      break
-    except ValueError:
-      continue
-
+  parsed = parse_app_datetime(normalized)
   if parsed is None:
     raise HTTPException(status_code=400, detail="Enter a valid upload future start date and time.")
 
   parsed = parsed.replace(second=0, microsecond=0)
-  if parsed <= datetime.now():
+  if parsed <= app_now():
     raise HTTPException(status_code=400, detail="Upload future start date and time must be in the future.")
 
-  return parsed.isoformat(timespec="minutes")
+  return parsed.replace(tzinfo=None).isoformat(timespec="minutes")
 
 
 def _derive_content_key(password: str, salt: bytes) -> bytes:
@@ -1334,11 +1317,10 @@ def admin_release_movie_main_content(
   release_date_time = payload.release_date_time.strip()
   if not release_date_time:
     raise HTTPException(status_code=400, detail="Choose a future release date and time.")
-  try:
-    parsed_release_date = datetime.fromisoformat(release_date_time)
-  except ValueError as error:
-    raise HTTPException(status_code=400, detail="Choose a valid release date and time.") from error
-  if parsed_release_date <= datetime.now(parsed_release_date.tzinfo):
+  parsed_release_date = parse_app_datetime(release_date_time)
+  if parsed_release_date is None:
+    raise HTTPException(status_code=400, detail="Choose a valid release date and time.")
+  if parsed_release_date <= app_now():
     raise HTTPException(status_code=400, detail="Release date and time must be in the future.")
 
   movie = persistence.release_movie_main_content(db, movie_id, release_date_time, payload.release_passcode) if db else demo_store.release_movie_main_content(movie_id, release_date_time, payload.release_passcode)

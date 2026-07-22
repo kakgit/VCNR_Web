@@ -3,3 +3,17 @@ node_modules/
 Thumbs.db
 .railway/
 .gitrepo/
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.log
+.env
+
+backend-start.err
+backend-start.log
+
+Videos/
+sample-videos/
+mobile-viewer-app/
+VCNR_Android_Player/

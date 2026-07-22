@@ -1,0 +1,1220 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Cine Vault Admin</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@500;600;700&family=Outfit:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../styles.css?v=__ASSET_VERSION__">
+</head>
+<body class="admin-entry" data-entry="admin">
+  <div class="page-aura"></div>
+  <main class="page-shell">
+    <header class="topbar">
+      <a href="#" class="brand-mark" aria-label="Cine Vault home" data-nav-view="viewer">
+        <span class="brand-icon">C</span>
+        <span class="brand-copy">
+          <strong>Cine Vault</strong>
+          <small>Premiere Access</small>
+        </span>
+      </a>
+      <div class="topbar-search">
+        <span class="search-glow"></span>
+        <input type="text" placeholder="Search movies, shows, actors...">
+        <span class="search-shortcut">Ctrl K</span>
+      </div>
+      <div class="topbar-meta">
+        <span class="meta-pill meta-pill-discs">
+          <span id="viewerDiscBalance">0</span>
+          <span class="meta-pill-icon" aria-hidden="true">&#9678;</span>
+        </span>
+        <span class="meta-pill meta-pill-stars">
+          <span id="viewerStarBalance">0</span>
+          <span class="meta-pill-icon" aria-hidden="true">&#9733;</span>
+        </span>
+      </div>
+      <div class="topbar-actions">
+        <button class="ghost-btn" type="button" id="viewerAccountButton" data-nav-view="auth">My Account</button>
+        <button class="topbar-cta" type="button" data-nav-view="viewer">Rewards</button>
+      </div>
+    </header>
+
+    <nav class="main-strip" aria-label="Main sections">
+      <button type="button" class="strip-link" data-nav-view="viewer">Home</button>
+      <button type="button" class="strip-link is-active" data-stage="upcoming">Up Coming</button>
+      <button type="button" class="strip-link" data-stage="released">New Released</button>
+      <button type="button" class="strip-link" data-stage="library">Library</button>
+      <button type="button" class="strip-link">Music</button>
+      <button type="button" class="strip-link">Wish To Watch</button>
+      <button type="button" class="strip-link">Reserved</button>
+      <button type="button" class="strip-link">My Collection</button>
+      <button type="button" class="strip-link" data-nav-view="producer">Menu</button>
+    </nav>
+
+    <section class="view-section" data-view="landing">
+      <section class="hero-panel">
+        <div class="hero-copy">
+          <p class="section-kicker">Phase 1 Product Shell</p>
+          <h1>Reserve tomorrow's biggest films before the world sees them.</h1>
+          <p class="hero-text">
+            Cine Vault combines upcoming movie discovery, wish intent, reserve-now revenue,
+            secure preview screening, and role-based publishing for creators and admins.
+          </p>
+          <div class="hero-actions">
+            <button class="primary-action" type="button" data-nav-view="viewer">Open Viewer Dashboard</button>
+            <button class="secondary-action" type="button" data-nav-view="auth">Enter Auth Flow</button>
+          </div>
+          <ul class="hero-points">
+            <li>Wish-to-watch demand tracking before release</li>
+            <li>Reserve-now collection and expected revenue visibility</li>
+            <li>Creator and admin publishing workflow built into the app</li>
+          </ul>
+        </div>
+        <div class="hero-showcase">
+          <article class="showcase-card marquee-card">
+            <span class="showcase-badge">Platform Snapshot</span>
+            <h2 id="spotlightTitle">Solar Dominion</h2>
+            <p id="spotlightMeta">Sci-Fi Thriller - Releases August 22, 2026</p>
+            <p id="spotlightCopy">
+              A high-stakes orbital thriller with global first-day demand already rising.
+            </p>
+            <div class="spotlight-stats">
+              <div>
+                <span>Wish</span>
+                <strong id="spotlightWish">18,420</strong>
+              </div>
+              <div>
+                <span>Reserve</span>
+                <strong id="spotlightReserve">4,680</strong>
+              </div>
+              <div>
+                <span>Revenue</span>
+                <strong id="spotlightRevenue">$117K</strong>
+              </div>
+            </div>
+          </article>
+          <article class="showcase-card platform-flow">
+            <div class="flow-chip">Landing</div>
+            <div class="flow-chip">Auth</div>
+            <div class="flow-chip">Viewer</div>
+            <div class="flow-chip">Creator</div>
+            <div class="flow-chip">Admin</div>
+          </article>
+        </div>
+      </section>
+
+      <section class="metrics-strip">
+        <article class="metric-card">
+          <span>Tracked Titles</span>
+          <strong id="metricTitles">12</strong>
+          <p>Across upcoming, newly released, and library stages.</p>
+        </article>
+        <article class="metric-card">
+          <span>Wish Demand</span>
+          <strong id="metricWish">96,340</strong>
+          <p>Users signaling pre-release intent before premiere.</p>
+        </article>
+        <article class="metric-card">
+          <span>Reserved Revenue</span>
+          <strong id="metricRevenue">$682K</strong>
+          <p>Projected cash collected before public theatrical release.</p>
+        </article>
+        <article class="metric-card">
+          <span>Phase 1 Modules</span>
+          <strong>5</strong>
+          <p>Landing, auth, viewer, creator, and admin in one shell.</p>
+        </article>
+      </section>
+
+      <section class="landing-grid">
+        <article class="panel-card">
+          <p class="section-kicker">Viewer Experience</p>
+          <h2>Upcoming, New Release, and Old Movies</h2>
+          <p>Movie discovery, wish lists, booked movies, reward points, and secure preview playback.</p>
+        </article>
+        <article class="panel-card">
+          <p class="section-kicker">Creator Workspace</p>
+          <h2>Upload, Preview, And Publish</h2>
+          <p>Manage posters, music, budget, expected revenue, and decide where titles appear.</p>
+        </article>
+        <article class="panel-card">
+          <p class="section-kicker">Admin Oversight</p>
+          <h2>Review Publishing And Platform Health</h2>
+          <p>Approve releases, highlight sections, monitor rewards, and keep the catalog organized.</p>
+        </article>
+      </section>
+    </section>
+
+    <section class="view-section" data-view="auth">
+      <div class="auth-shell">
+        <article class="auth-aside">
+          <p class="section-kicker">Admin Access</p>
+          <h2>Enter the Cine Vault admin console</h2>
+          <p>
+            This sign-in page is only for Admin and Super Admin access.
+            Viewer and Creator accounts should use their own entry points instead of this admin console.
+          </p>
+          <div class="auth-feature-list">
+            <div>
+              <strong>Admin Console</strong>
+              <span>Manage users, classifications, library approvals, and archive controls</span>
+            </div>
+            <div>
+              <strong>Super Admin</strong>
+              <span>Access platform governance, taxonomy authority, and top-level moderation tools</span>
+            </div>
+          </div>
+        </article>
+        <article class="auth-card">
+          <div class="auth-card-top">
+            <p class="section-kicker">Sign In</p>
+            <h3>Admin and Super Admin only</h3>
+          </div>
+          <form class="auth-form" id="authForm">
+            <label class="field">
+              <span>Email Address</span>
+              <input type="email" id="authEmail" placeholder="Enter your email" value="kamarthi.anil@gmail.com">
+            </label>
+            <label class="field">
+              <span>Password</span>
+              <input type="password" id="authPassword" placeholder="Enter your password" value="asd">
+            </label>
+            <div class="auth-link-row">
+              <a href="#" class="auth-link">Forgot password?</a>
+            </div>
+            <div class="button-row">
+              <button type="submit" class="primary-btn">Sign In</button>
+            </div>
+            <p class="helper-text" id="authHelper">
+              Sign in here with an Admin or Super Admin account to open the admin console.
+            </p>
+          </form>
+        </article>
+      </div>
+    </section>
+
+    <section class="view-section is-active" data-view="viewer">
+      <section class="catalog-hero">
+        <div class="catalog-copy">
+          <h1 id="viewerHeadline">Up Coming</h1>
+          <p id="viewerSubhead">Get ready for the biggest blockbusters</p>
+        </div>
+        <div class="catalog-badge">
+          <span id="viewerCount">10 Movies</span>
+        </div>
+      </section>
+
+      <section class="movie-grid-section">
+        <div id="movieGrid" class="movie-grid poster-grid"></div>
+      </section>
+
+      <div id="viewerDetailModal" class="viewer-detail-modal hidden" aria-hidden="true">
+        <div class="viewer-detail-backdrop" data-viewer-detail-close></div>
+        <section class="viewer-detail-section">
+        <article class="viewer-detail-card" role="dialog" aria-modal="true" aria-labelledby="detailTitle">
+          <div class="viewer-detail-media">
+            <div class="viewer-detail-poster-frame">
+              <img id="detailPosterImage" class="viewer-detail-poster" src="/media/posters/no-poster.svg" alt="Selected title poster" loading="lazy">
+            </div>
+          </div>
+          <div class="viewer-detail-copy">
+            <div class="viewer-detail-head">
+              <p class="section-kicker">Title Details</p>
+              <button type="button" class="icon-btn" data-viewer-detail-close aria-label="Close title details">x</button>
+            </div>
+            <h2 id="detailTitle">No Title Yet</h2>
+            <p id="detailStage" class="viewer-detail-stage">Upcoming titles will appear here after admin publishing.</p>
+            <p id="detailDescription" class="viewer-detail-description">Add your first title from the admin panel to begin building the library.</p>
+
+            <div class="viewer-detail-meta-grid">
+              <article class="viewer-detail-meta-card">
+                <span>Budget</span>
+                <strong id="detailBudget">TBD</strong>
+              </article>
+              <article class="viewer-detail-meta-card">
+                <span>Target Stars</span>
+                <strong id="detailExpected">TBD</strong>
+              </article>
+              <article class="viewer-detail-meta-card">
+                <span>Wish Count</span>
+                <strong id="detailWish">0</strong>
+              </article>
+              <article class="viewer-detail-meta-card">
+                <span>Reserve Count</span>
+                <strong id="detailReserve">0</strong>
+              </article>
+              <article class="viewer-detail-meta-card">
+                <span>Posters</span>
+                <strong id="detailPosterCount">No posters</strong>
+              </article>
+              <article class="viewer-detail-meta-card">
+                <span>Music</span>
+                <strong id="detailMusicStatus">No music</strong>
+              </article>
+            </div>
+
+            <div class="viewer-detail-reward-row">
+              <span>Reward Bonus</span>
+              <strong id="detailRewardBonus">No rewards</strong>
+            </div>
+
+            <div class="button-row viewer-detail-actions">
+              <button type="button" class="primary-btn" id="detailWishButton">Wish To Watch</button>
+              <button type="button" class="ghost-btn" id="detailReserveButton">Reserve Now</button>
+            </div>
+          </div>
+        </article>
+        </section>
+      </div>
+
+      <section class="vault-section compact-vault">
+        <div class="panel-heading vault-heading">
+          <div>
+            <p class="section-kicker">Screening Vault</p>
+            <h2>Secure preview playback remains available below the main catalog</h2>
+          </div>
+        </div>
+
+        <section class="player-card">
+          <div class="player-frame">
+            <span class="live-pill" id="liveBadge">OFFLINE</span>
+            <video
+              id="video"
+              class="video-player"
+              controls
+              autoplay
+              playsinline
+              muted
+            ></video>
+          </div>
+
+          <form id="streamForm" class="control-panel">
+            <div class="mode-tabs" role="tablist" aria-label="Playback mode">
+              <button type="button" class="mode-tab is-active" data-mode="stream">Stream URL</button>
+              <button type="button" class="mode-tab" data-mode="vcnr">VCNR File</button>
+            </div>
+
+            <section class="mode-panel is-active" data-panel="stream">
+              <label class="field">
+                <span>Stream URL</span>
+                <input
+                  id="streamUrl"
+                  name="streamUrl"
+                  type="url"
+                  placeholder="https://example.com/live/stream.m3u8"
+                >
+              </label>
+
+              <div class="button-row">
+                <button type="submit" class="primary-btn">Play Stream</button>
+                <button type="button" id="loadDemo" class="ghost-btn">Load Demo</button>
+              </div>
+            </section>
+
+            <section class="mode-panel" data-panel="vcnr">
+              <label class="field">
+                <span>VCNR URL (optional)</span>
+                <input
+                  id="vcnrUrl"
+                  name="vcnrUrl"
+                  type="url"
+                  placeholder="https://example.com/video.vcnr"
+                >
+              </label>
+
+              <div id="sampleBox" class="sample-box hidden" aria-live="polite">
+                <div>
+                  <strong>Sample file available</strong>
+                  <p id="sampleLabel">Load a hosted sample VCNR file into the URL box.</p>
+                </div>
+                <button type="button" id="sampleLoad" class="ghost-btn">Load Sample File</button>
+              </div>
+
+              <p class="helper-text helper-divider">or choose a local secure file</p>
+
+              <label class="field">
+                <span>VCNR File</span>
+                <input
+                  id="vcnrFile"
+                  name="vcnrFile"
+                  type="file"
+                  accept=".vcnr"
+                >
+              </label>
+
+              <label class="field">
+                <span>Passcode</span>
+                <input
+                  id="passcode"
+                  name="passcode"
+                  type="password"
+                  placeholder="Enter the VCNR passcode"
+                  autocomplete="current-password"
+                >
+              </label>
+
+              <div class="button-row">
+                <button type="button" id="playVcnr" class="primary-btn">Unlock And Play</button>
+              </div>
+            </section>
+
+            <div class="button-row">
+              <button type="button" id="stopStream" class="ghost-btn">Stop</button>
+            </div>
+
+            <p id="status" class="status-text">
+              Enter a live stream URL or secure VCNR file to begin screening.
+            </p>
+          </form>
+        </section>
+
+        <pre id="metadata" class="metadata-panel" aria-label="VCNR metadata"></pre>
+      </section>
+    </section>
+
+    <section class="view-section" data-view="producer">
+      <section class="workspace-grid">
+        <article class="workspace-panel">
+          <div class="panel-heading">
+            <div>
+              <p class="section-kicker">Producer Panel</p>
+              <h2>Upload movie details, preview assets, and publish by section</h2>
+            </div>
+            <span class="workspace-badge">Producer Access</span>
+          </div>
+          <form id="producerForm" class="workspace-form">
+            <label class="field">
+              <span>Movie Title</span>
+              <input id="producerTitle" type="text" placeholder="Enter movie title">
+            </label>
+            <label class="field">
+              <span>Genre</span>
+              <input id="producerGenre" type="text" placeholder="Sci-Fi Thriller, Action, Drama">
+            </label>
+            <label class="field">
+              <span>Budget</span>
+              <input id="producerBudget" type="text" placeholder="$48M">
+            </label>
+            <label class="field">
+              <span>Target Stars</span>
+              <input id="producerExpected" type="text" placeholder="$92M">
+            </label>
+            <label class="field">
+              <span>Preview Summary</span>
+              <input id="producerDescription" type="text" placeholder="Short pitch, posters, music, and release story">
+            </label>
+            <label class="field">
+              <span>Publish Section</span>
+              <select id="producerStage" class="select-input">
+                <option value="upcoming">Upcoming Movies</option>
+                <option value="released">New Released Movies</option>
+                <option value="library">Old Movies</option>
+              </select>
+            </label>
+            <div class="button-row">
+              <button type="button" class="primary-btn" id="producerPreviewButton">Preview Listing</button>
+              <button type="submit" class="secondary-action">Publish Movie</button>
+            </div>
+            <p class="helper-text" id="producerHelper">
+              This Phase 1 producer panel prepares the movie card and publish target before real uploads are connected.
+            </p>
+          </form>
+        </article>
+
+        <article class="workspace-panel">
+          <p class="section-kicker">Producer Queue</p>
+          <h2>Preview and publishing history</h2>
+          <div id="producerQueue" class="queue-list"></div>
+        </article>
+      </section>
+    </section>
+
+    <section class="view-section" data-view="admin">
+      <section class="admin-shell">
+        <aside class="admin-sidebar">
+          <div class="admin-sidebar-top">
+            <div class="admin-brand">
+              <span class="admin-brand-icon">C</span>
+              <div>
+                <strong>Cine Vault</strong>
+                <small>Admin Console</small>
+              </div>
+            </div>
+            <div class="admin-access-card">
+              <span class="admin-access-label">Signed In As</span>
+              <strong id="adminSessionRole">Admin Session</strong>
+              <p id="adminSessionEmail">Control panel access is active for this session.</p>
+            </div>
+          </div>
+
+          <nav class="admin-nav" aria-label="Admin sections">
+            <button type="button" class="admin-nav-link hidden" id="superAdminNavLink" data-admin-panel-target="super-admin">
+              <span>Super Admin</span>
+              <b id="adminSuperCount">0</b>
+            </button>
+            <button type="button" class="admin-nav-link hidden" id="adminStarPricingNavLink" data-admin-panel-target="star-pricing">
+              <span>Star Pricing</span>
+              <b id="adminStarPricingNavValue">Rs 50</b>
+            </button>
+            <button type="button" class="admin-nav-link is-active" data-admin-panel-target="users">
+              <span>Manage Users</span>
+              <b id="adminUsersCount">0</b>
+            </button>
+            <button type="button" class="admin-nav-link" data-admin-panel-target="categories">
+              <span>Manage Categories</span>
+              <b id="adminCategoriesCount">3</b>
+            </button>
+            <button type="button" class="admin-nav-link" data-admin-panel-target="library">
+              <span>Manage Library</span>
+              <b id="adminLibraryCount">0</b>
+            </button>
+            <button type="button" class="admin-nav-link" data-admin-panel-target="delivery-queue" id="adminDeliveryQueueNavLink">
+              <span>Delivery Queue</span>
+              <b id="adminDeliveryQueueCount">0</b>
+            </button>
+            <button type="button" class="admin-nav-link admin-nav-sub-link" id="adminArchiveNavLink">
+              <span>Archive</span>
+              <b id="adminArchiveNavCount">0</b>
+            </button>
+          </nav>
+
+          <div class="admin-sidebar-note">
+            <p class="section-kicker">Suggested Admin Scope</p>
+            <ul class="admin-sidebar-list">
+              <li>Role and account access control</li>
+              <li>Category placement and featured section rules</li>
+              <li>Library quality review, edits, and archive flow</li>
+            </ul>
+          </div>
+        </aside>
+
+        <div class="admin-main">
+          <header class="admin-header">
+            <div>
+              <p class="section-kicker">Admin Panel</p>
+            </div>
+            <div class="admin-header-actions">
+              <button type="button" class="ghost-btn" id="adminOpenViewer">Open Viewer Dashboard</button>
+              <button type="button" class="ghost-btn admin-header-signout" id="adminHeaderSignoutButton">Sign Out</button>
+            </div>
+          </header>
+
+          <p class="helper-text admin-helper-banner hidden" id="adminHelper"></p>
+
+          <section class="admin-panel" data-admin-panel-view="super-admin">
+            <div class="admin-summary-grid">
+              <article class="admin-summary-card">
+                <span>Super Admin Accounts</span>
+                <strong id="adminSuperUsers">0</strong>
+                <p>Highest-trust accounts with platform-wide governance and override controls.</p>
+              </article>
+              <article class="admin-summary-card">
+                <span>Managed Taxonomies</span>
+                <strong id="adminTaxonomyTotal">0</strong>
+                <p>Combined categories, genres, and grades currently maintained in the system.</p>
+              </article>
+              <article class="admin-summary-card">
+                <span>Platform Roles</span>
+                <strong id="adminRoleCount">5</strong>
+                <p>Super Admin, Admin, Viewers, Creators, and Advertisers in the active role model.</p>
+              </article>
+            </div>
+
+            <article class="workspace-panel admin-panel-card">
+              <p class="section-kicker">Super Admin Console</p>
+              <h2>Platform governance, taxonomy control, and future top-level operations</h2>
+              <div class="super-admin-grid">
+                <section class="super-admin-block">
+                  <h3>Platform Governance</h3>
+                  <div class="super-admin-pill-list">
+                    <span class="super-admin-pill">Role governance</span>
+                    <span class="super-admin-pill">Catalog structure</span>
+                    <span class="super-admin-pill">Taxonomy authority</span>
+                    <span class="super-admin-pill">Release rules</span>
+                    <span class="super-admin-pill">Wallet policy</span>
+                    <span class="super-admin-pill">Audit expansion</span>
+                  </div>
+                </section>
+                <section class="super-admin-block">
+                  <h3>Current Focus</h3>
+                  <ul class="admin-sidebar-list">
+                    <li>Keep catalog classifications clean and searchable</li>
+                    <li>Control who can create and moderate titles</li>
+                    <li>Prepare the system for richer title creation next</li>
+                  </ul>
+                </section>
+              </div>
+            </article>
+
+            <article class="workspace-panel admin-panel-card">
+              <p class="section-kicker">Taxonomy Manager</p>
+              <h2>Manage categories, genres, and grades</h2>
+              <div id="superAdminTaxonomyGrid" class="taxonomy-grid"></div>
+            </article>
+          </section>
+
+          <section class="admin-panel" data-admin-panel-view="star-pricing">
+            <div class="admin-summary-grid">
+              <article class="admin-summary-card">
+                <span>1 Star Price</span>
+                <strong id="adminStarPriceSummary">Rs 50</strong>
+                <p>New titles snapshot this base rate when they are created.</p>
+              </article>
+            </div>
+
+            <article class="workspace-panel admin-panel-card">
+              <p class="section-kicker">Star Pricing</p>
+              <h2>Set the active per-star price for newly created titles</h2>
+              <p class="helper-text">This value is saved as the live pricing snapshot. Existing titles keep their own stored pricing.</p>
+              <form id="adminStarPricingForm" class="admin-user-editor-form">
+                <div class="admin-user-editor-grid">
+                  <label class="field">
+                    <span>1 Star Price - INR</span>
+                    <input id="adminStarPriceInr" type="number" min="1" step="1" value="50">
+                  </label>
+                  <label class="field">
+                    <span>1 Star Price - USD</span>
+                    <input id="adminStarPriceUsd" type="number" min="0" step="0.01" value="0">
+                  </label>
+                  <label class="field">
+                    <span>1 Star Price - EUR</span>
+                    <input id="adminStarPriceEur" type="number" min="0" step="0.01" value="0">
+                  </label>
+                  <label class="field">
+                    <span>Effective From</span>
+                    <input id="adminStarPriceEffectiveFrom" type="datetime-local">
+                  </label>
+                </div>
+                <div class="taxonomy-form-actions">
+                  <button type="submit" class="primary-btn">Save Star Pricing</button>
+                </div>
+                <p id="adminStarPricingFeedback" class="helper-text" aria-live="polite"></p>
+              </form>
+            </article>
+          </section>
+
+          <section class="admin-panel is-active" data-admin-panel-view="users">
+            <article class="workspace-panel admin-panel-card">
+              <div class="admin-list-header">
+                <div>
+                  <p class="section-kicker">Manage Users</p>
+                </div>
+                <div class="admin-list-tools">
+                  <input id="adminUserSearch" class="admin-search-input" type="text" placeholder="Search users...">
+                  <select id="adminUserSort" class="select-input admin-toolbar-select">
+                    <option value="name-desc">Newest Name</option>
+                    <option value="name-asc">Name A-Z</option>
+                    <option value="role-asc">Role A-Z</option>
+                    <option value="status-asc">Status</option>
+                    <option value="star_balance-desc">Stars High-Low</option>
+                    <option value="star_balance-asc">Stars Low-High</option>
+                    <option value="disc_balance-desc">Discs High-Low</option>
+                    <option value="disc_balance-asc">Discs Low-High</option>
+                  </select>
+                  <button type="button" class="primary-btn" id="adminAddUserButton">Add New User</button>
+                </div>
+              </div>
+              <div id="adminUserList" class="admin-user-table"></div>
+            </article>
+
+            <div class="admin-summary-grid">
+              <article class="admin-summary-card">
+                <span>Total Accounts</span>
+                <strong id="adminTotalUsers">0</strong>
+                <p>All viewer, creator, admin, and super admin accounts in the platform.</p>
+              </article>
+              <article class="admin-summary-card">
+                <span>Active Accounts</span>
+                <strong id="adminActiveUsers">0</strong>
+                <p>Users currently allowed to sign in and access their assigned workspace.</p>
+              </article>
+              <article class="admin-summary-card">
+                <span>Pending Review</span>
+                <strong id="adminPendingUsers">0</strong>
+                <p>Accounts waiting for approval, onboarding, or a role update.</p>
+              </article>
+            </div>
+          </section>
+
+          <section class="admin-panel" data-admin-panel-view="categories">
+            <div class="admin-summary-grid">
+              <article class="admin-summary-card">
+                <span>Classification Items</span>
+                <strong id="adminTaxonomyItemsCount">0</strong>
+                <p>Combined categories, genres, and grades available for content tagging.</p>
+              </article>
+              <article class="admin-summary-card">
+                <span>Active Items</span>
+                <strong id="adminTaxonomyActiveCount">0</strong>
+                <p>Items currently enabled for search, forms, and catalog mapping.</p>
+              </article>
+              <article class="admin-summary-card">
+                <span>Classification Groups</span>
+                <strong id="adminTaxonomyGroupCount">4</strong>
+                <p>Categories, genres, and grades managed from one admin workspace.</p>
+              </article>
+            </div>
+
+            <article class="workspace-panel admin-panel-card">
+              <div class="admin-list-header">
+                <div>
+                  <p class="section-kicker">Manage Classification</p>
+                </div>
+                <div class="admin-taxonomy-tools">
+                  <input id="adminTaxonomySearch" class="admin-search-input" type="text" placeholder="Search categories, genres, grades...">
+                  <select id="adminTaxonomyKind" class="select-input admin-toolbar-select">
+                    <option value="all">All Types</option>
+                    <option value="categories">Categories</option>
+                    <option value="genres">Genres</option>
+                    <option value="grades">Grades</option>
+                  </select>
+                  <select id="adminTaxonomySort" class="select-input admin-toolbar-select">
+                    <option value="kind-asc">Type A-Z</option>
+                    <option value="name-asc">Name A-Z</option>
+                    <option value="name-desc">Name Z-A</option>
+                    <option value="sort_order-asc">Order Low-High</option>
+                    <option value="sort_order-desc">Order High-Low</option>
+                    <option value="is_active-desc">Active First</option>
+                    <option value="is_active-asc">Inactive First</option>
+                  </select>
+                  <button type="button" class="primary-btn" id="adminAddTaxonomyButton">Add New</button>
+                </div>
+              </div>
+              <div id="adminTaxonomyList" class="admin-taxonomy-table"></div>
+            </article>
+
+          </section>
+
+          <section class="admin-panel" data-admin-panel-view="library">
+            <article class="workspace-panel admin-panel-card">
+              <p class="section-kicker">Manage Library</p>
+              <div class="admin-list-header admin-list-header-tools-only">
+                <div></div>
+                <div class="admin-library-tools">
+                  <input id="adminLibrarySearch" class="admin-search-input" type="search" placeholder="Search titles...">
+                  <select id="adminLibraryStage" class="select-input admin-toolbar-select">
+                    <option value="all">All Stages</option>
+                    <option value="upcoming">Upcoming</option>
+                    <option value="released">Released</option>
+                    <option value="library">Library</option>
+                  </select>
+                  <select id="adminLibrarySort" class="select-input admin-toolbar-select">
+                    <option value="title-asc">A-Z Title</option>
+                    <option value="title-desc">Z-A Title</option>
+                    <option value="stage-asc">Stage</option>
+                    <option value="releaseDate-desc">Newest Release</option>
+                    <option value="releaseDate-asc">Oldest Release</option>
+                    <option value="wishCount-desc">Highest Wish Count</option>
+                    <option value="reserveCount-desc">Highest Reserve Count</option>
+                  </select>
+                  <button type="button" class="primary-btn" id="adminAddLibraryButton">Add New Title</button>
+                </div>
+              </div>
+              <div id="adminMovieList" class="admin-movie-list"></div>
+            </article>
+
+            <article class="workspace-panel admin-panel-card" id="adminArchiveSection">
+              <p class="section-kicker">Archive</p>
+              <div id="adminArchiveMovieList" class="admin-movie-list"></div>
+            </article>
+
+            <div class="admin-summary-grid">
+              <article class="admin-summary-card">
+                <span>Tracked Titles</span>
+                <strong id="adminTrackedTitles">0</strong>
+                <p>Movies currently available across the active and archived library records.</p>
+              </article>
+              <article class="admin-summary-card">
+                <span>Archive Count</span>
+                <strong id="adminArchiveCount">0</strong>
+                <p>Titles hidden from the public catalog but still preserved for admin control.</p>
+              </article>
+              <article class="admin-summary-card">
+                <span>Review Queue</span>
+                <strong id="adminQueueTotal">0</strong>
+                <p>Creator submissions and publishing items needing library attention.</p>
+              </article>
+            </div>
+
+            <article class="workspace-panel admin-panel-card">
+              <p class="section-kicker">Review Queue</p>
+              <div id="adminReviewList" class="queue-list"></div>
+            </article>
+          </section>
+
+          <section class="admin-panel" data-admin-panel-view="delivery-queue">
+            <article class="workspace-panel admin-panel-card">
+              <div class="admin-list-header admin-list-header-tools-only">
+                <div>
+                  <p class="section-kicker">Delivery Queue</p>
+                  <h2 id="adminDeliveryQueueMovieTitle">Open a title queue from the library</h2>
+                  <p id="adminDeliveryQueueMovieSubtitle" class="helper-text">Select a title row and open its queue to review device transfers, status, and progress.</p>
+                </div>
+                <div class="admin-library-tools">
+                  <input id="adminDeliveryQueueSearch" class="admin-search-input" type="search" placeholder="Search users or devices...">
+                  <select id="adminDeliveryQueueStatus" class="select-input admin-toolbar-select">
+                    <option value="all">All States</option>
+                    <option value="accepted">Accepted</option>
+                    <option value="queued">Queued</option>
+                    <option value="slot_granted">Slot Granted</option>
+                    <option value="downloading">Downloading</option>
+                    <option value="downloaded">Downloaded</option>
+                    <option value="failed">Failed</option>
+                  </select>
+                  <button type="button" class="primary-btn" id="adminDeliveryQueueRefresh">Refresh Queue</button>
+                </div>
+              </div>
+              <div id="adminDeliveryQueueSummary" class="admin-summary-grid"></div>
+              <div id="adminDeliveryQueueList" class="queue-list"></div>
+            </article>
+          </section>
+        </div>
+      </section>
+    </section>
+  </main>
+
+  <div id="adminUserModal" class="admin-modal hidden" aria-hidden="true">
+    <div class="admin-modal-backdrop" data-admin-modal-close></div>
+    <div class="admin-modal-card" role="dialog" aria-modal="true" aria-labelledby="adminUserModalTitle">
+      <div class="admin-modal-header">
+        <div>
+          <p class="section-kicker">Manage User</p>
+          <h2 id="adminUserModalTitle">Add New User</h2>
+        </div>
+        <button type="button" class="icon-btn" data-admin-modal-close aria-label="Close dialog">x</button>
+      </div>
+
+      <form id="adminUserEditor" class="admin-user-editor-form">
+        <input id="adminUserEditId" type="hidden">
+        <p id="adminUserModalCopy" class="helper-text">Create a new platform account with a role, status, and starting star balance.</p>
+        <div class="admin-user-editor-grid">
+          <label class="field">
+            <span>Name</span>
+            <input id="adminUserName" type="text" placeholder="Enter full name">
+          </label>
+          <label class="field">
+            <span>Email</span>
+            <input id="adminUserEmail" type="email" placeholder="Enter email address">
+          </label>
+          <label class="field" id="adminUserPasswordField">
+            <span>Password</span>
+            <input id="adminUserPassword" type="password" placeholder="Required for new user">
+          </label>
+          <label class="field">
+            <span>Role</span>
+            <select id="adminUserRole" class="select-input">
+              <option value="viewer">Viewer</option>
+              <option value="creator">Creator</option>
+              <option value="advertiser">Advertiser</option>
+              <option value="admin">Admin</option>
+              <option value="super_admin">Super Admin</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>Status</span>
+            <select id="adminUserStatus" class="select-input">
+              <option value="active">Active</option>
+              <option value="pending">Pending</option>
+              <option value="disabled">Disabled</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>Starting Star Balance</span>
+            <input id="adminUserPoints" type="number" min="0" step="1" value="0">
+          </label>
+        </div>
+        <div class="taxonomy-form-actions">
+          <button type="submit" class="primary-btn" id="adminUserSaveButton">Save User</button>
+          <button type="button" class="ghost-btn" id="adminUserCancelButton">Close</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div id="adminDeleteDialog" class="admin-modal hidden" aria-hidden="true">
+    <div class="admin-modal-backdrop" data-admin-delete-close></div>
+    <div class="admin-modal-card admin-confirm-card" role="dialog" aria-modal="true" aria-labelledby="adminDeleteTitle">
+      <div class="admin-modal-header">
+        <div>
+          <p class="section-kicker">Confirm Action</p>
+          <h2 id="adminDeleteTitle">Review this action</h2>
+        </div>
+        <button type="button" class="icon-btn" data-admin-delete-close aria-label="Close dialog">x</button>
+      </div>
+      <p id="adminDeleteCopy" class="helper-text">Please review this action before continuing.</p>
+      <div class="taxonomy-form-actions">
+        <button type="button" class="primary-btn" id="adminDeleteConfirmButton">Continue</button>
+        <button type="button" class="ghost-btn" id="adminDeleteCancelButton">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="adminTaxonomyModal" class="admin-modal hidden" aria-hidden="true">
+    <div class="admin-modal-backdrop" data-admin-taxonomy-close></div>
+    <div class="admin-modal-card" role="dialog" aria-modal="true" aria-labelledby="adminTaxonomyModalTitle">
+      <div class="admin-modal-header">
+        <div>
+          <p class="section-kicker">Manage Classification</p>
+          <h2 id="adminTaxonomyModalTitle">Add Classification Item</h2>
+        </div>
+        <button type="button" class="icon-btn" data-admin-taxonomy-close aria-label="Close dialog">x</button>
+      </div>
+
+      <form id="adminTaxonomyEditor" class="admin-user-editor-form">
+        <input id="adminTaxonomyEditId" type="hidden">
+        <p id="adminTaxonomyModalCopy" class="helper-text">Create a new category, genre, grade, or language for the platform.</p>
+        <div class="admin-user-editor-grid">
+          <label class="field">
+            <span>Type</span>
+            <select id="adminTaxonomyEditorKind" class="select-input">
+              <option value="categories">Category</option>
+              <option value="genres">Genre</option>
+              <option value="grades">Grade</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>Name</span>
+            <input id="adminTaxonomyName" type="text" placeholder="Enter display name">
+          </label>
+          <label class="field">
+            <span>Slug</span>
+            <input id="adminTaxonomySlug" type="text" placeholder="auto-generated-slug">
+          </label>
+          <label class="field">
+            <span>Sort Order</span>
+            <input id="adminTaxonomySortOrder" type="number" min="0" step="1" value="1">
+          </label>
+          <label class="field">
+            <span>Status</span>
+            <select id="adminTaxonomyStatus" class="select-input">
+              <option value="true">Active</option>
+              <option value="false">Inactive</option>
+            </select>
+          </label>
+          <label class="field field-full">
+            <span>Description</span>
+            <textarea id="adminTaxonomyDescription" placeholder="Optional description"></textarea>
+          </label>
+        </div>
+        <div class="taxonomy-form-actions">
+          <button type="submit" class="primary-btn">Save Item</button>
+          <button type="button" class="ghost-btn" id="adminTaxonomyCancelButton">Close</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div id="adminLibraryModal" class="admin-modal hidden" aria-hidden="true">
+    <div class="admin-modal-backdrop" data-admin-library-close></div>
+    <div class="admin-modal-card" role="dialog" aria-modal="true" aria-labelledby="adminLibraryModalTitle">
+      <div class="admin-modal-header">
+        <div>
+          <p class="section-kicker">Manage Title</p>
+          <h2 id="adminLibraryModalTitle">Add New Title</h2>
+        </div>
+        <button type="button" class="icon-btn" data-admin-library-close aria-label="Close dialog">x</button>
+      </div>
+
+      <form id="adminLibraryEditor" class="admin-user-editor-form">
+        <input id="adminLibraryEditId" type="hidden">
+        <p id="adminLibraryModalCopy" class="helper-text">Create a title record for the app library and place it in the correct section.</p>
+        <div class="admin-user-editor-grid">
+          <label class="field">
+            <span>Title Category</span>
+            <select id="adminLibraryCategory" class="select-input">
+              <option value="" selected>Select Category</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>Title Name</span>
+            <input id="adminLibraryTitle" type="text" placeholder="Enter title name">
+          </label>
+          <label class="field">
+            <span>Title Caption</span>
+            <input id="adminLibraryCaption" type="text" placeholder="Enter title caption">
+          </label>
+          <label class="field">
+            <span>Stage</span>
+            <select id="adminLibraryMovieStage" class="select-input">
+              <option value="upcoming">Upcoming</option>
+              <option value="released">Released</option>
+              <option value="library">Library</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>Expected date</span>
+            <input id="adminLibraryExpectedDate" type="date" placeholder="DD-MM-YYYY">
+          </label>
+          <div class="field field-full admin-library-story-row">
+            <label class="field">
+              <span>Genre</span>
+              <select id="adminLibraryGenre" class="select-input admin-multi-select" multiple size="6"></select>
+            </label>
+            <label class="field field-span-2">
+              <span>Story Line</span>
+              <textarea id="adminLibraryDescription" placeholder="Enter story line"></textarea>
+            </label>
+          </div>
+          <div class="field field-full">
+            <span>Cast & Credits</span>
+            <div id="adminLibraryCastCredits" class="admin-cast-credits-list"></div>
+            <div class="admin-cast-credits-actions">
+              <button type="button" class="ghost-btn" id="adminLibraryAddCastCreditButton">Add Row</button>
+            </div>
+          </div>
+        </div>
+        <div class="taxonomy-form-actions">
+          <button type="submit" class="primary-btn" id="adminLibrarySaveButton">Save Title</button>
+          <button type="button" class="ghost-btn" id="adminLibraryCancelButton">Close</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div id="adminPricingTargetsModal" class="admin-modal hidden" aria-hidden="true">
+    <div class="admin-modal-backdrop" data-admin-pricing-close></div>
+    <div class="admin-modal-card" role="dialog" aria-modal="true" aria-labelledby="adminPricingTargetsTitle">
+      <div class="admin-modal-header">
+        <div>
+          <p class="section-kicker">Pricing & Targets</p>
+          <h2 id="adminPricingTargetsTitle">Configure Title Pricing</h2>
+        </div>
+        <button type="button" class="icon-btn" data-admin-pricing-close aria-label="Close dialog">x</button>
+      </div>
+
+      <form id="adminPricingTargetsForm" class="admin-user-editor-form">
+        <input id="adminPricingTargetsMovieId" type="hidden">
+        <p id="adminPricingTargetsCopy" class="helper-text">Set online quality tiers, theatre stars, and the total target stars for this title.</p>
+        <div class="admin-user-editor-grid">
+          <div class="field field-full">
+            <span>Stars Required - Online</span>
+            <div id="adminPricingOnlineRows" class="admin-pricing-rows"></div>
+            <div class="admin-cast-credits-actions">
+              <button type="button" class="ghost-btn" id="adminPricingAddOnlineRowButton">Add Row</button>
+            </div>
+          </div>
+          <label class="field">
+            <span>Stars Required - Theatre</span>
+            <input id="adminPricingTheatreStars" type="number" min="1" max="10" step="1" value="3" placeholder="1 to 10">
+          </label>
+          <label class="field">
+            <span>Target Stars</span>
+            <input id="adminPricingTargetStars" type="number" min="0" step="1" placeholder="Target total stars">
+          </label>
+        </div>
+        <div class="taxonomy-form-actions">
+          <button type="submit" class="primary-btn">Save Pricing</button>
+          <button type="button" class="ghost-btn" id="adminPricingTargetsCancelButton">Close</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div id="adminReleaseMainContentModal" class="admin-modal hidden" aria-hidden="true">
+    <div class="admin-modal-backdrop" data-admin-release-main-close></div>
+    <div class="admin-modal-card admin-compact-modal" role="dialog" aria-modal="true" aria-labelledby="adminReleaseMainContentTitle">
+      <div class="admin-modal-header">
+        <div>
+          <p class="section-kicker">Release Main Content</p>
+          <h2 id="adminReleaseMainContentTitle">Schedule Movie Release</h2>
+        </div>
+        <button type="button" class="icon-btn" data-admin-release-main-close aria-label="Close dialog">x</button>
+      </div>
+
+      <form id="adminReleaseMainContentForm" class="admin-user-editor-form">
+        <input id="adminReleaseMainContentMovieId" type="hidden">
+        <p id="adminReleaseMainContentCopy" class="helper-text">Choose a future release time and paste the passcode that will unlock playback.</p>
+        <p class="helper-text">The release time must always be in the future.</p>
+        <div class="admin-user-editor-grid">
+          <label class="field">
+            <span>Movie Release Date Time (IST)</span>
+            <input id="adminReleaseMainContentDateTime" type="datetime-local">
+          </label>
+          <label class="field">
+            <span>Passcode</span>
+            <input id="adminReleaseMainContentPasscode" type="text" placeholder="Paste the release passcode">
+          </label>
+        </div>
+        <div class="taxonomy-form-actions">
+          <button type="submit" class="primary-btn">Save Release Main Content</button>
+          <button type="button" class="ghost-btn" id="adminReleaseMainContentCancelButton">Close</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div id="adminApprovalModal" class="admin-modal hidden" aria-hidden="true">
+    <div class="admin-modal-backdrop" data-admin-approval-close></div>
+    <div class="admin-modal-card admin-approval-modal-card" role="dialog" aria-modal="true" aria-labelledby="adminApprovalModalTitle">
+      <div class="admin-modal-header">
+        <div>
+          <p class="section-kicker">Approve Title</p>
+          <h2 id="adminApprovalModalTitle">Review Pending Changes</h2>
+        </div>
+        <button type="button" class="icon-btn" data-admin-approval-close aria-label="Close dialog">x</button>
+      </div>
+
+      <input id="adminApprovalMovieId" type="hidden">
+      <p id="adminApprovalCopy" class="helper-text">Review the differences before approving this title.</p>
+
+      <div class="admin-approval-review-layout">
+        <div>
+          <h3 class="admin-approval-section-title">Title Changes</h3>
+          <div id="adminApprovalDiffList" class="admin-approval-diff-list"></div>
+        </div>
+        <div>
+          <h3 class="admin-approval-section-title">Media Changes</h3>
+          <div id="adminApprovalAssetList" class="admin-approval-asset-list"></div>
+        </div>
+      </div>
+
+      <div class="taxonomy-form-actions">
+        <button type="button" class="primary-btn" id="adminApprovalApproveButton">Approve</button>
+        <button type="button" class="ghost-btn" id="adminApprovalCancelButton">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="adminPosterUploadModal" class="admin-modal hidden" aria-hidden="true">
+    <div class="admin-modal-backdrop" data-admin-poster-close></div>
+    <div class="admin-modal-card admin-poster-modal" role="dialog" aria-modal="true" aria-labelledby="adminPosterUploadTitle">
+      <div class="admin-modal-header">
+        <div>
+          <p class="section-kicker">Upload Posters</p>
+          <h2 id="adminPosterUploadTitle">Poster Assets</h2>
+        </div>
+        <button type="button" class="icon-btn" data-admin-poster-close aria-label="Close dialog">x</button>
+      </div>
+
+      <form id="adminPosterUploadForm" class="admin-user-editor-form">
+        <input id="adminPosterMovieId" type="hidden">
+        <div id="adminPosterAssetList" class="admin-poster-carousel"></div>
+        <label class="field">
+          <span>Poster Files</span>
+          <input id="adminPosterFiles" type="file" accept="image/*" multiple>
+        </label>
+        <div id="adminPosterUploadPreview" class="admin-upload-note hidden"></div>
+        <div class="taxonomy-form-actions">
+          <button type="submit" class="primary-btn">Upload Posters</button>
+          <button type="button" class="ghost-btn" id="adminPosterCancelButton">Close</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div id="adminTrailerUploadModal" class="admin-modal hidden" aria-hidden="true">
+    <div class="admin-modal-backdrop" data-admin-trailer-close></div>
+    <div class="admin-modal-card admin-media-preview-modal" role="dialog" aria-modal="true" aria-labelledby="adminTrailerUploadTitle">
+      <div class="admin-modal-header">
+        <div>
+          <p class="section-kicker">Upload Trailer</p>
+          <h2 id="adminTrailerUploadTitle">Trailer Asset</h2>
+        </div>
+        <button type="button" class="icon-btn" data-admin-trailer-close aria-label="Close dialog">x</button>
+      </div>
+
+      <form id="adminTrailerUploadForm" class="admin-user-editor-form">
+        <input id="adminTrailerMovieId" type="hidden">
+        <div id="adminTrailerAssetList" class="admin-media-carousel"></div>
+        <label class="field">
+          <span>Trailer File</span>
+          <input id="adminTrailerFile" type="file" accept="video/*">
+        </label>
+        <div class="taxonomy-form-actions">
+          <button type="submit" class="primary-btn">Upload Trailer</button>
+          <button type="button" class="ghost-btn" id="adminTrailerCancelButton">Close</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div id="adminGalleryUploadModal" class="admin-modal hidden" aria-hidden="true">
+    <div class="admin-modal-backdrop" data-admin-gallery-close></div>
+    <div class="admin-modal-card admin-media-preview-modal" role="dialog" aria-modal="true" aria-labelledby="adminGalleryUploadTitle">
+      <div class="admin-modal-header">
+        <div>
+          <p class="section-kicker">Upload Gallery</p>
+          <h2 id="adminGalleryUploadTitle">Gallery Asset</h2>
+        </div>
+        <button type="button" class="icon-btn" data-admin-gallery-close aria-label="Close dialog">x</button>
+      </div>
+
+      <form id="adminGalleryUploadForm" class="admin-user-editor-form">
+        <input id="adminGalleryMovieId" type="hidden">
+        <div id="adminGalleryAssetList" class="admin-media-carousel"></div>
+        <label class="field">
+          <span>Gallery File</span>
+          <input id="adminGalleryFile" type="file" accept="video/*">
+        </label>
+        <div class="taxonomy-form-actions">
+          <button type="submit" class="primary-btn">Upload Gallery</button>
+          <button type="button" class="ghost-btn" id="adminGalleryCancelButton">Close</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div id="adminMusicUploadModal" class="admin-modal hidden" aria-hidden="true">
+    <div class="admin-modal-backdrop" data-admin-music-close></div>
+    <div class="admin-modal-card admin-media-preview-modal" role="dialog" aria-modal="true" aria-labelledby="adminMusicUploadTitle">
+      <div class="admin-modal-header">
+        <div>
+          <p class="section-kicker">Upload Music</p>
+          <h2 id="adminMusicUploadTitle">Music Asset</h2>
+        </div>
+        <button type="button" class="icon-btn" data-admin-music-close aria-label="Close dialog">x</button>
+      </div>
+
+      <form id="adminMusicUploadForm" class="admin-user-editor-form">
+        <input id="adminMusicMovieId" type="hidden">
+        <div id="adminMusicAssetList" class="admin-media-carousel"></div>
+        <label class="field">
+          <span>Music File</span>
+          <input id="adminMusicFile" type="file" accept="audio/*,.mp3,.wav,.aac,.m4a">
+        </label>
+        <div class="taxonomy-form-actions">
+          <button type="submit" class="primary-btn">Upload Music</button>
+          <button type="button" class="ghost-btn" id="adminMusicCancelButton">Close</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div id="adminContentUploadModal" class="admin-modal hidden" aria-hidden="true">
+    <div class="admin-modal-backdrop" data-admin-content-close></div>
+    <div class="admin-modal-card admin-media-preview-modal" role="dialog" aria-modal="true" aria-labelledby="adminContentUploadTitle">
+      <div class="admin-modal-header">
+        <div>
+          <p class="section-kicker">Upload Main Content</p>
+          <h2 id="adminContentUploadTitle">Main Content Chunk Set</h2>
+        </div>
+        <button type="button" class="icon-btn" data-admin-content-close aria-label="Close dialog">x</button>
+      </div>
+
+      <form id="adminContentUploadForm" class="admin-user-editor-form">
+        <input id="adminContentMovieId" type="hidden">
+        <div id="adminContentUploadPreview" class="admin-upload-note hidden"></div>
+        <div id="adminContentAssetList" class="admin-content-quality-grid"></div>
+        <label class="field">
+          <span class="admin-content-field-label-row">
+            <span>Upload Future Start Date Time</span>
+            <small id="adminContentUploadStartAtDisplay" class="admin-content-field-value">Not set</small>
+          </span>
+          <input id="adminContentUploadStartAt" type="datetime-local" disabled>
+          <small class="field-hint">This becomes available only after every required title quality has been uploaded.</small>
+        </label>
+        <div class="taxonomy-form-actions admin-content-actions">
+          <button type="submit" class="primary-btn">Save Upload Start Date Time</button>
+          <button type="button" class="icon-btn danger admin-content-delete-btn" id="adminContentDeleteFolderButton" aria-label="Delete Content Folder" title="Delete Content Folder">&#128465;</button>
+          <button type="button" class="ghost-btn" id="adminContentCancelButton">Close</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+  <script type="module" src="../app.js?v=__ASSET_VERSION__"></script>
+</body>
+</html>

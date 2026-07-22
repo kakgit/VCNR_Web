@@ -3,139 +3,583 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Live Stream Player</title>
+  <title>Cine Vault</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="styles.css">
+  <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@500;600;700&family=Outfit:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css?v=__ASSET_VERSION__">
 </head>
 <body>
-  <main class="app-shell">
-    <section class="hero">
-      <p class="eyebrow">Web App</p>
-      <h1>Live Video Streaming Player</h1>
-      <p class="hero-copy">
-        Play HLS live streams or unlock VCNR-protected video directly in the browser.
-        VCNR passcodes stay on this device while playback is decrypted locally.
-      </p>
+  <div class="page-aura"></div>
+  <main class="page-shell">
+    <header class="topbar">
+      <a href="#" class="brand-mark" aria-label="Cine Vault home" data-nav-view="viewer">
+        <span class="brand-icon">C</span>
+        <span class="brand-copy">
+          <strong>Cine Vault</strong>
+          <small>Premiere Access</small>
+        </span>
+      </a>
+      <div class="topbar-search">
+        <span class="search-glow"></span>
+        <input type="text" placeholder="Search movies, shows, actors...">
+        <span class="search-shortcut">Ctrl K</span>
+      </div>
+      <div class="topbar-meta">
+        <span class="meta-pill meta-pill-discs">
+          <span id="viewerDiscBalance">0</span>
+          <span class="meta-pill-icon" aria-hidden="true">&#9678;</span>
+        </span>
+        <span class="meta-pill meta-pill-stars">
+          <span id="viewerStarBalance">0</span>
+          <span class="meta-pill-icon" aria-hidden="true">&#9733;</span>
+        </span>
+      </div>
+      <div class="topbar-actions">
+        <button class="ghost-btn" type="button" id="viewerAccountButton">My Account</button>
+        <button class="topbar-cta" type="button" data-nav-view="viewer">Rewards</button>
+      </div>
+    </header>
+
+    <nav class="main-strip" aria-label="Main sections">
+      <button type="button" class="strip-link" data-nav-view="viewer">Home</button>
+      <button type="button" class="strip-link is-active" data-stage="upcoming">Up Coming</button>
+      <button type="button" class="strip-link" data-stage="released">New Released</button>
+      <button type="button" class="strip-link" data-stage="library">Library</button>
+      <button type="button" class="strip-link">Music</button>
+      <button type="button" class="strip-link" data-stage="wishlist">Wish To Watch</button>
+      <button type="button" class="strip-link" data-stage="reserved">Reserved</button>
+      <button type="button" class="strip-link" data-stage="collection">My Collection</button>
+    </nav>
+
+    <section class="view-section" data-view="landing">
+      <section class="hero-panel">
+        <div class="hero-copy">
+          <p class="section-kicker">Phase 1 Product Shell</p>
+          <h1>Reserve tomorrow's biggest films before the world sees them.</h1>
+          <p class="hero-text">
+            Cine Vault combines upcoming movie discovery, wish intent, reserve-now revenue,
+            secure preview screening, and role-based publishing for creators and admins.
+          </p>
+          <div class="hero-actions">
+            <button class="primary-action" type="button" data-nav-view="viewer">Open Viewer Dashboard</button>
+            <button class="secondary-action" type="button" data-nav-view="auth">Enter Auth Flow</button>
+          </div>
+          <ul class="hero-points">
+            <li>Wish-to-watch demand tracking before release</li>
+            <li>Reserve-now collection and expected revenue visibility</li>
+            <li>Creator and admin publishing workflow built into the app</li>
+          </ul>
+        </div>
+        <div class="hero-showcase">
+          <article class="showcase-card marquee-card">
+            <span class="showcase-badge">Platform Snapshot</span>
+            <h2 id="spotlightTitle">Solar Dominion</h2>
+            <p id="spotlightMeta">Sci-Fi Thriller - Releases August 22, 2026</p>
+            <p id="spotlightCopy">
+              A high-stakes orbital thriller with global first-day demand already rising.
+            </p>
+            <div class="spotlight-stats">
+              <div>
+                <span>Wish</span>
+                <strong id="spotlightWish">18,420</strong>
+              </div>
+              <div>
+                <span>Reserve</span>
+                <strong id="spotlightReserve">4,680</strong>
+              </div>
+              <div>
+                <span>Revenue</span>
+                <strong id="spotlightRevenue">$117K</strong>
+              </div>
+            </div>
+          </article>
+          <article class="showcase-card platform-flow">
+            <div class="flow-chip">Landing</div>
+            <div class="flow-chip">Auth</div>
+            <div class="flow-chip">Viewer</div>
+            <div class="flow-chip">Creator</div>
+            <div class="flow-chip">Admin</div>
+          </article>
+        </div>
+      </section>
+
+      <section class="metrics-strip">
+        <article class="metric-card">
+          <span>Tracked Titles</span>
+          <strong id="metricTitles">12</strong>
+          <p>Across upcoming, newly released, and library stages.</p>
+        </article>
+        <article class="metric-card">
+          <span>Wish Demand</span>
+          <strong id="metricWish">96,340</strong>
+          <p>Users signaling pre-release intent before premiere.</p>
+        </article>
+        <article class="metric-card">
+          <span>Reserved Revenue</span>
+          <strong id="metricRevenue">$682K</strong>
+          <p>Projected cash collected before public theatrical release.</p>
+        </article>
+        <article class="metric-card">
+          <span>Phase 1 Modules</span>
+          <strong>5</strong>
+          <p>Landing, auth, viewer, creator, and admin in one shell.</p>
+        </article>
+      </section>
+
+      <section class="landing-grid">
+        <article class="panel-card">
+          <p class="section-kicker">Viewer Experience</p>
+          <h2>Upcoming, New Release, and Old Movies</h2>
+          <p>Movie discovery, wish lists, booked movies, reward points, and secure preview playback.</p>
+        </article>
+        <article class="panel-card">
+          <p class="section-kicker">Creator Workspace</p>
+          <h2>Upload, Preview, And Publish</h2>
+          <p>Manage posters, music, budget, expected revenue, and decide where titles appear.</p>
+        </article>
+        <article class="panel-card">
+          <p class="section-kicker">Admin Oversight</p>
+          <h2>Review Publishing And Platform Health</h2>
+          <p>Approve releases, highlight sections, monitor rewards, and keep the catalog organized.</p>
+        </article>
+      </section>
     </section>
 
-    <section class="player-card">
-      <div class="player-frame">
-        <span class="live-pill" id="liveBadge">OFFLINE</span>
-        <video
-          id="video"
-          class="video-player"
-          controls
-          autoplay
-          playsinline
-          muted
-        ></video>
+    <section class="view-section" data-view="auth">
+      <div class="auth-shell">
+        <article class="auth-aside">
+          <p class="section-kicker">Welcome Back</p>
+          <h2>Enter the Cine Vault network</h2>
+          <p>
+            Phase 1 supports viewer access, creator publishing access, and admin review access.
+            This is the shell where real authentication will plug in next.
+          </p>
+          <div class="auth-feature-list">
+            <div>
+              <strong>Viewer</strong>
+              <span>Reserve and watch approved previews</span>
+            </div>
+            <div>
+              <strong>Creator</strong>
+              <span>Upload movie details, preview, and publish by section</span>
+            </div>
+            <div>
+              <strong>Admin</strong>
+              <span>Approve, feature, and supervise catalog placement</span>
+            </div>
+          </div>
+        </article>
+        <article class="auth-card">
+          <div class="auth-card-top">
+            <p class="section-kicker">Sign In</p>
+            <h3>Access your Cine Vault account</h3>
+          </div>
+          <form class="auth-form" id="authForm">
+            <label class="field">
+              <span>Email Address</span>
+              <input type="email" id="authEmail" placeholder="Enter your email" value="kamarthi.anil@gmail.com">
+            </label>
+            <label class="field">
+              <span>Password</span>
+              <input type="password" id="authPassword" placeholder="Enter your password" value="asd">
+            </label>
+            <div class="auth-link-row">
+              <a href="#" class="auth-link">Forgot password?</a>
+            </div>
+            <div class="button-row">
+              <button type="submit" class="primary-btn">Sign In</button>
+              <button type="button" class="secondary-action" id="openSignupButton">Sign Up</button>
+              <button type="button" class="ghost-btn" id="guestEntryButton">Continue As Guest</button>
+            </div>
+            <p class="helper-text" id="authHelper">
+              Sign in once here. Viewer, creator, advertiser, admin, and super admin accounts will automatically open the correct workspace.
+            </p>
+          </form>
+          <form class="auth-form auth-signup-form hidden" id="signupForm">
+            <div class="auth-card-top">
+              <p class="section-kicker">Register Now</p>
+              <h3>Create your viewer account</h3>
+            </div>
+            <label class="field">
+              <span>Full Name</span>
+              <input type="text" id="signupName" placeholder="Enter your full name">
+            </label>
+            <label class="field">
+              <span>Email Address</span>
+              <input type="email" id="signupEmail" placeholder="Enter your email">
+            </label>
+            <label class="field">
+              <span>Password</span>
+              <input type="password" id="signupPassword" placeholder="Create your password">
+            </label>
+            <label class="field">
+              <span>Confirm Password</span>
+              <input type="password" id="signupConfirmPassword" placeholder="Confirm your password">
+            </label>
+            <div class="button-row">
+              <button type="submit" class="primary-btn">Register Now</button>
+              <button type="button" class="ghost-btn" id="closeSignupButton">Back To Sign In</button>
+            </div>
+            <p class="helper-text" id="signupHelper">
+              This sign-up flow is only for normal viewer accounts. Your email is validated and the account is activated immediately for now.
+            </p>
+          </form>
+        </article>
+      </div>
+    </section>
+
+    <section class="view-section" data-view="account">
+      <section class="account-shell">
+        <header class="account-page-header">
+          <button type="button" class="account-back-btn" id="accountBackButton" aria-label="Back to viewer">
+            <span aria-hidden="true">&#8592;</span>
+          </button>
+          <div class="account-page-copy">
+            <h1 id="accountPageTitle">My Account</h1>
+            <p id="accountPageSubtitle">Manage your profile, stars, and movie collection</p>
+          </div>
+        </header>
+
+        <div class="account-layout">
+          <aside class="account-sidebar-card">
+            <div class="account-avatar-wrap">
+              <div class="account-avatar">👤</div>
+            </div>
+            <h2 id="accountProfileName">Viewer Name</h2>
+            <p id="accountProfileEmail">viewer@email.com</p>
+            <div class="account-balance-row">
+              <span class="account-balance-pill is-stars"><b></b><span id="accountSidebarStars">0</span></span>
+              <span class="account-balance-pill is-discs"><b></b><span id="accountSidebarDiscs">0</span></span>
+            </div>
+            <p class="account-balance-note">Gold (Stars) and Reward Disks currently available in your wallet.</p>
+
+            <nav class="account-nav" aria-label="Account sections">
+              <button type="button" class="account-nav-link is-active" data-account-panel-target="profile">Profile</button>
+              <button type="button" class="account-nav-link" data-account-panel-target="wallet">Wallet & Stars</button>
+              <button type="button" class="account-nav-link" data-account-panel-target="movies">My Collection</button>
+              <button type="button" class="account-nav-link" data-account-panel-target="reservations">Reservations</button>
+              <button type="button" class="account-nav-link" data-account-panel-target="gifting">Movie Gifting</button>
+              <button type="button" class="account-nav-link" data-account-panel-target="settings">Settings</button>
+            </nav>
+
+            <button type="button" class="account-logout-btn" id="viewerAccountSignoutButton">Log Out</button>
+          </aside>
+
+          <div class="account-main">
+            <section class="account-panel is-active" data-account-panel-view="profile">
+              <article class="account-overview-card">
+                <h2>Account Overview</h2>
+                <div class="account-overview-grid">
+                  <article class="account-stat-card is-stars">
+                    <div class="account-stat-icon">★</div>
+                    <strong id="accountOverviewStars">0</strong>
+                    <span>Total Stars</span>
+                    <small id="accountOverviewStarsValue">₹0 value</small>
+                  </article>
+                  <article class="account-stat-card is-discs">
+                    <div class="account-stat-icon">◎</div>
+                    <strong id="accountOverviewDiscs">0</strong>
+                    <span>Reward Disks</span>
+                    <small id="accountOverviewDiscsValue">0 disks</small>
+                  </article>
+                  <article class="account-stat-card is-movies">
+                    <div class="account-stat-icon">▶</div>
+                    <strong id="accountOverviewLibrary">0</strong>
+                    <span>Owned Titles</span>
+                    <small>Purchased and ready to watch</small>
+                  </article>
+                  <article class="account-stat-card is-reserved">
+                    <div class="account-stat-icon">◫</div>
+                    <strong id="accountOverviewUpcoming">0</strong>
+                    <span>Upcoming Titles</span>
+                    <small>Titles to watch soon</small>
+                  </article>
+                </div>
+              </article>
+
+              <article class="account-program-card">
+                <h2>Referral Program</h2>
+                <div class="account-program-grid">
+                  <section class="account-referral-card">
+                    <div class="account-referral-icon">⟲</div>
+                    <div>
+                      <h3>Your Referral ID</h3>
+                      <p>Share with friends to earn reward disks and star bonuses.</p>
+                    </div>
+                    <div class="account-referral-code-row">
+                      <strong id="accountReferralCode">CV000000</strong>
+                      <button type="button" class="ghost-btn" id="accountCopyReferralButton">Copy</button>
+                    </div>
+                    <p class="account-referral-note">When someone joins using your referral ID, bonus disks can be added to your account.</p>
+                  </section>
+
+                  <div class="account-program-side">
+                    <article class="account-highlight-card is-green">
+                      <h3>Referred Users</h3>
+                      <strong id="accountReferralUsers">0</strong>
+                      <p>Friends currently linked to your referral network.</p>
+                    </article>
+                    <article class="account-highlight-card is-gold">
+                      <h3>Referral Earnings</h3>
+                      <strong id="accountReferralEarnings">₹0</strong>
+                      <p>Demo rewards earned from successful referrals.</p>
+                    </article>
+                  </div>
+                </div>
+              </article>
+            </section>
+
+            <section class="account-panel" data-account-panel-view="wallet">
+              <article class="account-content-card">
+                <h2>Wallet & Stars</h2>
+                <div class="account-detail-grid">
+                  <article class="account-detail-item">
+                    <span>Available Stars</span>
+                    <strong id="accountWalletStars">0</strong>
+                  </article>
+                  <article class="account-detail-item">
+                    <span>Blocked Stars</span>
+                    <strong id="accountWalletBlockedStars">0</strong>
+                  </article>
+                  <article class="account-detail-item">
+                    <span>Reward Disks</span>
+                    <strong id="accountWalletDiscs">0</strong>
+                  </article>
+                  <article class="account-detail-item">
+                    <span>Star Value</span>
+                    <strong id="accountWalletValue">₹0</strong>
+                  </article>
+                </div>
+              </article>
+            </section>
+
+            <section class="account-panel" data-account-panel-view="movies">
+              <article class="account-content-card">
+                <h2>My Collection</h2>
+                <div id="accountMoviesList" class="account-simple-list"></div>
+              </article>
+            </section>
+
+            <section class="account-panel" data-account-panel-view="reservations">
+              <article class="account-content-card">
+                <h2>Reservations</h2>
+                <div id="accountReservationsList" class="account-simple-list"></div>
+              </article>
+            </section>
+
+            <section class="account-panel" data-account-panel-view="gifting">
+              <article class="account-content-card">
+                <h2>Movie Gifting</h2>
+                <p class="account-empty-copy">Gift flows can be connected here for stars, movie bundles, and special event drops.</p>
+              </article>
+            </section>
+
+            <section class="account-panel" data-account-panel-view="settings">
+              <article class="account-content-card">
+                <h2>Settings</h2>
+                <div class="account-detail-grid">
+                  <article class="account-detail-item">
+                    <span>Account Role</span>
+                    <strong id="accountSettingsRole">Viewer</strong>
+                  </article>
+                  <article class="account-detail-item">
+                    <span>Status</span>
+                    <strong id="accountSettingsStatus">active</strong>
+                  </article>
+                  <article class="account-detail-item">
+                    <span>Email</span>
+                    <strong id="accountSettingsEmail">viewer@email.com</strong>
+                  </article>
+                </div>
+              </article>
+            </section>
+          </div>
+        </div>
+      </section>
+    </section>
+
+    <section class="view-section is-active" data-view="viewer">
+      <section class="catalog-hero">
+        <div class="catalog-copy">
+          <h1 id="viewerHeadline">Up Coming</h1>
+          <p id="viewerSubhead">Get ready for the biggest blockbusters</p>
+        </div>
+        <div class="catalog-badge">
+          <span id="viewerCount">10 Movies</span>
+        </div>
+      </section>
+
+      <section class="movie-grid-section">
+        <div id="movieGrid" class="movie-grid poster-grid"></div>
+      </section>
+
+      <section id="viewerTitleDetailPage" class="viewer-title-detail hidden" aria-live="polite">
+        <div id="viewerTitleBackdrop" class="viewer-title-backdrop"></div>
+        <div class="viewer-title-overlay"></div>
+        <div class="viewer-title-content">
+          <div class="viewer-title-actions-top">
+            <button type="button" id="viewerTitleBackButton" class="ghost-btn viewer-back-btn">
+              <span class="viewer-back-arrow" aria-hidden="true">&#8592;</span>
+              <span>Back</span>
+            </button>
+          </div>
+          <article class="viewer-title-hero-card">
+            <div class="viewer-title-poster-column">
+              <div class="viewer-title-poster-shell">
+                <button type="button" class="viewer-title-poster-play hidden" id="detailPosterPlayButton" aria-label="Watch this title now">
+                  <span class="viewer-title-poster-play-ring">
+                    <span class="viewer-title-poster-play-triangle"></span>
+                  </span>
+                </button>
+                <img id="detailPosterImage" class="viewer-title-poster" src="/media/posters/no-poster.svg" alt="Selected title poster" loading="lazy">
+              </div>
+              <button type="button" class="primary-btn viewer-title-watch-now hidden" id="detailWatchNowButton">Watch Now</button>
+            </div>
+            <div class="viewer-title-copy">
+              <p class="section-kicker">Now Trending</p>
+              <div class="viewer-title-headline-row">
+                <div>
+                  <h2 id="detailTitle">No Title Yet</h2>
+                  <p id="detailCaption" class="viewer-title-caption">Select a title to open the story page.</p>
+                </div>
+                <span id="detailStagePill" class="viewer-title-stage-pill">Upcoming</span>
+              </div>
+              <p id="detailStage" class="viewer-title-stage">Upcoming titles will appear here after admin publishing.</p>
+              <p id="detailDescription" class="viewer-title-description">Add your first title from the admin panel to begin building the library.</p>
+
+              <div class="viewer-title-meta-grid">
+                <article class="viewer-title-meta-card">
+                  <span>Category</span>
+                  <strong id="detailCategory">Not set</strong>
+                </article>
+                <article class="viewer-title-meta-card">
+                  <span>Genre</span>
+                  <strong id="detailGenre">Not set</strong>
+                </article>
+                <article class="viewer-title-meta-card">
+                  <span>Release Date</span>
+                  <strong id="detailReleaseDate">Coming Soon</strong>
+                </article>
+                <article class="viewer-title-meta-card">
+                  <span>Download from</span>
+                  <strong id="detailUploadDateTime">Not set</strong>
+                </article>
+                <article class="viewer-title-meta-card">
+                  <span>Release from</span>
+                  <strong id="detailReleaseDateTime">Not set</strong>
+                </article>
+                <article class="viewer-title-meta-card">
+                  <span>Stars / View</span>
+                  <strong id="detailStarsRequired">1</strong>
+                </article>
+                <article class="viewer-title-target-card">
+                  <div class="viewer-title-target-head">
+                    <span>Target</span>
+                    <strong id="detailExpected">0 Stars</strong>
+                  </div>
+                  <div class="viewer-title-target-star" aria-hidden="true">&#9733;</div>
+                  <div class="viewer-title-target-progress" aria-hidden="true">
+                    <div id="detailTargetProgressFill" class="viewer-title-target-progress-fill"></div>
+                  </div>
+                  <div class="viewer-title-target-scale">
+                    <span>0%</span>
+                    <strong id="detailTargetProgressLabel">0%</strong>
+                    <span>100%</span>
+                  </div>
+                </article>
+              </div>
+
+              <section class="viewer-title-cast-panel">
+                <div class="viewer-title-cast-head">
+                  <h3>Star Cast & Credits</h3>
+                </div>
+                <div id="detailCastCredits" class="viewer-title-cast-list">
+                  <p class="viewer-title-cast-empty">Cast and credits will appear here after they are added.</p>
+                </div>
+              </section>
+
+              <section class="viewer-title-download-panel">
+                <div class="viewer-title-download-head">
+                  <h3>Download Content</h3>
+                  <p id="detailDownloadStatus">Downloads will appear after the scheduled time.</p>
+                </div>
+                <div id="detailDownloadAction" class="viewer-title-download-action"></div>
+              </section>
+
+              <div class="viewer-title-action-bar">
+                <div class="viewer-title-media-pills">
+                <button type="button" class="viewer-media-pill" id="detailPostersButton">Posters</button>
+                <button type="button" class="viewer-media-pill" id="detailTrailersButton">Trailer</button>
+                <button type="button" class="viewer-media-pill" id="detailGalleryButton">Gallery</button>
+                <button type="button" class="viewer-media-pill" id="detailMusicButton">Music</button>
+                <button type="button" class="viewer-media-pill" id="detailContentButton">Content</button>
+                </div>
+                <div class="viewer-title-cta-row">
+                  <button type="button" class="wish-watch-btn viewer-title-wish-btn" id="detailWishButton">
+                    <span class="wish-watch-icon" aria-hidden="true">&#9825;</span>
+                    <span>Wish 2 Watch</span>
+                  </button>
+                  <button type="button" class="ghost-btn viewer-title-reserve-btn" id="detailReserveButton">Reserve Now</button>
+                </div>
+              </div>
+            </div>
+          </article>
+        </div>
+      </section>
+
+      <div id="viewerAssetModal" class="viewer-asset-modal hidden" aria-hidden="true">
+        <div class="viewer-asset-backdrop" data-viewer-asset-close></div>
+        <section class="viewer-asset-dialog" role="dialog" aria-modal="true" aria-labelledby="viewerAssetModalTitle">
+          <div class="viewer-asset-header">
+            <div>
+              <p class="section-kicker">Title Media</p>
+              <h2 id="viewerAssetModalTitle">Media Viewer</h2>
+            </div>
+            <button type="button" class="icon-btn" data-viewer-asset-close aria-label="Close media viewer">x</button>
+          </div>
+          <div id="viewerAssetModalBody" class="viewer-asset-body"></div>
+        </section>
+      </div>
+      <input id="viewerLocalContentInput" type="file" accept=".vcnr" multiple webkitdirectory directory class="hidden" />
+
+      <div id="viewerWishModal" class="viewer-choice-modal hidden" aria-hidden="true">
+        <div class="viewer-choice-backdrop" data-viewer-wish-close></div>
+        <section class="viewer-choice-dialog" role="dialog" aria-modal="true" aria-labelledby="viewerWishModalTitle">
+          <div class="viewer-choice-header">
+            <div>
+              <h2 id="viewerWishModalTitle">Choose how you wish to watch</h2>
+              <p id="viewerWishModalMovie">Title Name</p>
+            </div>
+          </div>
+          <div class="viewer-choice-actions">
+            <button type="button" class="viewer-choice-btn is-online" data-viewer-wish-mode="online">Wish to Watch Online</button>
+            <button type="button" class="viewer-choice-btn is-theatre" data-viewer-wish-mode="theatre">Wish to Watch Theater</button>
+          </div>
+          <button type="button" class="viewer-choice-cancel" data-viewer-wish-close>Close</button>
+        </section>
       </div>
 
-      <form id="streamForm" class="control-panel">
-        <div class="mode-tabs" role="tablist" aria-label="Playback mode">
-          <button type="button" class="mode-tab is-active" data-mode="stream">Stream URL</button>
-          <button type="button" class="mode-tab" data-mode="vcnr">VCNR File</button>
-        </div>
-
-        <section class="mode-panel is-active" data-panel="stream">
-          <label class="field">
-            <span>Stream URL</span>
-            <input
-              id="streamUrl"
-              name="streamUrl"
-              type="url"
-              placeholder="https://example.com/live/stream.m3u8"
-            >
-          </label>
-
-          <div class="button-row">
-            <button type="submit" class="primary-btn">Play Stream</button>
-            <button type="button" id="loadDemo" class="ghost-btn">Load Demo</button>
-          </div>
-        </section>
-
-        <section class="mode-panel" data-panel="vcnr">
-          <label class="field">
-            <span>VCNR URL (optional)</span>
-            <input
-              id="vcnrUrl"
-              name="vcnrUrl"
-              type="url"
-              placeholder="https://example.com/video.vcnr"
-            >
-          </label>
-
-          <div id="sampleBox" class="sample-box hidden" aria-live="polite">
+      <div id="viewerReserveModal" class="viewer-choice-modal hidden" aria-hidden="true">
+        <div class="viewer-choice-backdrop" data-viewer-reserve-close></div>
+        <section class="viewer-choice-dialog" role="dialog" aria-modal="true" aria-labelledby="viewerReserveModalTitle">
+          <div class="viewer-choice-header">
             <div>
-              <strong>Sample file available</strong>
-              <p id="sampleLabel">Load a hosted sample VCNR file into the URL box.</p>
+              <h2 id="viewerReserveModalTitle">Confirm your reservation</h2>
+              <p id="viewerReserveModalMovie">Title Name</p>
             </div>
-            <button type="button" id="sampleLoad" class="ghost-btn">Load Sample File</button>
           </div>
-
-          <p class="helper-text helper-divider">or choose a local file</p>
-
-          <label class="field">
-            <span>VCNR File</span>
-            <input
-              id="vcnrFile"
-              name="vcnrFile"
-              type="file"
-              accept=".vcnr"
-            >
-          </label>
-
-          <label class="field">
-            <span>Passcode</span>
-            <input
-              id="passcode"
-              name="passcode"
-              type="password"
-              placeholder="Enter the VCNR passcode"
-              autocomplete="current-password"
-            >
-          </label>
-
-          <div class="button-row">
-            <button type="button" id="playVcnr" class="primary-btn">Unlock And Play</button>
+          <p class="viewer-choice-copy" id="viewerReserveModalCopy">Stars will be blocked until the release date.</p>
+          <div class="viewer-choice-actions viewer-choice-actions-single">
+            <button type="button" class="viewer-choice-btn is-theatre" id="viewerReserveConfirmButton">Confirm Reserve Now</button>
           </div>
-
-          <p class="helper-text">
-            VCNR v3 files are decrypted locally in your browser and streamed as fragmented MP4.
-          </p>
+          <button type="button" class="viewer-choice-cancel" data-viewer-reserve-close>Close</button>
         </section>
+      </div>
 
-        <div class="button-row">
-          <button type="button" id="stopStream" class="ghost-btn">Stop</button>
-        </div>
-
-        <p id="status" class="status-text">
-          Enter a live stream URL ending in <code>.m3u8</code> to begin.
-        </p>
-      </form>
     </section>
-
-    <section class="info-grid">
-      <article class="info-card">
-        <h2>Supported</h2>
-        <p>HLS live streams plus VCNR v3 encrypted files with H.264 video and AAC audio.</p>
-      </article>
-      <article class="info-card">
-        <h2>Passcode Flow</h2>
-        <p>VCNR playback derives a PBKDF2 key, authenticates every AES-GCM chunk, then streams the media locally.</p>
-      </article>
-      <article class="info-card">
-        <h2>Best Results</h2>
-        <p>H.264-based VCNR files are the safest choice for broad browser playback compatibility.</p>
-      </article>
-    </section>
-
-    <pre id="metadata" class="metadata-panel" aria-label="VCNR metadata"></pre>
-  </main>
 
   <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
-  <script type="module" src="app.js"></script>
+  <script type="module" src="app.js?v=__ASSET_VERSION__"></script>
 </body>
 </html>

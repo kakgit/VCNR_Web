@@ -2,9 +2,10 @@
   "name": "vcnr-web-player",
   "version": "1.0.0",
   "private": true,
-  "description": "HLS and VCNR v3 browser player",
+  "description": "Cine Vault frontend shell with VCNR playback and a Python/Postgres backend path",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "start:frontend": "node server.js"
   },
   "engines": {
     "node": ">=18"

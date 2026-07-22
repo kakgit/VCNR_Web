@@ -1,0 +1,595 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Cine Vault Creator</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@500;600;700&family=Outfit:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../styles.css?v=20260709a">
+</head>
+<body class="creator-entry" data-entry="creator">
+  <div class="page-aura"></div>
+  <main class="page-shell">
+    <header class="topbar">
+      <a href="#" class="brand-mark" aria-label="Cine Vault home" data-nav-view="viewer">
+        <span class="brand-icon">C</span>
+        <span class="brand-copy">
+          <strong>Cine Vault</strong>
+          <small>Premiere Access</small>
+        </span>
+      </a>
+      <div class="topbar-search">
+        <span class="search-glow"></span>
+        <input type="text" placeholder="Search movies, shows, actors...">
+        <span class="search-shortcut">Ctrl K</span>
+      </div>
+      <div class="topbar-meta">
+        <span class="meta-pill"><b></b>1150</span>
+        <span class="meta-pill"><b></b>75</span>
+        <span class="meta-pill"><b></b>25</span>
+      </div>
+      <div class="topbar-actions">
+        <button class="ghost-btn" type="button" data-nav-view="auth">My Account</button>
+        <button class="topbar-cta" type="button" data-nav-view="viewer">Rewards</button>
+      </div>
+    </header>
+
+    <nav class="main-strip" aria-label="Main sections">
+      <button type="button" class="strip-link" data-nav-view="viewer">Home</button>
+      <button type="button" class="strip-link is-active" data-stage="upcoming">Up Coming</button>
+      <button type="button" class="strip-link" data-stage="released">New Released</button>
+      <button type="button" class="strip-link" data-stage="library">Library</button>
+      <button type="button" class="strip-link">Music</button>
+      <button type="button" class="strip-link">Wish To Watch</button>
+      <button type="button" class="strip-link">Reserved</button>
+      <button type="button" class="strip-link">My Collection</button>
+      <button type="button" class="strip-link" data-nav-view="producer">Menu</button>
+    </nav>
+
+    <section class="view-section" data-view="landing">
+      <section class="hero-panel">
+        <div class="hero-copy">
+          <p class="section-kicker">Phase 1 Product Shell</p>
+          <h1>Reserve tomorrow's biggest films before the world sees them.</h1>
+          <p class="hero-text">
+            Cine Vault combines upcoming movie discovery, wish intent, reserve-now revenue,
+            secure preview screening, and role-based publishing for creators and admins.
+          </p>
+          <div class="hero-actions">
+            <button class="primary-action" type="button" data-nav-view="viewer">Open Viewer Dashboard</button>
+            <button class="secondary-action" type="button" data-nav-view="auth">Enter Auth Flow</button>
+          </div>
+          <ul class="hero-points">
+            <li>Wish-to-watch demand tracking before release</li>
+            <li>Reserve-now collection and expected revenue visibility</li>
+            <li>Creator and admin publishing workflow built into the app</li>
+          </ul>
+        </div>
+        <div class="hero-showcase">
+          <article class="showcase-card marquee-card">
+            <span class="showcase-badge">Platform Snapshot</span>
+            <h2 id="spotlightTitle">Solar Dominion</h2>
+            <p id="spotlightMeta">Sci-Fi Thriller - Releases August 22, 2026</p>
+            <p id="spotlightCopy">
+              A high-stakes orbital thriller with global first-day demand already rising.
+            </p>
+            <div class="spotlight-stats">
+              <div>
+                <span>Wish</span>
+                <strong id="spotlightWish">18,420</strong>
+              </div>
+              <div>
+                <span>Reserve</span>
+                <strong id="spotlightReserve">4,680</strong>
+              </div>
+              <div>
+                <span>Revenue</span>
+                <strong id="spotlightRevenue">$117K</strong>
+              </div>
+            </div>
+          </article>
+          <article class="showcase-card platform-flow">
+            <div class="flow-chip">Landing</div>
+            <div class="flow-chip">Auth</div>
+            <div class="flow-chip">Viewer</div>
+            <div class="flow-chip">Creator</div>
+            <div class="flow-chip">Admin</div>
+          </article>
+        </div>
+      </section>
+
+      <section class="metrics-strip">
+        <article class="metric-card">
+          <span>Tracked Titles</span>
+          <strong id="metricTitles">12</strong>
+          <p>Across upcoming, newly released, and library stages.</p>
+        </article>
+        <article class="metric-card">
+          <span>Wish Demand</span>
+          <strong id="metricWish">96,340</strong>
+          <p>Users signaling pre-release intent before premiere.</p>
+        </article>
+        <article class="metric-card">
+          <span>Reserved Revenue</span>
+          <strong id="metricRevenue">$682K</strong>
+          <p>Projected cash collected before public theatrical release.</p>
+        </article>
+        <article class="metric-card">
+          <span>Phase 1 Modules</span>
+          <strong>5</strong>
+          <p>Landing, auth, viewer, creator, and admin in one shell.</p>
+        </article>
+      </section>
+
+      <section class="landing-grid">
+        <article class="panel-card">
+          <p class="section-kicker">Viewer Experience</p>
+          <h2>Upcoming, New Release, and Old Movies</h2>
+          <p>Movie discovery, wish lists, booked movies, reward points, and secure preview playback.</p>
+        </article>
+        <article class="panel-card">
+          <p class="section-kicker">Creator Workspace</p>
+          <h2>Upload, Preview, And Publish</h2>
+          <p>Manage posters, music, budget, expected revenue, and decide where titles appear.</p>
+        </article>
+        <article class="panel-card">
+          <p class="section-kicker">Admin Oversight</p>
+          <h2>Review Publishing And Platform Health</h2>
+          <p>Approve releases, highlight sections, monitor rewards, and keep the catalog organized.</p>
+        </article>
+      </section>
+    </section>
+
+    <section class="view-section" data-view="auth">
+      <div class="auth-shell">
+        <article class="auth-aside">
+          <p class="section-kicker">Welcome Back</p>
+          <h2>Enter the Cine Vault network</h2>
+          <p>
+            Phase 1 supports viewer access, creator publishing access, and admin review access.
+            This is the shell where real authentication will plug in next.
+          </p>
+          <div class="auth-feature-list">
+            <div>
+              <strong>Viewer</strong>
+              <span>Reserve and watch approved previews</span>
+            </div>
+            <div>
+              <strong>Creator</strong>
+              <span>Upload movie details, preview, and publish by section</span>
+            </div>
+            <div>
+              <strong>Admin</strong>
+              <span>Approve, feature, and supervise catalog placement</span>
+            </div>
+          </div>
+        </article>
+        <article class="auth-card">
+          <div class="auth-tabs">
+            <button type="button" class="auth-tab is-active" data-auth-role="viewer">Viewer</button>
+            <button type="button" class="auth-tab" data-auth-role="producer">Creator</button>
+            <button type="button" class="auth-tab" data-auth-role="admin">Admin</button>
+          </div>
+          <form class="auth-form" id="authForm">
+            <label class="field">
+              <span>Email Address</span>
+              <input type="email" id="authEmail" placeholder="Enter your email">
+            </label>
+            <label class="field">
+              <span>Password</span>
+              <input type="password" id="authPassword" placeholder="Enter your password">
+            </label>
+            <div class="auth-link-row">
+              <a href="#" class="auth-link">Forgot password?</a>
+            </div>
+            <div class="button-row">
+              <button type="submit" class="primary-btn">Sign In</button>
+              <button type="button" class="ghost-btn" id="guestEntryButton">Continue As Guest</button>
+            </div>
+            <p class="helper-text" id="authHelper">
+              Viewer mode is selected. Sign in here to continue into the matching dashboard.
+            </p>
+          </form>
+        </article>
+      </div>
+    </section>
+
+    <section class="view-section is-active" data-view="viewer">
+      <section class="catalog-hero">
+        <div class="catalog-copy">
+          <h1 id="viewerHeadline">Up Coming</h1>
+          <p id="viewerSubhead">Get ready for the biggest blockbusters</p>
+        </div>
+        <div class="catalog-badge">
+          <span id="viewerCount">10 Movies</span>
+        </div>
+      </section>
+
+      <section class="movie-grid-section">
+        <div id="movieGrid" class="movie-grid poster-grid"></div>
+      </section>
+
+      <section class="vault-section compact-vault">
+        <div class="panel-heading vault-heading">
+          <div>
+            <p class="section-kicker">Screening Vault</p>
+            <h2>Secure preview playback remains available below the main catalog</h2>
+          </div>
+        </div>
+
+        <section class="player-card">
+          <div class="player-frame">
+            <span class="live-pill" id="liveBadge">OFFLINE</span>
+            <video
+              id="video"
+              class="video-player"
+              controls
+              autoplay
+              playsinline
+              muted
+            ></video>
+          </div>
+
+          <form id="streamForm" class="control-panel">
+            <div class="mode-tabs" role="tablist" aria-label="Playback mode">
+              <button type="button" class="mode-tab is-active" data-mode="stream">Stream URL</button>
+              <button type="button" class="mode-tab" data-mode="vcnr">VCNR File</button>
+            </div>
+
+            <section class="mode-panel is-active" data-panel="stream">
+              <label class="field">
+                <span>Stream URL</span>
+                <input
+                  id="streamUrl"
+                  name="streamUrl"
+                  type="url"
+                  placeholder="https://example.com/live/stream.m3u8"
+                >
+              </label>
+
+              <div class="button-row">
+                <button type="submit" class="primary-btn">Play Stream</button>
+                <button type="button" id="loadDemo" class="ghost-btn">Load Demo</button>
+              </div>
+            </section>
+
+            <section class="mode-panel" data-panel="vcnr">
+              <label class="field">
+                <span>VCNR URL (optional)</span>
+                <input
+                  id="vcnrUrl"
+                  name="vcnrUrl"
+                  type="url"
+                  placeholder="https://example.com/video.vcnr"
+                >
+              </label>
+
+              <div id="sampleBox" class="sample-box hidden" aria-live="polite">
+                <div>
+                  <strong>Sample file available</strong>
+                  <p id="sampleLabel">Load a hosted sample VCNR file into the URL box.</p>
+                </div>
+                <button type="button" id="sampleLoad" class="ghost-btn">Load Sample File</button>
+              </div>
+
+              <p class="helper-text helper-divider">or choose a local secure file</p>
+
+              <label class="field">
+                <span>VCNR File</span>
+                <input
+                  id="vcnrFile"
+                  name="vcnrFile"
+                  type="file"
+                  accept=".vcnr"
+                >
+              </label>
+
+              <label class="field">
+                <span>Passcode</span>
+                <input
+                  id="passcode"
+                  name="passcode"
+                  type="password"
+                  placeholder="Enter the VCNR passcode"
+                  autocomplete="current-password"
+                >
+              </label>
+
+              <div class="button-row">
+                <button type="button" id="playVcnr" class="primary-btn">Unlock And Play</button>
+              </div>
+            </section>
+
+            <div class="button-row">
+              <button type="button" id="stopStream" class="ghost-btn">Stop</button>
+            </div>
+
+            <p id="status" class="status-text">
+              Enter a live stream URL or secure VCNR file to begin screening.
+            </p>
+          </form>
+        </section>
+
+        <pre id="metadata" class="metadata-panel" aria-label="VCNR metadata"></pre>
+      </section>
+    </section>
+
+    <section class="view-section" data-view="producer">
+      <section class="workspace-grid">
+        <article class="workspace-panel">
+          <div class="panel-heading">
+            <div>
+              <p class="section-kicker">Producer Panel</p>
+              <h2>Upload movie details, preview assets, and publish by section</h2>
+            </div>
+            <span class="workspace-badge">Producer Access</span>
+          </div>
+          <form id="producerForm" class="workspace-form">
+            <label class="field">
+              <span>Movie Title</span>
+              <input id="producerTitle" type="text" placeholder="Enter movie title">
+            </label>
+            <label class="field">
+              <span>Genre</span>
+              <input id="producerGenre" type="text" placeholder="Sci-Fi Thriller, Action, Drama">
+            </label>
+            <label class="field">
+              <span>Budget</span>
+              <input id="producerBudget" type="text" placeholder="$48M">
+            </label>
+            <label class="field">
+              <span>Expected Revenue</span>
+              <input id="producerExpected" type="text" placeholder="$92M">
+            </label>
+            <label class="field">
+              <span>Preview Summary</span>
+              <input id="producerDescription" type="text" placeholder="Short pitch, posters, music, and release story">
+            </label>
+            <label class="field">
+              <span>Publish Section</span>
+              <select id="producerStage" class="select-input">
+                <option value="upcoming">Upcoming Movies</option>
+                <option value="released">New Released Movies</option>
+                <option value="library">Old Movies</option>
+              </select>
+            </label>
+            <div class="button-row">
+              <button type="button" class="primary-btn" id="producerPreviewButton">Preview Listing</button>
+              <button type="submit" class="secondary-action">Publish Movie</button>
+            </div>
+            <p class="helper-text" id="producerHelper">
+              This Phase 1 producer panel prepares the movie card and publish target before real uploads are connected.
+            </p>
+          </form>
+        </article>
+
+        <article class="workspace-panel">
+          <p class="section-kicker">Producer Queue</p>
+          <h2>Preview and publishing history</h2>
+          <div id="producerQueue" class="queue-list"></div>
+        </article>
+      </section>
+    </section>
+
+    <section class="view-section" data-view="admin">
+      <section class="admin-shell">
+        <aside class="admin-sidebar">
+          <div class="admin-sidebar-top">
+            <div class="admin-brand">
+              <span class="admin-brand-icon">C</span>
+              <div>
+                <strong>Cine Vault</strong>
+                <small>Admin Console</small>
+              </div>
+            </div>
+            <div class="admin-access-card">
+              <span class="admin-access-label">Signed In As</span>
+              <strong id="adminSessionRole">Admin Session</strong>
+              <p id="adminSessionEmail">Control panel access is active for this session.</p>
+            </div>
+          </div>
+
+          <nav class="admin-nav" aria-label="Admin sections">
+            <button type="button" class="admin-nav-link hidden" id="superAdminNavLink" data-admin-panel-target="super-admin">
+              <span>Super Admin</span>
+              <b id="adminSuperCount">0</b>
+            </button>
+            <button type="button" class="admin-nav-link is-active" data-admin-panel-target="users">
+              <span>Manage Users</span>
+              <b id="adminUsersCount">0</b>
+            </button>
+            <button type="button" class="admin-nav-link" data-admin-panel-target="categories">
+              <span>Manage Categories</span>
+              <b id="adminCategoriesCount">3</b>
+            </button>
+            <button type="button" class="admin-nav-link" data-admin-panel-target="library">
+              <span>Manage Library</span>
+              <b id="adminLibraryCount">0</b>
+            </button>
+          </nav>
+
+          <div class="admin-sidebar-note">
+            <p class="section-kicker">Suggested Admin Scope</p>
+            <ul class="admin-sidebar-list">
+              <li>Role and account access control</li>
+              <li>Category placement and featured section rules</li>
+              <li>Library quality review, edits, and archive flow</li>
+            </ul>
+          </div>
+        </aside>
+
+        <div class="admin-main">
+          <header class="admin-header">
+            <div>
+              <p class="section-kicker">Admin Panel</p>
+              <h1>Platform control room for users, categories, and the movie library</h1>
+            </div>
+            <div class="admin-header-actions">
+              <button type="button" class="ghost-btn" id="adminOpenViewer">Open Viewer Dashboard</button>
+            </div>
+          </header>
+
+          <p class="helper-text admin-helper-banner" id="adminHelper">
+            This admin panel is now separated from the public website flow. Each menu section can keep growing as new moderation tools are needed.
+          </p>
+
+          <section class="admin-panel" data-admin-panel-view="super-admin">
+            <div class="admin-summary-grid">
+              <article class="admin-summary-card">
+                <span>Super Admin Accounts</span>
+                <strong id="adminSuperUsers">0</strong>
+                <p>Highest-trust accounts with platform-wide governance and override controls.</p>
+              </article>
+              <article class="admin-summary-card">
+                <span>Managed Taxonomies</span>
+                <strong id="adminTaxonomyTotal">0</strong>
+                <p>Combined categories, genres, and grades currently maintained in the system.</p>
+              </article>
+              <article class="admin-summary-card">
+                <span>Platform Roles</span>
+                <strong id="adminRoleCount">5</strong>
+                <p>Super Admin, Admin, Viewers, Creators, and Advertisers in the active role model.</p>
+              </article>
+            </div>
+
+            <article class="workspace-panel admin-panel-card">
+              <p class="section-kicker">Super Admin Console</p>
+              <h2>Platform governance, taxonomy control, and future top-level operations</h2>
+              <div class="super-admin-grid">
+                <section class="super-admin-block">
+                  <h3>Platform Governance</h3>
+                  <div class="super-admin-pill-list">
+                    <span class="super-admin-pill">Role governance</span>
+                    <span class="super-admin-pill">Catalog structure</span>
+                    <span class="super-admin-pill">Taxonomy authority</span>
+                    <span class="super-admin-pill">Release rules</span>
+                    <span class="super-admin-pill">Wallet policy</span>
+                    <span class="super-admin-pill">Audit expansion</span>
+                  </div>
+                </section>
+                <section class="super-admin-block">
+                  <h3>Current Focus</h3>
+                  <ul class="admin-sidebar-list">
+                    <li>Keep catalog classifications clean and searchable</li>
+                    <li>Control who can create and moderate titles</li>
+                    <li>Prepare the system for richer title creation next</li>
+                  </ul>
+                </section>
+              </div>
+            </article>
+
+            <article class="workspace-panel admin-panel-card">
+              <p class="section-kicker">Taxonomy Manager</p>
+              <h2>Manage categories, genres, and grades</h2>
+              <div id="superAdminTaxonomyGrid" class="taxonomy-grid"></div>
+            </article>
+          </section>
+
+          <section class="admin-panel is-active" data-admin-panel-view="users">
+            <div class="admin-summary-grid">
+              <article class="admin-summary-card">
+                <span>Total Accounts</span>
+                <strong id="adminTotalUsers">0</strong>
+              <p>All viewer, creator, admin, and super admin accounts in the platform.</p>
+              </article>
+              <article class="admin-summary-card">
+                <span>Active Accounts</span>
+                <strong id="adminActiveUsers">0</strong>
+                <p>Users currently allowed to sign in and access their assigned workspace.</p>
+              </article>
+              <article class="admin-summary-card">
+                <span>Pending Review</span>
+                <strong id="adminPendingUsers">0</strong>
+                <p>Accounts waiting for approval, onboarding, or a role update.</p>
+              </article>
+            </div>
+
+            <article class="workspace-panel admin-panel-card">
+              <p class="section-kicker">Manage Users</p>
+              <h2>Control access, status, and role assignment</h2>
+              <div id="adminUserList" class="admin-user-list"></div>
+            </article>
+          </section>
+
+          <section class="admin-panel" data-admin-panel-view="categories">
+            <div class="admin-summary-grid">
+              <article class="admin-summary-card">
+                <span>Featured Section</span>
+                <strong id="adminFeaturedStage">Upcoming</strong>
+                <p>The viewer-facing section currently promoted as the main discovery entry.</p>
+              </article>
+              <article class="admin-summary-card">
+                <span>Queue Ready</span>
+                <strong id="adminQueueReady">0</strong>
+                <p>Titles ready for review, promotion, release movement, or publishing action.</p>
+              </article>
+              <article class="admin-summary-card">
+                <span>Reward Boosts</span>
+                <strong id="adminRewardBoosts">0</strong>
+                <p>Manual category or campaign boosts recorded for the current phase.</p>
+              </article>
+            </div>
+
+            <article class="workspace-panel admin-panel-card">
+              <p class="section-kicker">Manage Categories</p>
+              <h2>Shape how upcoming, new release, and old movies appear</h2>
+              <div id="adminCategoryList" class="admin-category-list"></div>
+              <div class="admin-category-controls">
+                <label class="field">
+                  <span>Featured Viewer Section</span>
+                  <select id="adminStageSelect" class="select-input">
+                    <option value="upcoming">Upcoming Movies</option>
+                    <option value="released">New Released Movies</option>
+                    <option value="library">Old Movies</option>
+                  </select>
+                </label>
+                <div class="admin-actions">
+                  <button type="button" class="ghost-btn" id="adminFeatureUpcoming">Save Featured Section</button>
+                  <button type="button" class="ghost-btn" id="adminBoostRewards">Boost Reward Campaign</button>
+                </div>
+              </div>
+            </article>
+          </section>
+
+          <section class="admin-panel" data-admin-panel-view="library">
+            <div class="admin-summary-grid">
+              <article class="admin-summary-card">
+                <span>Tracked Titles</span>
+                <strong id="adminTrackedTitles">0</strong>
+                <p>Movies currently available across the active and archived library records.</p>
+              </article>
+              <article class="admin-summary-card">
+                <span>Archive Count</span>
+                <strong id="adminArchiveCount">0</strong>
+                <p>Titles hidden from the public catalog but still preserved for admin control.</p>
+              </article>
+              <article class="admin-summary-card">
+                <span>Review Queue</span>
+                <strong id="adminQueueTotal">0</strong>
+              <p>Creator submissions and publishing items needing library attention.</p>
+              </article>
+            </div>
+
+            <article class="workspace-panel admin-panel-card">
+              <p class="section-kicker">Manage Library</p>
+              <h2>Review queue, move movies, update details, and archive titles</h2>
+              <div id="adminReviewList" class="queue-list"></div>
+            </article>
+
+            <article class="workspace-panel admin-panel-card">
+              <p class="section-kicker">Library Inventory</p>
+              <h2>Edit movie details and section placement</h2>
+              <div id="adminMovieList" class="admin-movie-list"></div>
+            </article>
+          </section>
+        </div>
+      </section>
+    </section>
+  </main>
+
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+  <script type="module" src="../app.js?v=20260709a"></script>
+</body>
+</html>

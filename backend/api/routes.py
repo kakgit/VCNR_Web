@@ -2933,6 +2933,29 @@ def get_movie_delivery_torrent(
   manifest = _read_content_manifest(movie_id)
   if manifest is None:
     raise HTTPException(status_code=404, detail="Content package not found.")
+
+  torrent_path = _content_torrent_path(movie_id, normalized)
+  quality_lookup = _content_quality_lookup(manifest)
+  quality_entry = quality_lookup.get(normalized) or {}
+  saved_metadata = (
+    manifest.get("torrent_packages", {}).get(normalized)
+    or quality_entry.get("torrent")
+    or {}
+  )
+
+  if torrent_path.is_file() and isinstance(saved_metadata, dict) and saved_metadata.get("info_hash_sha1"):
+    payload = {
+      key: value
+      for key, value in saved_metadata.items()
+      if key not in {"torrent_file_name", "saved_at"}
+    }
+    payload["torrent_base64"] = b64encode(torrent_path.read_bytes()).decode("ascii")
+    return DeliveryTorrentResponse(
+      movie_id=movie_id,
+      quality_code=normalized,
+      **payload,
+    )
+
   webseed_base = _normalize_upload_torrent_webseed_base()
   payload, torrent_bytes, _info_hash = _build_torrent_for_quality(
     manifest,
@@ -2942,7 +2965,6 @@ def get_movie_delivery_torrent(
   )
   payload["torrent_base64"] = b64encode(torrent_bytes).decode("ascii")
   try:
-    torrent_path = _content_torrent_path(movie_id, normalized)
     torrent_path.parent.mkdir(parents=True, exist_ok=True)
     torrent_path.write_bytes(torrent_bytes)
     saved_at = datetime.utcnow().isoformat(timespec="seconds") + "Z"

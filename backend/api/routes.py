@@ -2994,8 +2994,7 @@ def get_movie_delivery_torrent(
   return DeliveryTorrentResponse(**payload_out)
 
 
-@router.api_route("/movies/{movie_id}/delivery/public-chunks/{quality_code}/{chunk_name}", methods=["GET", "HEAD"])
-def download_movie_public_delivery_chunk(
+def _download_movie_public_delivery_chunk_impl(
   movie_id: str,
   quality_code: str,
   chunk_name: str,
@@ -3044,6 +3043,16 @@ def download_movie_public_delivery_chunk(
   )
 
 
+@router.api_route("/movies/{movie_id}/delivery/public-chunks/{quality_code}/{chunk_name}", methods=["GET", "HEAD"])
+def download_movie_public_delivery_chunk(
+  movie_id: str,
+  quality_code: str,
+  chunk_name: str,
+  db: Session | None = Depends(get_db),
+) -> FileResponse:
+  return _download_movie_public_delivery_chunk_impl(movie_id, quality_code, chunk_name, db)
+
+
 @router.api_route("/movies/{movie_id}/delivery/public-chunks/{quality_code}/{package_name}/{chunk_name}", methods=["GET", "HEAD"])
 def download_movie_public_delivery_chunk_with_package(
   movie_id: str,
@@ -3057,7 +3066,21 @@ def download_movie_public_delivery_chunk_with_package(
   safe_package_name = Path(package_name).name
   if safe_package_name != package_name or package_name != expected_package_name:
     raise HTTPException(status_code=404, detail="Torrent package path not found.")
-  return download_movie_public_delivery_chunk(movie_id, quality_code, chunk_name, db)
+  return _download_movie_public_delivery_chunk_impl(movie_id, quality_code, chunk_name, db)
+
+
+@router.api_route("/movies/{movie_id}/delivery/public-chunks/{quality_code}/{package_path:path}", methods=["GET", "HEAD"])
+def download_movie_public_delivery_chunk_with_nested_package_path(
+  movie_id: str,
+  quality_code: str,
+  package_path: str,
+  db: Session | None = Depends(get_db),
+) -> FileResponse:
+  safe_path = str(package_path).strip("/")
+  if not safe_path:
+    raise HTTPException(status_code=400, detail="Invalid chunk path.")
+  safe_name = Path(safe_path).name
+  return _download_movie_public_delivery_chunk_impl(movie_id, quality_code, safe_name, db)
 
 
 @router.post("/movies/{movie_id}/delivery/complete", response_model=DeliveryStatusResponse)

@@ -18,13 +18,17 @@
 
 ## Transfer
 
-- The user signs in with the same account on both devices.
-- The source device creates a pairing code or QR-based transfer session.
-- The target device must already be signed in with the same user ID.
+- The first working proof-of-concept uses the same account on both devices.
+- The future target allows different users, but only when the receiving user is independently entitled to the same title quality.
+- The source device creates a pairing code or QR-based transfer session for manual testing.
+- The target device must already be signed in and authorized.
 - Only encrypted chunks move between devices.
-- The backend only handles pairing, authorization, and session control.
-- The file bytes should not be relayed through the backend unless we later decide on a fallback.
+- The backend handles pairing, authorization, session control, and may also act as a relay when that is the most reliable path.
+- The transfer design should be transport-independent: backend relay, internet, Wi-Fi, mobile data, direct LAN, WebRTC, or libp2p can all be considered.
+- The receiver must verify chunk size/hash before trusting downloaded peer-assisted files.
+- The receiver must still request normal server unlock before playback.
 - The current stable mobile baseline is documented in [stable-mobile-delivery-flow.md](D:/Python/VCNR_Web/docs/stable-mobile-delivery-flow.md).
+- Current M-P2P simulator is in [m_p2p_simulator.py](D:/Python/VCNR_Web/tools/m_p2p_simulator.py).
 
 ## Playback
 

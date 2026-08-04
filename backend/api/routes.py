@@ -4,11 +4,13 @@ from base64 import b64encode
 from pathlib import Path
 import hashlib
 import json
+import os
 import re
 import secrets
 import shutil
 import site
 import sys
+import time
 from datetime import datetime, timedelta
 from tempfile import NamedTemporaryFile
 import zipfile
@@ -45,6 +47,42 @@ from backend.schemas import (
   DeliverySlotHeartbeatRequest,
   DeliverySlotResponse,
   DeliveryStatusResponse,
+  DeliveryTorrentResponse,
+  TransferPairingCreateRequest,
+  TransferPairingCreateResponse,
+  TransferPairingInventoryRequest,
+  TransferPairingInventoryResponse,
+  TransferPairingJoinRequest,
+  TransferPairingJoinResponse,
+  TransferPairingManifestRequest,
+  TransferPairingManifestResponse,
+  TransferPairingStatusResponse,
+  TransferRelayChunkUploadResponse,
+  SwarmInventoryRequest,
+  SwarmInventoryResponse,
+  SwarmAutoSessionRequest,
+  SwarmAutoSessionResponse,
+  SwarmDemandCreateRequest,
+  SwarmDemandEntry,
+  SwarmDemandListResponse,
+  SwarmDemandResponse,
+  SwarmSeederAnnounceRequest,
+  SwarmSeederAnnounceResponse,
+  SwarmSeederAssignmentResponse,
+  SwarmSeederCooldownResponse,
+  SwarmSeederListResponse,
+  SwarmSessionCreateRequest,
+  SwarmSessionResponse,
+  SwarmSourceEntry,
+  SwarmSourcePublishRequest,
+  SwarmSourcePublishResponse,
+  SwarmSourcesResponse,
+  SwarmRelayChunkUploadResponse,
+  SwarmSignalActionResponse,
+  SwarmSignalAnswerRequest,
+  SwarmSignalCandidateRequest,
+  SwarmSignalOfferRequest,
+  SwarmSignalStateResponse,
   AdminMovieUpdateRequest,
   AdminMovieActionResponse,
   AdminMovieListResponse,
@@ -99,6 +137,46 @@ DELIVERY_MAX_ACTIVE_SLOTS_PER_MOVIE = 3
 DELIVERY_QUEUE_MIN_RETRY_SECONDS = 60
 DELIVERY_QUEUE_DEFAULT_RETRY_SECONDS = 120
 DELIVERY_QUEUE_MAX_RETRY_SECONDS = 900
+TRANSFER_PAIRING_TTL_MINUTES = 10
+TRANSFER_PAIRING_SESSIONS: dict[str, dict[str, str]] = {}
+TRANSFER_RELAY_ROOT = LIBRARY_MEDIA_ROOT / "_transfer_relay"
+SWARM_SESSION_TTL_MINUTES = 60
+SWARM_SEEDER_TTL_MINUTES = 10
+SWARM_DEMAND_TTL_MINUTES = 10
+SWARM_SEEDER_COOLDOWN_MINUTES = 2
+SWARM_SEEDER_FRESHNESS_SECONDS = 45
+SWARM_SESSIONS: dict[str, dict[str, str]] = {}
+SWARM_AVAILABLE_SEEDERS: dict[str, dict[str, str]] = {}
+SWARM_ACTIVE_DEMANDS: dict[str, dict[str, str]] = {}
+SWARM_MANIFEST_INTEGRITY_CACHE: dict[str, dict] = {}
+SWARM_RELAY_ROOT = LIBRARY_MEDIA_ROOT / "_swarm_relay"
+TORRENT_TEST_SEEDER_TTL_MINUTES = 10
+TORRENT_TEST_SEEDERS: dict[str, dict[str, str]] = {}
+
+
+def _swarm_transport_payload() -> dict[str, str]:
+  config = get_settings()
+  return {
+    "stun_url": config.swarm_stun_url or "stun:stun.l.google.com:19302",
+    "turn_url": config.swarm_turn_url or "",
+    "turn_username": config.swarm_turn_username or "",
+    "turn_credential": config.swarm_turn_credential or "",
+  }
+
+
+def _torrent_test_seeder_expiry() -> datetime:
+  return datetime.utcnow() + timedelta(minutes=TORRENT_TEST_SEEDER_TTL_MINUTES)
+
+
+def _cleanup_torrent_test_seeders() -> None:
+  now = datetime.utcnow()
+  expired_keys = [
+    key
+    for key, item in TORRENT_TEST_SEEDERS.items()
+    if datetime.fromisoformat(str(item.get("expires_at") or now.isoformat())) <= now
+  ]
+  for key in expired_keys:
+    TORRENT_TEST_SEEDERS.pop(key, None)
 
 
 def _safe_name(value: str) -> str:
@@ -198,7 +276,24 @@ def _delete_movie_media_folder(movie_id: str) -> None:
     raise HTTPException(status_code=400, detail="Invalid movie media path.") from error
 
   if target_path.exists():
-    shutil.rmtree(target_path)
+    last_error: Exception | None = None
+    for _attempt in range(3):
+      try:
+        shutil.rmtree(target_path)
+        return
+      except FileNotFoundError:
+        return
+      except PermissionError as error:
+        last_error = error
+        time.sleep(0.25)
+      except OSError as error:
+        last_error = error
+        time.sleep(0.25)
+    detail = (
+      f'Unable to delete "{movie_id}" completely because one of its media files is still in use. '
+      "Close any video player, torrent client, File Explorer window, or app process using that title and try again."
+    )
+    raise HTTPException(status_code=409, detail=detail) from last_error
 
 
 def _delete_movie_content_folder(movie_id: str) -> None:
@@ -318,6 +413,11 @@ def _delete_media_asset(movie_id: str, kind: str, asset_name: str) -> None:
 
 def _content_manifest_path(movie_id: str) -> Path:
   return LIBRARY_MEDIA_ROOT / movie_id / "content" / "manifest.json"
+
+
+def _content_torrent_path(movie_id: str, quality_code: str) -> Path:
+  normalized_quality_code = _normalize_quality_code(quality_code)
+  return LIBRARY_MEDIA_ROOT / movie_id / "content" / f"{normalized_quality_code}.torrent"
 
 
 def _content_folder_path(movie_id: str) -> Path:
@@ -464,6 +564,590 @@ def _recommended_delivery_retry_seconds(queue_position: int | None) -> int:
     DELIVERY_QUEUE_MIN_RETRY_SECONDS,
     min(DELIVERY_QUEUE_MAX_RETRY_SECONDS, recommended),
   )
+
+
+def _transfer_pairing_expiry() -> datetime:
+  return datetime.utcnow() + timedelta(minutes=TRANSFER_PAIRING_TTL_MINUTES)
+
+
+def _transfer_pairing_folder(pairing_code: str) -> Path:
+  return TRANSFER_RELAY_ROOT / pairing_code.upper()
+
+
+def _delete_transfer_pairing_files(pairing_code: str) -> None:
+  target = _transfer_pairing_folder(pairing_code)
+  if target.exists():
+    shutil.rmtree(target, ignore_errors=True)
+
+
+def _cleanup_transfer_pairing_sessions() -> None:
+  now = datetime.utcnow()
+  expired_codes = [
+    code
+    for code, session in TRANSFER_PAIRING_SESSIONS.items()
+    if datetime.fromisoformat(session["expires_at"]) <= now
+  ]
+  for code in expired_codes:
+    TRANSFER_PAIRING_SESSIONS.pop(code, None)
+    _delete_transfer_pairing_files(code)
+
+
+def _create_transfer_pairing_code() -> str:
+  for _ in range(20):
+    code = secrets.token_hex(3).upper()
+    if code not in TRANSFER_PAIRING_SESSIONS:
+      return code
+  raise HTTPException(status_code=500, detail="Unable to generate a transfer pairing code right now.")
+
+
+def _get_transfer_pairing_session_or_404(pairing_code: str) -> dict[str, str]:
+  _cleanup_transfer_pairing_sessions()
+  session = TRANSFER_PAIRING_SESSIONS.get(pairing_code.upper())
+  if session is None:
+    raise HTTPException(status_code=404, detail="That pairing code was not found or has expired.")
+  return session
+
+
+def _get_transfer_chunk_names(session: dict[str, str], key: str) -> set[str]:
+  raw = session.get(key) or "[]"
+  try:
+    parsed = json.loads(raw)
+  except json.JSONDecodeError:
+    parsed = []
+  return {str(item).strip() for item in parsed if str(item).strip()}
+
+
+def _set_transfer_chunk_names(session: dict[str, str], key: str, chunk_names: set[str]) -> None:
+  session[key] = json.dumps(sorted(chunk_names))
+
+
+def _get_transfer_manifest(session: dict[str, str]) -> dict:
+  if not session.get("manifest_json"):
+    return {}
+  try:
+    manifest = json.loads(session["manifest_json"])
+  except json.JSONDecodeError:
+    return {}
+  return manifest if isinstance(manifest, dict) else {}
+
+
+def _get_transfer_expected_chunk_names(session: dict[str, str]) -> set[str]:
+  manifest = _get_transfer_manifest(session)
+  if not manifest:
+    return set()
+  chunk_lookup = _chunk_manifest_lookup(manifest, session["quality_code"])
+  return set(chunk_lookup.keys())
+
+
+def _serialize_transfer_status(session: dict[str, str]) -> TransferPairingStatusResponse:
+  expected_chunks = _get_transfer_expected_chunk_names(session)
+  sender_chunks = expected_chunks or _get_transfer_chunk_names(session, "sender_chunk_names")
+  receiver_chunks = _get_transfer_chunk_names(session, "receiver_chunk_names")
+  if expected_chunks:
+    receiver_chunks = receiver_chunks.intersection(expected_chunks)
+  relay_chunks = _get_transfer_chunk_names(session, "relay_chunk_names")
+  if expected_chunks:
+    relay_chunks = relay_chunks.intersection(expected_chunks)
+  missing_chunks = sender_chunks.difference(receiver_chunks)
+  return TransferPairingStatusResponse(
+    movie_id=session["movie_id"],
+    quality_code=session["quality_code"],
+    pairing_code=session["pairing_code"],
+    expires_at=datetime.fromisoformat(session["expires_at"]).isoformat(timespec="seconds") + "Z",
+    session_status=session["session_status"],
+    receiver_user_id=session["receiver_user_id"],
+    sender_user_id=session.get("sender_user_id") or None,
+    sender_joined=bool(session.get("sender_user_id")),
+    sender_chunk_count=len(sender_chunks),
+    receiver_chunk_count=len(receiver_chunks),
+    missing_chunk_count=len(missing_chunks),
+    relay_ready_chunk_count=len(relay_chunks),
+    relay_ready_chunk_names=sorted(relay_chunks),
+    manifest_available=bool(session.get("manifest_json")),
+  )
+
+
+def _chunk_manifest_lookup(manifest: dict, quality_code: str) -> dict[str, dict]:
+  normalized_quality_code = _normalize_quality_code(quality_code)
+  return {
+    str(item.get("name") or ""): item
+    for item in manifest.get("files", [])
+    if str(item.get("name") or "").strip()
+    and _normalize_quality_code(str(item.get("quality_code") or "")) == normalized_quality_code
+  }
+
+
+def _validate_transfer_manifest_integrity(manifest: dict, quality_code: str) -> dict[str, dict]:
+  chunk_lookup = _chunk_manifest_lookup(manifest, quality_code)
+  if not chunk_lookup:
+    raise HTTPException(status_code=400, detail="Transfer manifest does not include encrypted chunks for this title quality.")
+
+  invalid_names: list[str] = []
+  missing_integrity_names: list[str] = []
+  for name, record in chunk_lookup.items():
+    if Path(name).name != name:
+      invalid_names.append(name)
+      continue
+    expected_size = int(record.get("encrypted_size") or 0)
+    expected_sha256 = str(record.get("encrypted_sha256") or "").strip().lower()
+    expected_md5 = str(record.get("encrypted_md5") or "").strip().lower()
+    if expected_size <= 0 or (not expected_sha256 and not expected_md5):
+      missing_integrity_names.append(name)
+
+  if invalid_names:
+    raise HTTPException(status_code=400, detail="Transfer manifest contains invalid chunk names.")
+  if missing_integrity_names:
+    raise HTTPException(
+      status_code=400,
+      detail="Transfer manifest is missing chunk size/checksum data. Reopen sender after updating the app and retry.",
+    )
+  return chunk_lookup
+
+
+def _swarm_session_expiry() -> datetime:
+  return datetime.utcnow() + timedelta(minutes=SWARM_SESSION_TTL_MINUTES)
+
+
+def _swarm_seeder_expiry() -> datetime:
+  return datetime.utcnow() + timedelta(minutes=SWARM_SEEDER_TTL_MINUTES)
+
+
+def _swarm_seeder_cooldown_expiry() -> datetime:
+  return datetime.utcnow() + timedelta(minutes=SWARM_SEEDER_COOLDOWN_MINUTES)
+
+
+def _swarm_demand_expiry() -> datetime:
+  return datetime.utcnow() + timedelta(minutes=SWARM_DEMAND_TTL_MINUTES)
+
+
+def _swarm_demand_key(movie_id: str, quality_code: str) -> str:
+  return f"{movie_id}:{_normalize_quality_code(quality_code)}"
+
+
+def _cleanup_swarm_sessions() -> None:
+  now = datetime.utcnow()
+  expired_ids = [
+    session_id
+    for session_id, session in SWARM_SESSIONS.items()
+    if datetime.fromisoformat(session["expires_at"]) <= now
+  ]
+  for session_id in expired_ids:
+    SWARM_SESSIONS.pop(session_id, None)
+    _delete_swarm_relay_files(session_id)
+
+
+def _cleanup_swarm_seeders() -> None:
+  now = datetime.utcnow()
+  expired_ids = [
+    seeder_id
+    for seeder_id, seeder in SWARM_AVAILABLE_SEEDERS.items()
+    if datetime.fromisoformat(seeder["expires_at"]) <= now
+  ]
+  for seeder_id in expired_ids:
+    SWARM_AVAILABLE_SEEDERS.pop(seeder_id, None)
+
+
+def _cleanup_swarm_demands() -> None:
+  now = datetime.utcnow()
+  expired_ids = [
+    demand_id
+    for demand_id, demand in SWARM_ACTIVE_DEMANDS.items()
+    if datetime.fromisoformat(demand["expires_at"]) <= now
+  ]
+  for demand_id in expired_ids:
+    SWARM_ACTIVE_DEMANDS.pop(demand_id, None)
+
+
+def _create_swarm_session_id() -> str:
+  for _ in range(20):
+    session_id = secrets.token_urlsafe(18)
+    if session_id not in SWARM_SESSIONS:
+      return session_id
+  raise HTTPException(status_code=500, detail="Unable to create a swarm session right now.")
+
+
+def _create_swarm_seeder_id(user_id: str, device_id: str | None) -> str:
+  clean_device_id = _safe_name(device_id or "")
+  if clean_device_id:
+    return f"seeder:{user_id}:{clean_device_id}"
+  return f"seeder:{user_id}:{secrets.token_urlsafe(8)}"
+
+
+def _drop_swarm_receiver_sessions(movie_id: str, quality_code: str, user_id: str, device_label: str | None = None) -> None:
+  normalized_quality_code = _normalize_quality_code(quality_code)
+  normalized_label = (device_label or "").strip()
+  stale_ids: list[str] = []
+  for session_id, session in SWARM_SESSIONS.items():
+    if session["movie_id"] != movie_id or session["quality_code"] != normalized_quality_code:
+      continue
+    if session.get("user_id") != user_id:
+      continue
+    if normalized_label and (session.get("device_label") or "").strip() != normalized_label:
+      continue
+    stale_ids.append(session_id)
+  for session_id in stale_ids:
+    SWARM_SESSIONS.pop(session_id, None)
+    _delete_swarm_relay_files(session_id)
+  if not stale_ids:
+    return
+  for seeder in SWARM_AVAILABLE_SEEDERS.values():
+    if str(seeder.get("assigned_session_id") or "") in stale_ids:
+      seeder["assigned_session_id"] = ""
+
+
+def _get_swarm_session_or_404(session_id: str) -> dict[str, str]:
+  _cleanup_swarm_sessions()
+  session = SWARM_SESSIONS.get(session_id)
+  if session is None:
+    raise HTTPException(status_code=404, detail="That swarm session was not found or has expired.")
+  return session
+
+
+def _swarm_available_seeders(movie_id: str, quality_code: str, missing_chunks: set[str]) -> list[SwarmSourceEntry]:
+  _cleanup_swarm_seeders()
+  normalized_quality_code = _normalize_quality_code(quality_code)
+  entries: list[SwarmSourceEntry] = []
+  freshness_cutoff = datetime.utcnow() - timedelta(seconds=SWARM_SEEDER_FRESHNESS_SECONDS)
+  for seeder in SWARM_AVAILABLE_SEEDERS.values():
+    if seeder["movie_id"] != movie_id or seeder["quality_code"] != normalized_quality_code:
+      continue
+    try:
+      updated_at = datetime.fromisoformat(seeder["updated_at"])
+    except ValueError:
+      continue
+    if updated_at < freshness_cutoff:
+      continue
+    cooldown_until = str(seeder.get("cooldown_until") or "").strip()
+    if cooldown_until:
+      try:
+        if datetime.fromisoformat(cooldown_until) > datetime.utcnow():
+          continue
+      except ValueError:
+        pass
+    chunk_names = sorted(_get_swarm_json_set(seeder, "chunk_names").intersection(missing_chunks))
+    if not chunk_names:
+      continue
+    entries.append(
+      SwarmSourceEntry(
+        source_id=seeder["seeder_id"],
+        source_type="webrtc_peer",
+        user_id=seeder.get("user_id"),
+        device_label=seeder.get("device_label"),
+        chunk_names=chunk_names,
+        chunk_count=len(chunk_names),
+        last_seen_at=updated_at.isoformat(timespec="seconds") + "Z",
+      )
+    )
+  def _sort_key(item: SwarmSourceEntry) -> tuple[int, datetime]:
+    try:
+      last_seen = datetime.fromisoformat(item.last_seen_at.replace("Z", ""))
+    except ValueError:
+      last_seen = datetime.min
+    return (item.chunk_count, last_seen)
+
+  entries.sort(key=_sort_key, reverse=True)
+  return entries
+
+
+def _assign_seeders_to_active_receiver_sessions(movie_id: str, quality_code: str, seeders: list[SwarmSourceEntry]) -> None:
+  if not seeders:
+    return
+  _cleanup_swarm_sessions()
+  normalized_quality_code = _normalize_quality_code(quality_code)
+  selected_ids = [seeder.source_id for seeder in seeders]
+  for session in SWARM_SESSIONS.values():
+    if session["movie_id"] != movie_id or session["quality_code"] != normalized_quality_code:
+      continue
+    assigned_ids = _get_swarm_json_set(session, "assigned_seeder_ids")
+    changed = False
+    for seeder_id in selected_ids:
+      if seeder_id not in assigned_ids:
+        assigned_ids.add(seeder_id)
+        changed = True
+      if seeder_id in SWARM_AVAILABLE_SEEDERS:
+        SWARM_AVAILABLE_SEEDERS[seeder_id]["assigned_session_id"] = session["session_id"]
+    if changed:
+      session["assigned_seeder_ids"] = json.dumps(sorted(assigned_ids))
+      if not session.get("selected_seeder_id") and selected_ids:
+        session["selected_seeder_id"] = selected_ids[0]
+      _touch_swarm_session(session)
+
+
+def _swarm_demand_entries_for_chunks(movie_id: str, quality_code: str, available_chunks: set[str]) -> list[SwarmDemandEntry]:
+  _cleanup_swarm_demands()
+  normalized_quality_code = _normalize_quality_code(quality_code)
+  entries: list[SwarmDemandEntry] = []
+  for demand in SWARM_ACTIVE_DEMANDS.values():
+    if demand["movie_id"] != movie_id or demand["quality_code"] != normalized_quality_code:
+      continue
+    missing_chunks = _get_swarm_json_set(demand, "missing_chunk_names")
+    useful_chunks = missing_chunks.intersection(available_chunks)
+    if not useful_chunks:
+      continue
+    entries.append(
+      SwarmDemandEntry(
+        movie_id=movie_id,
+        quality_code=normalized_quality_code,
+        receiver_count=int(demand.get("receiver_count") or 0),
+        missing_chunk_count=len(useful_chunks),
+        expires_at=datetime.fromisoformat(demand["expires_at"]).isoformat(timespec="seconds") + "Z",
+      )
+    )
+  return entries
+
+
+def _get_swarm_json_set(session: dict[str, str], key: str) -> set[str]:
+  raw = session.get(key) or "[]"
+  try:
+    parsed = json.loads(raw)
+  except json.JSONDecodeError:
+    parsed = []
+  return {str(item).strip() for item in parsed if str(item).strip()}
+
+
+def _set_swarm_json_set(session: dict[str, str], key: str, values: set[str]) -> None:
+  session[key] = json.dumps(sorted(values))
+
+
+def _get_swarm_sources(session: dict[str, str]) -> dict[str, dict]:
+  raw = session.get("sources_json") or "{}"
+  try:
+    parsed = json.loads(raw)
+  except json.JSONDecodeError:
+    parsed = {}
+  return parsed if isinstance(parsed, dict) else {}
+
+
+def _set_swarm_sources(session: dict[str, str], sources: dict[str, dict]) -> None:
+  session["sources_json"] = json.dumps(sources)
+
+
+def _normalize_swarm_seeder_id(value: str | None) -> str:
+  return str(value or "").strip()
+
+
+def _get_swarm_peer_links(session: dict[str, str]) -> dict[str, dict]:
+  raw = session.get("webrtc_peer_links_json") or "{}"
+  try:
+    parsed = json.loads(raw)
+  except json.JSONDecodeError:
+    parsed = {}
+  return parsed if isinstance(parsed, dict) else {}
+
+
+def _set_swarm_peer_links(session: dict[str, str], links: dict[str, dict]) -> None:
+  session["webrtc_peer_links_json"] = json.dumps(links)
+
+
+def _get_or_create_swarm_peer_link(session: dict[str, str], seeder_id: str) -> dict:
+  normalized_seeder_id = _normalize_swarm_seeder_id(seeder_id)
+  if not normalized_seeder_id:
+    raise HTTPException(status_code=400, detail="Seeder id is required for peer-specific signaling.")
+  links = _get_swarm_peer_links(session)
+  link = links.get(normalized_seeder_id)
+  if not isinstance(link, dict):
+    link = {
+      "seeder_id": normalized_seeder_id,
+      "offer": None,
+      "answer": None,
+      "receiver_candidates": [],
+      "sender_candidates": [],
+      "updated_at": datetime.utcnow().isoformat(),
+    }
+  links[normalized_seeder_id] = link
+  _set_swarm_peer_links(session, links)
+  return link
+
+
+def _set_swarm_peer_link(session: dict[str, str], seeder_id: str, link: dict) -> None:
+  normalized_seeder_id = _normalize_swarm_seeder_id(seeder_id)
+  links = _get_swarm_peer_links(session)
+  links[normalized_seeder_id] = link
+  _set_swarm_peer_links(session, links)
+
+
+def _require_owned_swarm_seeder(movie_id: str, quality_code: str, seeder_id: str, user_id: str) -> dict[str, str]:
+  _cleanup_swarm_seeders()
+  seeder = SWARM_AVAILABLE_SEEDERS.get(seeder_id)
+  if seeder is None or seeder["movie_id"] != movie_id or seeder["quality_code"] != _normalize_quality_code(quality_code):
+    raise HTTPException(status_code=404, detail="That live seeder is not available.")
+  if seeder["user_id"] != user_id:
+    raise HTTPException(status_code=403, detail="Only that seeder device can publish this signaling lane.")
+  return seeder
+
+
+def _get_swarm_signal_json(session: dict[str, str], key: str) -> dict | None:
+  raw = session.get(key) or ""
+  if not raw:
+    return None
+  try:
+    parsed = json.loads(raw)
+  except json.JSONDecodeError:
+    return None
+  return parsed if isinstance(parsed, dict) else None
+
+
+def _set_swarm_signal_json(session: dict[str, str], key: str, payload: dict) -> None:
+  session[key] = json.dumps(payload)
+
+
+def _get_swarm_signal_list(session: dict[str, str], key: str) -> list[dict]:
+  raw = session.get(key) or "[]"
+  try:
+    parsed = json.loads(raw)
+  except json.JSONDecodeError:
+    parsed = []
+  return [item for item in parsed if isinstance(item, dict)]
+
+
+def _append_swarm_signal_candidate(session: dict[str, str], key: str, candidate: dict) -> int:
+  candidates = _get_swarm_signal_list(session, key)
+  if candidate not in candidates:
+    candidates.append(candidate)
+  session[key] = json.dumps(candidates[-80:])
+  return len(candidates[-80:])
+
+
+def _append_swarm_peer_candidate(link: dict, key: str, candidate: dict) -> int:
+  candidates = [item for item in (link.get(key) or []) if isinstance(item, dict)]
+  if candidate not in candidates:
+    candidates.append(candidate)
+  trimmed = candidates[-80:]
+  link[key] = trimmed
+  link["updated_at"] = datetime.utcnow().isoformat()
+  return len(trimmed)
+
+
+def _serialize_swarm_signal_state(session: dict[str, str], seeder_id: str | None = None) -> SwarmSignalStateResponse:
+  normalized_seeder_id = _normalize_swarm_seeder_id(seeder_id)
+  if normalized_seeder_id:
+    link = _get_swarm_peer_links(session).get(normalized_seeder_id) or {}
+    return SwarmSignalStateResponse(
+      movie_id=session["movie_id"],
+      quality_code=session["quality_code"],
+      session_id=session["session_id"],
+      seeder_id=normalized_seeder_id,
+      offer=link.get("offer") if isinstance(link.get("offer"), dict) else None,
+      answer=link.get("answer") if isinstance(link.get("answer"), dict) else None,
+      receiver_candidates=[item for item in (link.get("receiver_candidates") or []) if isinstance(item, dict)],
+      sender_candidates=[item for item in (link.get("sender_candidates") or []) if isinstance(item, dict)],
+      updated_at=datetime.fromisoformat(str(link.get("updated_at") or session["updated_at"])).isoformat(timespec="seconds") + "Z",
+    )
+  return SwarmSignalStateResponse(
+    movie_id=session["movie_id"],
+    quality_code=session["quality_code"],
+    session_id=session["session_id"],
+    seeder_id=None,
+    offer=_get_swarm_signal_json(session, "webrtc_offer_json"),
+    answer=_get_swarm_signal_json(session, "webrtc_answer_json"),
+    receiver_candidates=_get_swarm_signal_list(session, "webrtc_receiver_candidates_json"),
+    sender_candidates=_get_swarm_signal_list(session, "webrtc_sender_candidates_json"),
+    updated_at=datetime.fromisoformat(session["updated_at"]).isoformat(timespec="seconds") + "Z",
+  )
+
+
+def _touch_swarm_session(session: dict[str, str]) -> None:
+  session["expires_at"] = _swarm_session_expiry().isoformat()
+  session["updated_at"] = datetime.utcnow().isoformat()
+
+
+def _swarm_relay_source_folder(session_id: str, source_id: str) -> Path:
+  return SWARM_RELAY_ROOT / _safe_name(session_id) / _safe_name(source_id)
+
+
+def _delete_swarm_relay_files(session_id: str) -> None:
+  target = SWARM_RELAY_ROOT / _safe_name(session_id)
+  if target.exists():
+    shutil.rmtree(target, ignore_errors=True)
+
+
+def _require_swarm_manifest_chunks(movie_id: str, quality_code: str) -> tuple[dict, dict[str, dict]]:
+  manifest = _read_content_manifest(movie_id)
+  if manifest is None:
+    raise HTTPException(status_code=404, detail="Content package not found.")
+  normalized_quality_code = _normalize_quality_code(quality_code)
+  _require_manifest_quality(manifest, normalized_quality_code)
+  chunk_lookup = _chunk_manifest_lookup(manifest, normalized_quality_code)
+  if not chunk_lookup:
+    raise HTTPException(status_code=404, detail="No encrypted chunks found for this title quality.")
+  return manifest, chunk_lookup
+
+
+def _safe_swarm_chunk_names(names: list[str], expected_chunks: set[str]) -> set[str]:
+  accepted: set[str] = set()
+  for item in names:
+    name = str(item or "").strip()
+    if not name or Path(name).name != name:
+      continue
+    if name in expected_chunks:
+      accepted.add(name)
+  return accepted
+
+
+def _serialize_swarm_session(session: dict[str, str], expected_chunks: set[str]) -> SwarmSessionResponse:
+  verified_chunks = _get_swarm_json_set(session, "verified_chunk_names").intersection(expected_chunks)
+  return SwarmSessionResponse(
+    movie_id=session["movie_id"],
+    quality_code=session["quality_code"],
+    session_id=session["session_id"],
+    expires_at=datetime.fromisoformat(session["expires_at"]).isoformat(timespec="seconds") + "Z",
+    user_id=session["user_id"],
+    device_label=session.get("device_label") or None,
+    manifest_available=bool(expected_chunks),
+    expected_chunk_count=len(expected_chunks),
+    verified_chunk_count=len(verified_chunks),
+    missing_chunk_count=max(0, len(expected_chunks) - len(verified_chunks)),
+  )
+
+
+def _server_swarm_source(movie_id: str, expected_chunks: set[str]) -> SwarmSourceEntry | None:
+  content_root = _content_folder_path(movie_id)
+  if not content_root.exists():
+    return None
+  available = {
+    name
+    for name in expected_chunks
+    if next((file_path for file_path in content_root.rglob(name) if file_path.is_file()), None) is not None
+  }
+  if not available:
+    return None
+  return SwarmSourceEntry(
+    source_id="server",
+    source_type="server",
+    user_id=None,
+    device_label="VCNR server",
+    chunk_names=sorted(available),
+    chunk_count=len(available),
+    last_seen_at=app_now().isoformat(timespec="seconds"),
+  )
+
+
+def _swarm_manifest_with_integrity(movie_id: str, manifest: dict, quality_code: str) -> dict:
+  manifest_updated_at = str(manifest.get("updated_at") or "")
+  cache_key = f"{movie_id}:{_normalize_quality_code(quality_code)}:{manifest_updated_at}"
+  cached = SWARM_MANIFEST_INTEGRITY_CACHE.get(cache_key)
+  if cached is not None:
+    return cached
+
+  enriched_manifest = json.loads(json.dumps(manifest))
+  normalized_quality_code = _normalize_quality_code(quality_code)
+  content_root = _content_folder_path(movie_id)
+  for item in enriched_manifest.get("files", []):
+    if _normalize_quality_code(str(item.get("quality_code") or "")) != normalized_quality_code:
+      continue
+    chunk_name = str(item.get("name") or "").strip()
+    if not chunk_name or Path(chunk_name).name != chunk_name:
+      continue
+    target_path = next((file_path for file_path in content_root.rglob(chunk_name) if file_path.is_file()), None) if content_root.exists() else None
+    if target_path is None:
+      continue
+    chunk_bytes = target_path.read_bytes()
+    item["encrypted_size"] = len(chunk_bytes)
+    item["encrypted_md5"] = hashlib.md5(chunk_bytes).hexdigest()
+    item["encrypted_sha256"] = hashlib.sha256(chunk_bytes).hexdigest()
+  SWARM_MANIFEST_INTEGRITY_CACHE.clear()
+  SWARM_MANIFEST_INTEGRITY_CACHE[cache_key] = enriched_manifest
+  return enriched_manifest
 
 
 def _delivery_queue_quality_lookup(movie: dict) -> dict[str, dict]:
@@ -662,6 +1346,7 @@ async def _encrypt_upload_file_into_chunks(
       output.write(encryptor.finalize())
       output.write(encryptor.tag)
 
+    encrypted_bytes = target_path.read_bytes()
     chunk_records.append({
       "name": target_path.name,
       "quality_code": quality_code,
@@ -674,6 +1359,8 @@ async def _encrypt_upload_file_into_chunks(
       "aad": b64encode(aad).decode("ascii"),
       "source_size": len(plaintext),
       "encrypted_size": target_path.stat().st_size,
+      "encrypted_sha256": hashlib.sha256(encrypted_bytes).hexdigest(),
+      "encrypted_md5": hashlib.md5(encrypted_bytes).hexdigest(),
     })
 
   await upload.close()
@@ -696,6 +1383,17 @@ def _write_content_manifest(movie_id: str, manifest: dict) -> None:
   manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=True), encoding="utf-8")
 
 
+def _normalize_upload_torrent_webseed_base() -> str:
+  settings = get_settings()
+  base = settings.frontend_origin.strip().rstrip("/")
+  lowered = base.lower()
+  if not base.startswith(("http://", "https://")):
+    return ""
+  if "localhost" in lowered or "127.0.0.1" in lowered or "0.0.0.0" in lowered:
+    return ""
+  return base
+
+
 def _default_content_manifest(movie: dict) -> dict:
   return {
     "movie_id": movie["id"],
@@ -707,6 +1405,7 @@ def _default_content_manifest(movie: dict) -> dict:
     "chunk_count": 0,
     "encryption": {},
     "files": [],
+    "torrent_packages": {},
     "updated_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
   }
 
@@ -724,6 +1423,7 @@ def _load_content_manifest(movie: dict) -> dict:
   manifest.setdefault("files", [])
   manifest.setdefault("chunk_count", len(manifest.get("files", [])))
   manifest.setdefault("encryption", {})
+  manifest.setdefault("torrent_packages", {})
   manifest.setdefault("updated_at", datetime.utcnow().isoformat(timespec="seconds") + "Z")
   return manifest
 
@@ -734,6 +1434,23 @@ def _content_quality_lookup(manifest: dict) -> dict[str, dict]:
     for item in manifest.get("qualities", [])
     if str(item.get("quality_code") or "").strip()
   }
+
+
+def _quality_manifest_files(manifest: dict, quality_code: str) -> list[dict]:
+  normalized_quality_code = _normalize_quality_code(quality_code)
+  quality_entry = _content_quality_lookup(manifest).get(normalized_quality_code) or {}
+  quality_files = quality_entry.get("files")
+  if isinstance(quality_files, list) and quality_files:
+    return [
+      item
+      for item in quality_files
+      if _normalize_quality_code(str(item.get("quality_code") or normalized_quality_code)) == normalized_quality_code
+    ]
+  return [
+    item
+    for item in manifest.get("files", [])
+    if _normalize_quality_code(str(item.get("quality_code") or "")) == normalized_quality_code
+  ]
 
 
 def _require_manifest_quality(manifest: dict, quality_code: str) -> None:
@@ -771,6 +1488,10 @@ def _delete_quality_files(movie_id: str, manifest: dict, quality_code: str) -> i
     item for item in manifest.get("files", [])
     if _normalize_quality_code(str(item.get("quality_code") or "")) != quality_key
   ]
+  torrent_packages = manifest.get("torrent_packages")
+  if isinstance(torrent_packages, dict):
+    torrent_packages.pop(quality_key, None)
+  _content_torrent_path(movie_id, quality_key).unlink(missing_ok=True)
   manifest["chunk_count"] = len(manifest.get("files", []))
   manifest["updated_at"] = datetime.utcnow().isoformat(timespec="seconds") + "Z"
   if manifest["qualities"]:
@@ -879,6 +1600,7 @@ async def _store_content_quality_upload(
     "nonce_bytes": CONTENT_NONCE_SIZE,
     "tag_bytes": CONTENT_TAG_SIZE,
   }
+  _save_quality_torrent_package(manifest, movie["id"], normalized_quality_code)
   _write_content_manifest(movie["id"], manifest)
   return quality_option, quality_entry, len(saved_chunks)
 
@@ -932,6 +1654,71 @@ def health_check() -> HealthResponse:
     app=settings.app_name,
     environment=settings.app_env,
   )
+
+
+@router.post("/torrent-test/seeders/announce")
+def announce_torrent_test_seeder(payload: dict) -> dict:
+  movie_id = str(payload.get("movie_id") or "").strip()
+  quality_code = _normalize_quality_code(str(payload.get("quality_code") or ""))
+  base_url = str(payload.get("base_url") or "").strip().rstrip("/") + "/"
+  chunk_names = [
+    _safe_name(str(item))
+    for item in (payload.get("chunk_names") or [])
+    if str(item).strip()
+  ]
+  device_label = str(payload.get("device_label") or "Torrent Test Seeder").strip()[:120]
+  if not movie_id or not quality_code or not base_url.startswith(("http://", "https://")):
+    raise HTTPException(status_code=400, detail="movie_id, quality_code, and base_url are required.")
+  if not chunk_names:
+    raise HTTPException(status_code=400, detail="At least one chunk name is required.")
+  _cleanup_torrent_test_seeders()
+  key = f"{movie_id}|{quality_code}|{base_url}"
+  unique_chunks = sorted(set(chunk_names))
+  expires_at = _torrent_test_seeder_expiry()
+  TORRENT_TEST_SEEDERS[key] = {
+    "movie_id": movie_id,
+    "quality_code": quality_code,
+    "base_url": base_url,
+    "device_label": device_label,
+    "chunk_names": json.dumps(unique_chunks),
+    "chunk_count": str(len(unique_chunks)),
+    "updated_at": datetime.utcnow().isoformat(),
+    "expires_at": expires_at.isoformat(),
+  }
+  return {
+    "status": "ok",
+    "movie_id": movie_id,
+    "quality_code": quality_code,
+    "base_url": base_url,
+    "chunk_count": len(unique_chunks),
+    "expires_at": expires_at.isoformat(timespec="seconds") + "Z",
+  }
+
+
+@router.get("/torrent-test/seeders")
+def list_torrent_test_seeders(movie_id: str, quality_code: str) -> dict:
+  normalized_quality_code = _normalize_quality_code(quality_code)
+  _cleanup_torrent_test_seeders()
+  seeders = []
+  for item in TORRENT_TEST_SEEDERS.values():
+    if item.get("movie_id") != movie_id or item.get("quality_code") != normalized_quality_code:
+      continue
+    seeders.append(
+      {
+        "base_url": str(item.get("base_url") or ""),
+        "device_label": str(item.get("device_label") or "Torrent Test Seeder"),
+        "chunk_count": int(item.get("chunk_count") or 0),
+        "chunk_names": json.loads(str(item.get("chunk_names") or "[]")),
+        "updated_at": str(item.get("updated_at") or ""),
+        "expires_at": str(item.get("expires_at") or ""),
+      }
+    )
+  return {
+    "movie_id": movie_id,
+    "quality_code": normalized_quality_code,
+    "seeder_count": len(seeders),
+    "seeders": seeders,
+  }
 
 
 @router.get("/platform/summary", response_model=PlatformSummaryResponse)
@@ -1903,10 +2690,10 @@ def download_movie_delivery_chunk(
   manifest = _read_content_manifest(movie_id)
   if manifest is None:
     raise HTTPException(status_code=404, detail="Content package not found.")
+  quality_files = _quality_manifest_files(manifest, enrollment.quality_code)
   allowed_chunk_names = {
     str(item.get("name") or "")
-    for item in manifest.get("files", [])
-    if _normalize_quality_code(str(item.get("quality_code") or "")) == enrollment.quality_code
+    for item in quality_files
   }
   if safe_name not in allowed_chunk_names:
     raise HTTPException(status_code=403, detail="This chunk does not belong to the reserved title quality.")
@@ -1915,6 +2702,340 @@ def download_movie_delivery_chunk(
   if target_path is None or not target_path.is_file():
     raise HTTPException(status_code=404, detail="Encrypted chunk not found.")
   return FileResponse(target_path, filename=safe_name, media_type="application/octet-stream")
+
+
+def _bencode_value(value) -> bytes:
+  if isinstance(value, (bytes, bytearray)):
+    return f"{len(value)}:".encode("utf-8") + bytes(value)
+  if isinstance(value, str):
+    raw = value.encode("utf-8")
+    return f"{len(raw)}:".encode("utf-8") + raw
+  if isinstance(value, bool):
+    return _bencode_value(int(value))
+  if isinstance(value, int):
+    return f"i{value}e".encode("utf-8")
+  if isinstance(value, list):
+    return b"l" + b"".join(_bencode_value(v) for v in value) + b"e"
+  if isinstance(value, dict):
+    items = sorted(
+      ((str(k) if not isinstance(k, (bytes, bytearray)) else k, v) for k, v in value.items()),
+      key=lambda kv: (kv[0].encode("utf-8") if isinstance(kv[0], str) else bytes(kv[0])),
+    )
+    out = bytearray(b"d")
+    for k, v in items:
+      key_bytes = k.encode("utf-8") if isinstance(k, str) else bytes(k)
+      out += f"{len(key_bytes)}:".encode("utf-8") + key_bytes
+      out += _bencode_value(v)
+    out += b"e"
+    return bytes(out)
+  raise TypeError(f"Cannot bencode type {type(value)!r}")
+
+
+def _iter_streamed_content(content_root: Path, file_entries: list[tuple[str, int]]):
+  for name, _expected_size in file_entries:
+    path = content_root / name
+    if not path.is_file():
+      raise HTTPException(status_code=500, detail=f"Torrent build failed: missing chunk {name}")
+    with path.open("rb") as fh:
+      while True:
+        buf = fh.read(1024 * 1024)
+        if not buf:
+          break
+        yield buf
+
+
+DEFAULT_TORRENT_PIECE_LENGTH = 1024 * 1024
+TORRENT_BOOTSTRAP_DHT_NODES = [
+  "router.bittorrent.com:6881",
+  "dht.transmissionbt.com:6881",
+  "router.utorrent.com:6881",
+  "dht.aelitis.com:6881",
+  "dht.libtorrent.org:25401",
+]
+
+
+def _build_torrent_for_quality(
+  manifest: dict,
+  movie_id: str,
+  quality_code: str,
+  webseed_base_url: str,
+) -> tuple[dict, bytes, str]:
+  settings = get_settings()
+  normalized = _normalize_quality_code(quality_code)
+  _require_manifest_quality(manifest, normalized)
+  chunk_lookup = _chunk_manifest_lookup(manifest, normalized)
+  if not chunk_lookup:
+    raise HTTPException(status_code=404, detail="No encrypted chunks available for this quality.")
+  content_root = _quality_file_root(movie_id, normalized)
+  if not content_root.is_dir():
+    raise HTTPException(status_code=404, detail="Quality content folder missing on the server.")
+  ordered = sorted(chunk_lookup.items(), key=lambda kv: (int(kv[1].get("chunk_index") or 0), kv[0]))
+  file_entries: list[tuple[str, int]] = []
+  for name, record in ordered:
+    size = int(record.get("encrypted_size") or 0)
+    if size <= 0:
+      path = content_root / name
+      if path.is_file():
+        size = path.stat().st_size
+      else:
+        raise HTTPException(status_code=500, detail=f"Invalid chunk size for {name}")
+    file_entries.append((name, size))
+  total_bytes = sum(size for _, size in file_entries)
+  piece_length = DEFAULT_TORRENT_PIECE_LENGTH
+  if total_bytes > 0:
+    # For extremely large swarms bump piece length to keep < ~16k pieces
+    if total_bytes > 1024 * 1024 * 1024 * 16:
+      piece_length = 4 * 1024 * 1024
+    elif total_bytes > 1024 * 1024 * 1024 * 4:
+      piece_length = 2 * 1024 * 1024
+  pieces = bytearray()
+  buf_view = memoryview(bytearray(piece_length))
+  write_pos = 0
+
+  def commit_piece(remaining: int):
+    if remaining <= 0:
+      return
+    digest = hashlib.sha1(buf_view[:remaining]).digest()
+    pieces.extend(digest)
+
+  stream = _iter_streamed_content(content_root, file_entries)
+  for chunk in stream:
+    mem = memoryview(chunk)
+    off = 0
+    remaining = len(mem)
+    while remaining > 0:
+      space = piece_length - write_pos
+      take = remaining if remaining <= space else space
+      buf_view[write_pos:write_pos + take] = mem[off:off + take]
+      write_pos += take
+      off += take
+      remaining -= take
+      if write_pos == piece_length:
+        commit_piece(piece_length)
+        write_pos = 0
+  if write_pos > 0:
+    commit_piece(write_pos)
+  torrent_name = f"{movie_id}-{normalized}.vcnr-pkg"
+  info = {
+    "name": torrent_name,
+    "piece length": piece_length,
+    "pieces": bytes(pieces),
+    "files": [
+      {"length": size, "path": [name]}
+      for name, size in file_entries
+    ],
+  }
+  info_bencoded = _bencode_value(info)
+  info_hash = hashlib.sha1(info_bencoded).hexdigest()
+  created_at = int(datetime.utcnow().timestamp())
+  safe_torrent_name = (
+    (manifest.get("movie_title") or movie_id).replace("/", "-").replace("\\", "-").strip()
+    or torrent_name
+  )
+  root_meta: dict = {
+    "info": info,
+    "created by": "CineVault/VCNR (libtorrent-compatible)",
+    "creation date": created_at,
+    "comment": f"VCNR encrypted delivery torrent for {movie_id}/{normalized}. "
+               f"Public DHT/tracker swarm with HTTP webseed bootstrap for VCNR encrypted chunks.",
+  }
+  trackers = [tracker for tracker in settings.public_torrent_trackers if tracker]
+  if trackers:
+    root_meta["announce"] = trackers[0]
+    root_meta["announce-list"] = [[tracker] for tracker in trackers]
+  webseed_urls: list[str] = []
+  if webseed_base_url:
+    base = webseed_base_url.rstrip("/")
+    webseed_urls.append(
+      f"{base}/api/movies/{movie_id}/delivery/public-chunks/{normalized}/"
+    )
+  if webseed_urls:
+    root_meta["url-list"] = webseed_urls
+  magnet_parts = [
+    f"xt=urn:btih:{info_hash}",
+    f"dn={safe_torrent_name}",
+  ]
+  for ws in webseed_urls:
+    magnet_parts.append(f"ws={ws}")
+  for tracker in trackers:
+    magnet_parts.append(f"tr={tracker}")
+  magnet_uri = "magnet:?" + "&".join(magnet_parts)
+  root_meta["info"]["private"] = 0
+  torrent_bytes = _bencode_value(root_meta)
+  return ({
+    "info_hash_sha1": info_hash,
+    "torrent_name": torrent_name,
+    "total_bytes": int(total_bytes),
+    "piece_length": int(piece_length),
+    "piece_count": max(0, (int(total_bytes) + piece_length - 1) // piece_length) if int(total_bytes) > 0 else 0,
+    "file_count": len(file_entries),
+    "comment": root_meta["comment"],
+    "created_by": root_meta["created by"],
+    "created_at": int(created_at),
+    "trackers": trackers,
+    "webseed_urls": list(webseed_urls),
+    "magnet_uri": magnet_uri,
+    "torrent_base64": b64encode(torrent_bytes).decode("ascii"),
+    "bootstrap_nodes": list(TORRENT_BOOTSTRAP_DHT_NODES),
+    "use_dht": True,
+    "use_lsd": True,
+    "use_pex": True,
+  }, torrent_bytes, info_hash)
+
+
+def _save_quality_torrent_package(
+  manifest: dict,
+  movie_id: str,
+  quality_code: str,
+) -> dict:
+  normalized_quality_code = _normalize_quality_code(quality_code)
+  payload, torrent_bytes, _info_hash = _build_torrent_for_quality(
+    manifest,
+    movie_id,
+    normalized_quality_code,
+    _normalize_upload_torrent_webseed_base(),
+  )
+  torrent_path = _content_torrent_path(movie_id, normalized_quality_code)
+  torrent_path.parent.mkdir(parents=True, exist_ok=True)
+  torrent_path.write_bytes(torrent_bytes)
+  saved_at = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+  torrent_metadata = {
+    key: value
+    for key, value in payload.items()
+    if key != "torrent_base64"
+  }
+  torrent_metadata["torrent_file_name"] = torrent_path.name
+  torrent_metadata["saved_at"] = saved_at
+  manifest.setdefault("torrent_packages", {})
+  manifest["torrent_packages"][normalized_quality_code] = torrent_metadata
+  quality_lookup = _content_quality_lookup(manifest)
+  quality_entry = quality_lookup.get(normalized_quality_code)
+  if quality_entry is not None:
+    quality_entry["torrent"] = torrent_metadata
+  manifest["updated_at"] = saved_at
+  return torrent_metadata
+
+
+@router.get("/movies/{movie_id}/delivery/torrent", response_model=DeliveryTorrentResponse)
+def get_movie_delivery_torrent(
+  movie_id: str,
+  quality_code: str,
+  slot_token: str,
+  current_user: dict[str, str] = Depends(get_current_user),
+  db: Session | None = Depends(get_db),
+) -> DeliveryTorrentResponse:
+  if db is None:
+    raise HTTPException(status_code=503, detail="Database is required for mobile delivery queue control.")
+  normalized = _normalize_quality_code(quality_code)
+  enrollment = _require_valid_slot(db, movie_id, current_user["id"], slot_token)
+  if enrollment.quality_code != normalized:
+    raise HTTPException(status_code=400, detail="Requested quality does not match the reserved delivery slot.")
+  manifest = _read_content_manifest(movie_id)
+  if manifest is None:
+    raise HTTPException(status_code=404, detail="Content package not found.")
+  webseed_base = _normalize_upload_torrent_webseed_base()
+  payload, torrent_bytes, _info_hash = _build_torrent_for_quality(
+    manifest,
+    movie_id,
+    normalized,
+    webseed_base,
+  )
+  payload["torrent_base64"] = b64encode(torrent_bytes).decode("ascii")
+  try:
+    torrent_path = _content_torrent_path(movie_id, normalized)
+    torrent_path.parent.mkdir(parents=True, exist_ok=True)
+    torrent_path.write_bytes(torrent_bytes)
+    saved_at = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+    torrent_metadata = {
+      key: value
+      for key, value in payload.items()
+      if key != "torrent_base64"
+    }
+    torrent_metadata["torrent_file_name"] = torrent_path.name
+    torrent_metadata["saved_at"] = saved_at
+    manifest.setdefault("torrent_packages", {})
+    manifest["torrent_packages"][normalized] = torrent_metadata
+    quality_lookup = _content_quality_lookup(manifest)
+    quality_entry = quality_lookup.get(normalized)
+    if quality_entry is not None:
+      quality_entry["torrent"] = torrent_metadata
+    manifest["updated_at"] = saved_at
+    _write_content_manifest(movie_id, manifest)
+  except Exception:
+    # Best-effort refresh so mobile delivery can still proceed even if manifest persistence fails.
+    pass
+  payload_out = {
+    "movie_id": movie_id,
+    "quality_code": normalized,
+    **payload,
+  }
+  return DeliveryTorrentResponse(**payload_out)
+
+
+@router.api_route("/movies/{movie_id}/delivery/public-chunks/{quality_code}/{chunk_name}", methods=["GET", "HEAD"])
+def download_movie_public_delivery_chunk(
+  movie_id: str,
+  quality_code: str,
+  chunk_name: str,
+  db: Session | None = Depends(get_db),
+) -> FileResponse:
+  normalized = _normalize_quality_code(quality_code)
+  safe_name = Path(chunk_name).name
+  if safe_name != chunk_name:
+    raise HTTPException(status_code=400, detail="Invalid chunk name.")
+  manifest = _read_content_manifest(movie_id)
+  if manifest is None:
+    raise HTTPException(status_code=404, detail="Content package not found.")
+  quality_files = _quality_manifest_files(manifest, normalized)
+  allowed_chunk_names = {
+    str(item.get("name") or "")
+    for item in quality_files
+  }
+  if safe_name not in allowed_chunk_names:
+    raise HTTPException(status_code=403, detail="Chunk does not belong to this title/quality.")
+  content_root = _quality_file_root(movie_id, normalized)
+  target_path = content_root / safe_name if content_root.is_dir() else None
+  if target_path is None or not target_path.is_file():
+    content_root2 = _content_folder_path(movie_id)
+    target_path = next((p for p in content_root2.rglob(safe_name) if p.is_file()), None) if content_root2.exists() else None
+  if target_path is None or not target_path.is_file():
+    raise HTTPException(status_code=404, detail="Encrypted chunk not found.")
+  expected_size = None
+  for item in quality_files:
+    if str(item.get("name") or "") == safe_name:
+      try:
+        expected_size = int(item.get("encrypted_size") or 0)
+      except Exception:
+        expected_size = None
+      break
+  if expected_size is None or expected_size <= 0:
+    expected_size = target_path.stat().st_size
+  return FileResponse(
+    target_path,
+    filename=safe_name,
+    media_type="application/octet-stream",
+    headers={
+      "Accept-Ranges": "bytes",
+      "Content-Length": str(int(expected_size)),
+      "Cache-Control": "public, max-age=604800, immutable",
+    },
+  )
+
+
+@router.api_route("/movies/{movie_id}/delivery/public-chunks/{quality_code}/{package_name}/{chunk_name}", methods=["GET", "HEAD"])
+def download_movie_public_delivery_chunk_with_package(
+  movie_id: str,
+  quality_code: str,
+  package_name: str,
+  chunk_name: str,
+  db: Session | None = Depends(get_db),
+) -> FileResponse:
+  normalized = _normalize_quality_code(quality_code)
+  expected_package_name = f"{movie_id}-{normalized}.vcnr-pkg"
+  safe_package_name = Path(package_name).name
+  if safe_package_name != package_name or package_name != expected_package_name:
+    raise HTTPException(status_code=404, detail="Torrent package path not found.")
+  return download_movie_public_delivery_chunk(movie_id, quality_code, chunk_name, db)
 
 
 @router.post("/movies/{movie_id}/delivery/complete", response_model=DeliveryStatusResponse)
@@ -1968,8 +3089,1083 @@ def get_movie_delivery_unlock_status(
         ContentDeliveryEnrollmentRecord.quality_code == normalized_quality_code,
       )
       .first()
-    )
+  )
   return _serialize_delivery_status(movie, enrollment, reservation=reservation)
+
+
+@router.post("/movies/{movie_id}/swarm/session", response_model=SwarmSessionResponse)
+def create_movie_swarm_session(
+  movie_id: str,
+  payload: SwarmSessionCreateRequest,
+  current_user: dict[str, str] = Depends(get_current_user),
+  db: Session | None = Depends(get_db),
+) -> SwarmSessionResponse:
+  if db is None:
+    raise HTTPException(status_code=503, detail="Database is required for swarm tracker control.")
+  normalized_quality_code = _normalize_quality_code(payload.quality_code)
+  movie_items = persistence.list_movies(db, include_archived=True, viewer_user_id=current_user["id"])
+  movie = next((item for item in movie_items if item["id"] == movie_id), None)
+  if movie is None:
+    raise HTTPException(status_code=404, detail="Movie not found.")
+  _require_delivery_entitlement(movie)
+  _require_delivery_reservation(db, movie_id, current_user["id"], normalized_quality_code)
+  _manifest, chunk_lookup = _require_swarm_manifest_chunks(movie_id, normalized_quality_code)
+
+  _cleanup_swarm_sessions()
+  session_id = _create_swarm_session_id()
+  expires_at = _swarm_session_expiry()
+  SWARM_SESSIONS[session_id] = {
+    "session_id": session_id,
+    "movie_id": movie_id,
+    "quality_code": normalized_quality_code,
+    "user_id": current_user["id"],
+    "device_label": (payload.device_label or "").strip(),
+    "verified_chunk_names": "[]",
+    "sources_json": "{}",
+    "expires_at": expires_at.isoformat(),
+    "created_at": datetime.utcnow().isoformat(),
+    "updated_at": datetime.utcnow().isoformat(),
+  }
+  return _serialize_swarm_session(SWARM_SESSIONS[session_id], set(chunk_lookup.keys()))
+
+
+@router.post("/movies/{movie_id}/swarm/seeders/announce", response_model=SwarmSeederAnnounceResponse)
+def announce_movie_swarm_seeder(
+  movie_id: str,
+  payload: SwarmSeederAnnounceRequest,
+  current_user: dict[str, str] = Depends(get_current_user),
+  db: Session | None = Depends(get_db),
+) -> SwarmSeederAnnounceResponse:
+  if db is None:
+    raise HTTPException(status_code=503, detail="Database is required for swarm tracker control.")
+  normalized_quality_code = _normalize_quality_code(payload.quality_code)
+  movie_items = persistence.list_movies(db, include_archived=True, viewer_user_id=current_user["id"])
+  movie = next((item for item in movie_items if item["id"] == movie_id), None)
+  if movie is None:
+    raise HTTPException(status_code=404, detail="Movie not found.")
+  _require_delivery_entitlement(movie)
+  _require_delivery_reservation(db, movie_id, current_user["id"], normalized_quality_code)
+  _manifest, chunk_lookup = _require_swarm_manifest_chunks(movie_id, normalized_quality_code)
+  expected_chunks = set(chunk_lookup.keys())
+  accepted_chunks = _safe_swarm_chunk_names(payload.available_chunk_names, expected_chunks)
+  if not accepted_chunks:
+    raise HTTPException(status_code=400, detail="This seeder has no verified chunks for that title quality.")
+
+  _cleanup_swarm_seeders()
+  seeder_id = _create_swarm_seeder_id(current_user["id"], payload.device_id)
+  previous = SWARM_AVAILABLE_SEEDERS.get(seeder_id, {})
+  expires_at = _swarm_seeder_expiry()
+  SWARM_AVAILABLE_SEEDERS[seeder_id] = {
+    "seeder_id": seeder_id,
+    "movie_id": movie_id,
+    "quality_code": normalized_quality_code,
+    "user_id": current_user["id"],
+    "device_id": (payload.device_id or "").strip(),
+    "device_label": (payload.device_label or current_user.get("name") or current_user.get("email") or "Seeder phone").strip(),
+    "chunk_names": json.dumps(sorted(accepted_chunks)),
+    # Always clear any previous receiver assignment when a device republishes itself.
+    # The active receiver, if any, will be reassigned immediately below.
+    "assigned_session_id": "",
+    "cooldown_until": str(previous.get("cooldown_until") or ""),
+    "expires_at": expires_at.isoformat(),
+    "created_at": str(previous.get("created_at") or datetime.utcnow().isoformat()),
+    "updated_at": datetime.utcnow().isoformat(),
+  }
+  seeders = _swarm_available_seeders(movie_id, normalized_quality_code, expected_chunks)
+  _assign_seeders_to_active_receiver_sessions(movie_id, normalized_quality_code, seeders)
+  return SwarmSeederAnnounceResponse(
+    movie_id=movie_id,
+    quality_code=normalized_quality_code,
+    seeder_id=seeder_id,
+    accepted_chunk_count=len(accepted_chunks),
+    expected_chunk_count=len(expected_chunks),
+    expires_at=expires_at.isoformat(timespec="seconds") + "Z",
+  )
+
+
+@router.post("/movies/{movie_id}/swarm/demand", response_model=SwarmDemandResponse)
+def create_movie_swarm_demand(
+  movie_id: str,
+  payload: SwarmDemandCreateRequest,
+  current_user: dict[str, str] = Depends(get_current_user),
+  db: Session | None = Depends(get_db),
+) -> SwarmDemandResponse:
+  if db is None:
+    raise HTTPException(status_code=503, detail="Database is required for swarm tracker control.")
+  normalized_quality_code = _normalize_quality_code(payload.quality_code)
+  movie_items = persistence.list_movies(db, include_archived=True, viewer_user_id=current_user["id"])
+  movie = next((item for item in movie_items if item["id"] == movie_id), None)
+  if movie is None:
+    raise HTTPException(status_code=404, detail="Movie not found.")
+  _require_delivery_entitlement(movie)
+  _require_delivery_reservation(db, movie_id, current_user["id"], normalized_quality_code)
+  _manifest, chunk_lookup = _require_swarm_manifest_chunks(movie_id, normalized_quality_code)
+  expected_chunks = set(chunk_lookup.keys())
+  missing_chunks = _safe_swarm_chunk_names(payload.missing_chunk_names, expected_chunks) if payload.missing_chunk_names else expected_chunks
+  demand_id = _swarm_demand_key(movie_id, normalized_quality_code)
+  previous = SWARM_ACTIVE_DEMANDS.get(demand_id, {})
+  receiver_ids = _get_swarm_json_set(previous, "receiver_user_ids") if previous else set()
+  receiver_ids.add(current_user["id"])
+  existing_missing = _get_swarm_json_set(previous, "missing_chunk_names") if previous else set()
+  combined_missing = missing_chunks.union(existing_missing).intersection(expected_chunks)
+  expires_at = _swarm_demand_expiry()
+  SWARM_ACTIVE_DEMANDS[demand_id] = {
+    "demand_id": demand_id,
+    "movie_id": movie_id,
+    "quality_code": normalized_quality_code,
+    "device_label": (payload.device_label or "Receiver demand").strip(),
+    "receiver_user_ids": json.dumps(sorted(receiver_ids)),
+    "receiver_count": str(len(receiver_ids)),
+    "missing_chunk_names": json.dumps(sorted(combined_missing)),
+    "expires_at": expires_at.isoformat(),
+    "created_at": str(previous.get("created_at") or datetime.utcnow().isoformat()),
+    "updated_at": datetime.utcnow().isoformat(),
+  }
+  return SwarmDemandResponse(
+    movie_id=movie_id,
+    quality_code=normalized_quality_code,
+    demand_id=demand_id,
+    receiver_count=len(receiver_ids),
+    missing_chunk_count=len(combined_missing),
+    expires_at=expires_at.isoformat(timespec="seconds") + "Z",
+  )
+
+
+@router.post("/movies/{movie_id}/swarm/demand/check", response_model=SwarmDemandListResponse)
+def check_movie_swarm_demand(
+  movie_id: str,
+  payload: SwarmSeederAnnounceRequest,
+  current_user: dict[str, str] = Depends(get_current_user),
+  db: Session | None = Depends(get_db),
+) -> SwarmDemandListResponse:
+  if db is None:
+    raise HTTPException(status_code=503, detail="Database is required for swarm tracker control.")
+  normalized_quality_code = _normalize_quality_code(payload.quality_code)
+  _require_delivery_reservation(db, movie_id, current_user["id"], normalized_quality_code)
+  _manifest, chunk_lookup = _require_swarm_manifest_chunks(movie_id, normalized_quality_code)
+  expected_chunks = set(chunk_lookup.keys())
+  available_chunks = _safe_swarm_chunk_names(payload.available_chunk_names, expected_chunks)
+  return SwarmDemandListResponse(demands=_swarm_demand_entries_for_chunks(movie_id, normalized_quality_code, available_chunks))
+
+
+@router.get("/movies/{movie_id}/swarm/seeders", response_model=SwarmSeederListResponse)
+def list_movie_swarm_seeders(
+  movie_id: str,
+  quality_code: str,
+  current_user: dict[str, str] = Depends(get_current_user),
+  db: Session | None = Depends(get_db),
+) -> SwarmSeederListResponse:
+  if db is None:
+    raise HTTPException(status_code=503, detail="Database is required for swarm tracker control.")
+  normalized_quality_code = _normalize_quality_code(quality_code)
+  _require_delivery_reservation(db, movie_id, current_user["id"], normalized_quality_code)
+  _manifest, chunk_lookup = _require_swarm_manifest_chunks(movie_id, normalized_quality_code)
+  expected_chunks = set(chunk_lookup.keys())
+  seeders = _swarm_available_seeders(movie_id, normalized_quality_code, expected_chunks)
+  _assign_seeders_to_active_receiver_sessions(movie_id, normalized_quality_code, seeders)
+  return SwarmSeederListResponse(
+    movie_id=movie_id,
+    quality_code=normalized_quality_code,
+    expected_chunk_count=len(expected_chunks),
+    seeders=seeders,
+  )
+
+
+@router.post("/movies/{movie_id}/swarm/auto-session", response_model=SwarmAutoSessionResponse)
+def create_movie_swarm_auto_session(
+  movie_id: str,
+  payload: SwarmAutoSessionRequest,
+  current_user: dict[str, str] = Depends(get_current_user),
+  db: Session | None = Depends(get_db),
+) -> SwarmAutoSessionResponse:
+  if db is None:
+    raise HTTPException(status_code=503, detail="Database is required for swarm tracker control.")
+  normalized_quality_code = _normalize_quality_code(payload.quality_code)
+  movie_items = persistence.list_movies(db, include_archived=True, viewer_user_id=current_user["id"])
+  movie = next((item for item in movie_items if item["id"] == movie_id), None)
+  if movie is None:
+    raise HTTPException(status_code=404, detail="Movie not found.")
+  _require_delivery_entitlement(movie)
+  _require_delivery_reservation(db, movie_id, current_user["id"], normalized_quality_code)
+  _manifest, chunk_lookup = _require_swarm_manifest_chunks(movie_id, normalized_quality_code)
+  expected_chunks = set(chunk_lookup.keys())
+  receiver_chunks = _safe_swarm_chunk_names(payload.verified_chunk_names, expected_chunks)
+  missing_chunks = expected_chunks.difference(receiver_chunks)
+  _drop_swarm_receiver_sessions(movie_id, normalized_quality_code, current_user["id"], payload.device_label)
+  seeders = _swarm_available_seeders(movie_id, normalized_quality_code, missing_chunks)
+  _assign_seeders_to_active_receiver_sessions(movie_id, normalized_quality_code, seeders)
+
+  _cleanup_swarm_sessions()
+  session_id = _create_swarm_session_id()
+  expires_at = _swarm_session_expiry()
+  assigned_seeder_ids = [seeder.source_id for seeder in seeders]
+  selected_seeder_id = assigned_seeder_ids[0] if assigned_seeder_ids else None
+  SWARM_SESSIONS[session_id] = {
+    "session_id": session_id,
+    "movie_id": movie_id,
+    "quality_code": normalized_quality_code,
+    "user_id": current_user["id"],
+    "device_label": (payload.device_label or "Auto receiver").strip(),
+    "verified_chunk_names": json.dumps(sorted(receiver_chunks)),
+    "sources_json": "{}",
+    "selected_seeder_id": selected_seeder_id or "",
+    "assigned_seeder_ids": json.dumps(assigned_seeder_ids),
+    "expires_at": expires_at.isoformat(),
+    "created_at": datetime.utcnow().isoformat(),
+    "updated_at": datetime.utcnow().isoformat(),
+  }
+  for seeder_id in assigned_seeder_ids:
+    if seeder_id in SWARM_AVAILABLE_SEEDERS:
+      SWARM_AVAILABLE_SEEDERS[seeder_id]["assigned_session_id"] = session_id
+
+  return SwarmAutoSessionResponse(
+    movie_id=movie_id,
+    quality_code=normalized_quality_code,
+    session_id=session_id,
+    selected_seeder_id=selected_seeder_id,
+    assigned_seeder_ids=assigned_seeder_ids,
+    expected_chunk_count=len(expected_chunks),
+    receiver_verified_chunk_count=len(receiver_chunks),
+    seeders=seeders,
+    **_swarm_transport_payload(),
+  )
+
+
+@router.get("/movies/{movie_id}/swarm/seeders/{seeder_id}/assignment", response_model=SwarmSeederAssignmentResponse)
+def get_movie_swarm_seeder_assignment(
+  movie_id: str,
+  seeder_id: str,
+  quality_code: str,
+  current_user: dict[str, str] = Depends(get_current_user),
+  db: Session | None = Depends(get_db),
+) -> SwarmSeederAssignmentResponse:
+  if db is None:
+    raise HTTPException(status_code=503, detail="Database is required for swarm tracker control.")
+  normalized_quality_code = _normalize_quality_code(quality_code)
+  _require_delivery_reservation(db, movie_id, current_user["id"], normalized_quality_code)
+  _cleanup_swarm_seeders()
+  _cleanup_swarm_sessions()
+  seeder = SWARM_AVAILABLE_SEEDERS.get(seeder_id)
+  if seeder is None or seeder["movie_id"] != movie_id or seeder["quality_code"] != normalized_quality_code:
+    raise HTTPException(status_code=404, detail="That live seeder is not available.")
+  if seeder["user_id"] != current_user["id"]:
+    raise HTTPException(status_code=403, detail="Only that seeder device can read this assignment.")
+  session_id = seeder.get("assigned_session_id") or ""
+  session = SWARM_SESSIONS.get(session_id) if session_id else None
+  if session is None:
+    return SwarmSeederAssignmentResponse(
+      movie_id=movie_id,
+      quality_code=normalized_quality_code,
+      seeder_id=seeder_id,
+      session_id=None,
+      receiver_device_label=None,
+      receiver_missing_chunk_count=0,
+      message="No receiver is assigned yet.",
+      **_swarm_transport_payload(),
+    )
+  expected_chunks = set(_require_swarm_manifest_chunks(movie_id, normalized_quality_code)[1].keys())
+  receiver_chunks = _get_swarm_json_set(session, "verified_chunk_names").intersection(expected_chunks)
+  return SwarmSeederAssignmentResponse(
+    movie_id=movie_id,
+    quality_code=normalized_quality_code,
+    seeder_id=seeder_id,
+    session_id=session_id,
+    receiver_device_label=session.get("device_label") or "Receiver phone",
+    receiver_missing_chunk_count=max(0, len(expected_chunks) - len(receiver_chunks)),
+    message="Receiver assignment is ready.",
+    **_swarm_transport_payload(),
+  )
+
+
+@router.post("/movies/{movie_id}/swarm/seeders/{seeder_id}/cooldown", response_model=SwarmSeederCooldownResponse)
+def cooldown_movie_swarm_seeder(
+  movie_id: str,
+  seeder_id: str,
+  quality_code: str,
+  current_user: dict[str, str] = Depends(get_current_user),
+  db: Session | None = Depends(get_db),
+) -> SwarmSeederCooldownResponse:
+  if db is None:
+    raise HTTPException(status_code=503, detail="Database is required for swarm tracker control.")
+  normalized_quality_code = _normalize_quality_code(quality_code)
+  _require_delivery_reservation(db, movie_id, current_user["id"], normalized_quality_code)
+  _cleanup_swarm_seeders()
+  seeder = SWARM_AVAILABLE_SEEDERS.get(seeder_id)
+  if seeder is None or seeder["movie_id"] != movie_id or seeder["quality_code"] != normalized_quality_code:
+    raise HTTPException(status_code=404, detail="That live seeder is not available.")
+  cooldown_until = _swarm_seeder_cooldown_expiry()
+  seeder["cooldown_until"] = cooldown_until.isoformat()
+  seeder["updated_at"] = datetime.utcnow().isoformat()
+  return SwarmSeederCooldownResponse(
+    movie_id=movie_id,
+    quality_code=normalized_quality_code,
+    seeder_id=seeder_id,
+    cooldown_until=cooldown_until.isoformat(timespec="seconds") + "Z",
+    message="Seeder moved to cooldown after receiver timeout.",
+  )
+
+
+@router.post("/movies/{movie_id}/swarm/inventory", response_model=SwarmInventoryResponse)
+def update_movie_swarm_inventory(
+  movie_id: str,
+  payload: SwarmInventoryRequest,
+  current_user: dict[str, str] = Depends(get_current_user),
+  db: Session | None = Depends(get_db),
+) -> SwarmInventoryResponse:
+  if db is None:
+    raise HTTPException(status_code=503, detail="Database is required for swarm tracker control.")
+  session = _get_swarm_session_or_404(payload.session_id)
+  normalized_quality_code = _normalize_quality_code(payload.quality_code)
+  if session["movie_id"] != movie_id:
+    raise HTTPException(status_code=400, detail="That swarm session belongs to a different title.")
+  if session["quality_code"] != normalized_quality_code:
+    raise HTTPException(status_code=400, detail="That swarm session belongs to a different title quality.")
+  if session["user_id"] != current_user["id"]:
+    raise HTTPException(status_code=403, detail="Only the receiver device can update this swarm inventory.")
+  _require_delivery_reservation(db, movie_id, current_user["id"], normalized_quality_code)
+  _manifest, chunk_lookup = _require_swarm_manifest_chunks(movie_id, normalized_quality_code)
+  expected_chunks = set(chunk_lookup.keys())
+  accepted_chunks = _safe_swarm_chunk_names(payload.verified_chunk_names, expected_chunks)
+  _set_swarm_json_set(session, "verified_chunk_names", accepted_chunks)
+  if payload.device_label:
+    session["device_label"] = payload.device_label.strip()
+  session["expires_at"] = _swarm_session_expiry().isoformat()
+  session["updated_at"] = datetime.utcnow().isoformat()
+  return SwarmInventoryResponse(
+    movie_id=movie_id,
+    quality_code=normalized_quality_code,
+    session_id=session["session_id"],
+    accepted_chunk_count=len(accepted_chunks),
+    expected_chunk_count=len(expected_chunks),
+    missing_chunk_count=max(0, len(expected_chunks) - len(accepted_chunks)),
+  )
+
+
+@router.post("/movies/{movie_id}/swarm/sources", response_model=SwarmSourcePublishResponse)
+def publish_movie_swarm_source(
+  movie_id: str,
+  payload: SwarmSourcePublishRequest,
+  current_user: dict[str, str] = Depends(get_current_user),
+  db: Session | None = Depends(get_db),
+) -> SwarmSourcePublishResponse:
+  if db is None:
+    raise HTTPException(status_code=503, detail="Database is required for swarm tracker control.")
+  session = _get_swarm_session_or_404(payload.session_id)
+  normalized_quality_code = _normalize_quality_code(payload.quality_code)
+  if session["movie_id"] != movie_id:
+    raise HTTPException(status_code=400, detail="That swarm session belongs to a different title.")
+  if session["quality_code"] != normalized_quality_code:
+    raise HTTPException(status_code=400, detail="That swarm session belongs to a different title quality.")
+  _require_delivery_reservation(db, movie_id, current_user["id"], normalized_quality_code)
+  _manifest, chunk_lookup = _require_swarm_manifest_chunks(movie_id, normalized_quality_code)
+  expected_chunks = set(chunk_lookup.keys())
+  accepted_chunks = _safe_swarm_chunk_names(payload.available_chunk_names, expected_chunks)
+  source_id = f"user:{current_user['id']}"
+  sources = _get_swarm_sources(session)
+  sources[source_id] = {
+    "source_id": source_id,
+    "source_type": "peer_relay",
+    "user_id": current_user["id"],
+    "device_label": (payload.device_label or current_user.get("name") or current_user.get("email") or "Peer device").strip(),
+    "chunk_names": sorted(accepted_chunks),
+    "relay_chunk_names": sources.get(source_id, {}).get("relay_chunk_names", "[]"),
+    "last_seen_at": datetime.utcnow().isoformat(),
+  }
+  _set_swarm_sources(session, sources)
+  session["expires_at"] = _swarm_session_expiry().isoformat()
+  session["updated_at"] = datetime.utcnow().isoformat()
+  return SwarmSourcePublishResponse(
+    movie_id=movie_id,
+    quality_code=normalized_quality_code,
+    session_id=session["session_id"],
+    source_id=source_id,
+    accepted_chunk_count=len(accepted_chunks),
+    expected_chunk_count=len(expected_chunks),
+  )
+
+
+@router.get("/movies/{movie_id}/swarm/sources", response_model=SwarmSourcesResponse)
+def get_movie_swarm_sources(
+  movie_id: str,
+  quality_code: str,
+  session_id: str,
+  current_user: dict[str, str] = Depends(get_current_user),
+  db: Session | None = Depends(get_db),
+) -> SwarmSourcesResponse:
+  if db is None:
+    raise HTTPException(status_code=503, detail="Database is required for swarm tracker control.")
+  session = _get_swarm_session_or_404(session_id)
+  normalized_quality_code = _normalize_quality_code(quality_code)
+  if session["movie_id"] != movie_id:
+    raise HTTPException(status_code=400, detail="That swarm session belongs to a different title.")
+  if session["quality_code"] != normalized_quality_code:
+    raise HTTPException(status_code=400, detail="That swarm session belongs to a different title quality.")
+  if session["user_id"] != current_user["id"]:
+    raise HTTPException(status_code=403, detail="Only the receiver device can discover sources for this swarm session.")
+  _require_delivery_reservation(db, movie_id, current_user["id"], normalized_quality_code)
+  _manifest, chunk_lookup = _require_swarm_manifest_chunks(movie_id, normalized_quality_code)
+  expected_chunks = set(chunk_lookup.keys())
+  receiver_chunks = _get_swarm_json_set(session, "verified_chunk_names").intersection(expected_chunks)
+  missing_chunks = expected_chunks.difference(receiver_chunks)
+  sources: list[SwarmSourceEntry] = []
+  server_source = _server_swarm_source(movie_id, missing_chunks)
+  if server_source is not None:
+    sources.append(server_source)
+  for raw_source in _get_swarm_sources(session).values():
+    source_chunks = set(raw_source.get("chunk_names") or [])
+    if str(raw_source.get("source_type") or "") == "peer_relay":
+      source_chunks = source_chunks.intersection(_get_swarm_json_set(raw_source, "relay_chunk_names"))
+    chunk_names = sorted(source_chunks.intersection(missing_chunks))
+    if not chunk_names:
+      continue
+    sources.append(
+      SwarmSourceEntry(
+        source_id=str(raw_source.get("source_id") or ""),
+        source_type=str(raw_source.get("source_type") or "peer"),
+        user_id=str(raw_source.get("user_id") or "") or None,
+        device_label=str(raw_source.get("device_label") or "") or None,
+        chunk_names=chunk_names,
+        chunk_count=len(chunk_names),
+        last_seen_at=str(raw_source.get("last_seen_at") or "") or None,
+      )
+    )
+  session["expires_at"] = _swarm_session_expiry().isoformat()
+  session["updated_at"] = datetime.utcnow().isoformat()
+  return SwarmSourcesResponse(
+    movie_id=movie_id,
+    quality_code=normalized_quality_code,
+    session_id=session["session_id"],
+    expected_chunk_count=len(expected_chunks),
+    receiver_verified_chunk_count=len(receiver_chunks),
+    missing_chunk_count=len(missing_chunks),
+    sources=sources,
+  )
+
+
+@router.get("/movies/{movie_id}/swarm/manifest", response_model=DeliveryManifestResponse)
+def get_movie_swarm_manifest(
+  movie_id: str,
+  quality_code: str,
+  session_id: str,
+  current_user: dict[str, str] = Depends(get_current_user),
+  db: Session | None = Depends(get_db),
+) -> DeliveryManifestResponse:
+  if db is None:
+    raise HTTPException(status_code=503, detail="Database is required for swarm tracker control.")
+  session = _get_swarm_session_or_404(session_id)
+  normalized_quality_code = _normalize_quality_code(quality_code)
+  if session["movie_id"] != movie_id:
+    raise HTTPException(status_code=400, detail="That swarm session belongs to a different title.")
+  if session["quality_code"] != normalized_quality_code:
+    raise HTTPException(status_code=400, detail="That swarm session belongs to a different title quality.")
+  if session["user_id"] != current_user["id"]:
+    raise HTTPException(status_code=403, detail="Only the receiver device can access this swarm manifest.")
+  _require_delivery_reservation(db, movie_id, current_user["id"], normalized_quality_code)
+  manifest, _chunk_lookup = _require_swarm_manifest_chunks(movie_id, normalized_quality_code)
+  session["expires_at"] = _swarm_session_expiry().isoformat()
+  session["updated_at"] = datetime.utcnow().isoformat()
+  return DeliveryManifestResponse(**_viewer_content_manifest_payload(_swarm_manifest_with_integrity(movie_id, manifest, normalized_quality_code), normalized_quality_code))
+
+
+@router.post("/movies/{movie_id}/swarm/webrtc/offer", response_model=SwarmSignalActionResponse)
+def publish_movie_swarm_webrtc_offer(
+  movie_id: str,
+  payload: SwarmSignalOfferRequest,
+  current_user: dict[str, str] = Depends(get_current_user),
+  db: Session | None = Depends(get_db),
+) -> SwarmSignalActionResponse:
+  if db is None:
+    raise HTTPException(status_code=503, detail="Database is required for swarm WebRTC signaling.")
+  session = _get_swarm_session_or_404(payload.session_id)
+  normalized_quality_code = _normalize_quality_code(payload.quality_code)
+  if session["movie_id"] != movie_id:
+    raise HTTPException(status_code=400, detail="That swarm session belongs to a different title.")
+  if session["quality_code"] != normalized_quality_code:
+    raise HTTPException(status_code=400, detail="That swarm session belongs to a different title quality.")
+  if session["user_id"] != current_user["id"]:
+    raise HTTPException(status_code=403, detail="Only the receiver device can publish this WebRTC offer.")
+  _require_delivery_reservation(db, movie_id, current_user["id"], normalized_quality_code)
+  normalized_seeder_id = _normalize_swarm_seeder_id(payload.seeder_id)
+  if normalized_seeder_id:
+    link = _get_or_create_swarm_peer_link(session, normalized_seeder_id)
+    link["offer"] = payload.offer
+    link["answer"] = None
+    link["receiver_candidates"] = []
+    link["sender_candidates"] = []
+    link["updated_at"] = datetime.utcnow().isoformat()
+    _set_swarm_peer_link(session, normalized_seeder_id, link)
+  else:
+    _set_swarm_signal_json(session, "webrtc_offer_json", payload.offer)
+    session["webrtc_answer_json"] = ""
+    session["webrtc_receiver_candidates_json"] = "[]"
+    session["webrtc_sender_candidates_json"] = "[]"
+  _touch_swarm_session(session)
+  return SwarmSignalActionResponse(
+    movie_id=movie_id,
+    quality_code=normalized_quality_code,
+    session_id=session["session_id"],
+    message="WebRTC receiver offer published.",
+    updated_at=datetime.fromisoformat(session["updated_at"]).isoformat(timespec="seconds") + "Z",
+  )
+
+
+@router.post("/movies/{movie_id}/swarm/webrtc/answer", response_model=SwarmSignalActionResponse)
+def publish_movie_swarm_webrtc_answer(
+  movie_id: str,
+  payload: SwarmSignalAnswerRequest,
+  current_user: dict[str, str] = Depends(get_current_user),
+  db: Session | None = Depends(get_db),
+) -> SwarmSignalActionResponse:
+  if db is None:
+    raise HTTPException(status_code=503, detail="Database is required for swarm WebRTC signaling.")
+  session = _get_swarm_session_or_404(payload.session_id)
+  normalized_quality_code = _normalize_quality_code(payload.quality_code)
+  if session["movie_id"] != movie_id:
+    raise HTTPException(status_code=400, detail="That swarm session belongs to a different title.")
+  if session["quality_code"] != normalized_quality_code:
+    raise HTTPException(status_code=400, detail="That swarm session belongs to a different title quality.")
+  _require_delivery_reservation(db, movie_id, current_user["id"], normalized_quality_code)
+  normalized_seeder_id = _normalize_swarm_seeder_id(payload.seeder_id)
+  if normalized_seeder_id:
+    _require_owned_swarm_seeder(movie_id, normalized_quality_code, normalized_seeder_id, current_user["id"])
+    link = _get_or_create_swarm_peer_link(session, normalized_seeder_id)
+    link["answer"] = payload.answer
+    link["updated_at"] = datetime.utcnow().isoformat()
+    _set_swarm_peer_link(session, normalized_seeder_id, link)
+  else:
+    _set_swarm_signal_json(session, "webrtc_answer_json", payload.answer)
+  _touch_swarm_session(session)
+  return SwarmSignalActionResponse(
+    movie_id=movie_id,
+    quality_code=normalized_quality_code,
+    session_id=session["session_id"],
+    message="WebRTC sender answer published.",
+    updated_at=datetime.fromisoformat(session["updated_at"]).isoformat(timespec="seconds") + "Z",
+  )
+
+
+@router.post("/movies/{movie_id}/swarm/webrtc/candidate", response_model=SwarmSignalActionResponse)
+def publish_movie_swarm_webrtc_candidate(
+  movie_id: str,
+  payload: SwarmSignalCandidateRequest,
+  current_user: dict[str, str] = Depends(get_current_user),
+  db: Session | None = Depends(get_db),
+) -> SwarmSignalActionResponse:
+  if db is None:
+    raise HTTPException(status_code=503, detail="Database is required for swarm WebRTC signaling.")
+  session = _get_swarm_session_or_404(payload.session_id)
+  normalized_quality_code = _normalize_quality_code(payload.quality_code)
+  if session["movie_id"] != movie_id:
+    raise HTTPException(status_code=400, detail="That swarm session belongs to a different title.")
+  if session["quality_code"] != normalized_quality_code:
+    raise HTTPException(status_code=400, detail="That swarm session belongs to a different title quality.")
+  _require_delivery_reservation(db, movie_id, current_user["id"], normalized_quality_code)
+  normalized_seeder_id = _normalize_swarm_seeder_id(payload.seeder_id)
+  if normalized_seeder_id:
+    if payload.role == "sender":
+      _require_owned_swarm_seeder(movie_id, normalized_quality_code, normalized_seeder_id, current_user["id"])
+    elif session["user_id"] != current_user["id"]:
+      raise HTTPException(status_code=403, detail="Only the receiver device can publish this WebRTC candidate.")
+    link = _get_or_create_swarm_peer_link(session, normalized_seeder_id)
+    candidate_key = "receiver_candidates" if payload.role == "receiver" else "sender_candidates"
+    candidate_count = _append_swarm_peer_candidate(link, candidate_key, payload.candidate)
+    _set_swarm_peer_link(session, normalized_seeder_id, link)
+  else:
+    candidate_key = "webrtc_receiver_candidates_json" if payload.role == "receiver" else "webrtc_sender_candidates_json"
+    candidate_count = _append_swarm_signal_candidate(session, candidate_key, payload.candidate)
+  _touch_swarm_session(session)
+  return SwarmSignalActionResponse(
+    movie_id=movie_id,
+    quality_code=normalized_quality_code,
+    session_id=session["session_id"],
+    message=f"WebRTC {payload.role} candidate accepted ({candidate_count}).",
+    updated_at=datetime.fromisoformat(session["updated_at"]).isoformat(timespec="seconds") + "Z",
+  )
+
+
+@router.get("/movies/{movie_id}/swarm/webrtc/state", response_model=SwarmSignalStateResponse)
+def get_movie_swarm_webrtc_state(
+  movie_id: str,
+  quality_code: str,
+  session_id: str,
+  seeder_id: str | None = None,
+  current_user: dict[str, str] = Depends(get_current_user),
+  db: Session | None = Depends(get_db),
+) -> SwarmSignalStateResponse:
+  if db is None:
+    raise HTTPException(status_code=503, detail="Database is required for swarm WebRTC signaling.")
+  session = _get_swarm_session_or_404(session_id)
+  normalized_quality_code = _normalize_quality_code(quality_code)
+  if session["movie_id"] != movie_id:
+    raise HTTPException(status_code=400, detail="That swarm session belongs to a different title.")
+  if session["quality_code"] != normalized_quality_code:
+    raise HTTPException(status_code=400, detail="That swarm session belongs to a different title quality.")
+  _require_delivery_reservation(db, movie_id, current_user["id"], normalized_quality_code)
+  normalized_seeder_id = _normalize_swarm_seeder_id(seeder_id)
+  if normalized_seeder_id and session["user_id"] != current_user["id"]:
+    _require_owned_swarm_seeder(movie_id, normalized_quality_code, normalized_seeder_id, current_user["id"])
+  _touch_swarm_session(session)
+  return _serialize_swarm_signal_state(session, normalized_seeder_id or None)
+
+
+@router.get("/movies/{movie_id}/swarm/chunks/{chunk_name}")
+def download_movie_swarm_chunk(
+  movie_id: str,
+  chunk_name: str,
+  quality_code: str,
+  session_id: str,
+  current_user: dict[str, str] = Depends(get_current_user),
+  db: Session | None = Depends(get_db),
+) -> FileResponse:
+  if db is None:
+    raise HTTPException(status_code=503, detail="Database is required for swarm tracker control.")
+  session = _get_swarm_session_or_404(session_id)
+  normalized_quality_code = _normalize_quality_code(quality_code)
+  if session["movie_id"] != movie_id:
+    raise HTTPException(status_code=400, detail="That swarm session belongs to a different title.")
+  if session["quality_code"] != normalized_quality_code:
+    raise HTTPException(status_code=400, detail="That swarm session belongs to a different title quality.")
+  if session["user_id"] != current_user["id"]:
+    raise HTTPException(status_code=403, detail="Only the receiver device can download chunks for this swarm session.")
+  _require_delivery_reservation(db, movie_id, current_user["id"], normalized_quality_code)
+  _manifest, chunk_lookup = _require_swarm_manifest_chunks(movie_id, normalized_quality_code)
+  safe_name = Path(chunk_name).name
+  if safe_name != chunk_name:
+    raise HTTPException(status_code=400, detail="Invalid chunk name.")
+  if safe_name not in chunk_lookup:
+    raise HTTPException(status_code=403, detail="This chunk does not belong to the swarm title quality.")
+  content_root = _content_folder_path(movie_id)
+  target_path = next((file_path for file_path in content_root.rglob(safe_name) if file_path.is_file()), None) if content_root.exists() else None
+  if target_path is None or not target_path.is_file():
+    raise HTTPException(status_code=404, detail="Encrypted chunk not found.")
+  session["expires_at"] = _swarm_session_expiry().isoformat()
+  session["updated_at"] = datetime.utcnow().isoformat()
+  return FileResponse(target_path, filename=safe_name, media_type="application/octet-stream")
+
+
+@router.post("/movies/{movie_id}/swarm/sources/{source_id}/chunks/{chunk_name}", response_model=SwarmRelayChunkUploadResponse)
+async def upload_movie_swarm_relay_chunk(
+  movie_id: str,
+  source_id: str,
+  chunk_name: str,
+  quality_code: str = Form(...),
+  session_id: str = Form(...),
+  file: UploadFile = File(...),
+  current_user: dict[str, str] = Depends(get_current_user),
+  db: Session | None = Depends(get_db),
+) -> SwarmRelayChunkUploadResponse:
+  if db is None:
+    raise HTTPException(status_code=503, detail="Database is required for swarm tracker control.")
+  session = _get_swarm_session_or_404(session_id)
+  normalized_quality_code = _normalize_quality_code(quality_code)
+  if session["movie_id"] != movie_id:
+    raise HTTPException(status_code=400, detail="That swarm session belongs to a different title.")
+  if session["quality_code"] != normalized_quality_code:
+    raise HTTPException(status_code=400, detail="That swarm session belongs to a different title quality.")
+  _require_delivery_reservation(db, movie_id, current_user["id"], normalized_quality_code)
+  sources = _get_swarm_sources(session)
+  source = sources.get(source_id)
+  if source is None:
+    raise HTTPException(status_code=404, detail="Publish this source inventory before uploading relay chunks.")
+  if str(source.get("user_id") or "") != current_user["id"]:
+    raise HTTPException(status_code=403, detail="Only the published source device can upload these chunks.")
+
+  safe_name = Path(chunk_name).name
+  if safe_name != chunk_name:
+    raise HTTPException(status_code=400, detail="Invalid chunk name.")
+  manifest, _chunk_lookup = _require_swarm_manifest_chunks(movie_id, normalized_quality_code)
+  enriched_manifest = _swarm_manifest_with_integrity(movie_id, manifest, normalized_quality_code)
+  chunk_lookup = _chunk_manifest_lookup(enriched_manifest, normalized_quality_code)
+  chunk_record = chunk_lookup.get(safe_name)
+  if chunk_record is None or safe_name not in set(source.get("chunk_names") or []):
+    raise HTTPException(status_code=403, detail="This chunk does not belong to the published swarm source.")
+
+  target_folder = _swarm_relay_source_folder(session["session_id"], source_id)
+  target_folder.mkdir(parents=True, exist_ok=True)
+  target_path = target_folder / safe_name
+  with target_path.open("wb") as buffer:
+    while True:
+      content = await file.read(1024 * 1024)
+      if not content:
+        break
+      buffer.write(content)
+
+  uploaded_bytes = target_path.read_bytes()
+  expected_size = int(chunk_record.get("encrypted_size") or 0)
+  expected_sha256 = str(chunk_record.get("encrypted_sha256") or "").strip().lower()
+  expected_md5 = str(chunk_record.get("encrypted_md5") or "").strip().lower()
+  if len(uploaded_bytes) != expected_size:
+    target_path.unlink(missing_ok=True)
+    raise HTTPException(status_code=400, detail=f"Uploaded chunk size mismatch for {safe_name}.")
+  if expected_sha256 and hashlib.sha256(uploaded_bytes).hexdigest().lower() != expected_sha256:
+    target_path.unlink(missing_ok=True)
+    raise HTTPException(status_code=400, detail=f"Uploaded chunk checksum mismatch for {safe_name}.")
+  if not expected_sha256 and hashlib.md5(uploaded_bytes).hexdigest().lower() != expected_md5:
+    target_path.unlink(missing_ok=True)
+    raise HTTPException(status_code=400, detail=f"Uploaded chunk checksum mismatch for {safe_name}.")
+
+  relay_chunks = _get_swarm_json_set(source, "relay_chunk_names")
+  relay_chunks.add(safe_name)
+  source["relay_chunk_names"] = json.dumps(sorted(relay_chunks))
+  source["last_seen_at"] = datetime.utcnow().isoformat()
+  sources[source_id] = source
+  _set_swarm_sources(session, sources)
+  session["expires_at"] = _swarm_session_expiry().isoformat()
+  session["updated_at"] = datetime.utcnow().isoformat()
+  return SwarmRelayChunkUploadResponse(
+    movie_id=movie_id,
+    quality_code=normalized_quality_code,
+    session_id=session["session_id"],
+    source_id=source_id,
+    chunk_name=safe_name,
+    relay_ready_chunk_count=len(relay_chunks),
+  )
+
+
+@router.get("/movies/{movie_id}/swarm/sources/{source_id}/chunks/{chunk_name}")
+def download_movie_swarm_relay_chunk(
+  movie_id: str,
+  source_id: str,
+  chunk_name: str,
+  quality_code: str,
+  session_id: str,
+  current_user: dict[str, str] = Depends(get_current_user),
+  db: Session | None = Depends(get_db),
+) -> FileResponse:
+  if db is None:
+    raise HTTPException(status_code=503, detail="Database is required for swarm tracker control.")
+  session = _get_swarm_session_or_404(session_id)
+  normalized_quality_code = _normalize_quality_code(quality_code)
+  if session["movie_id"] != movie_id:
+    raise HTTPException(status_code=400, detail="That swarm session belongs to a different title.")
+  if session["quality_code"] != normalized_quality_code:
+    raise HTTPException(status_code=400, detail="That swarm session belongs to a different title quality.")
+  if session["user_id"] != current_user["id"]:
+    raise HTTPException(status_code=403, detail="Only the receiver device can download chunks for this swarm session.")
+  _require_delivery_reservation(db, movie_id, current_user["id"], normalized_quality_code)
+  sources = _get_swarm_sources(session)
+  source = sources.get(source_id)
+  if source is None:
+    raise HTTPException(status_code=404, detail="Swarm source not found.")
+  safe_name = Path(chunk_name).name
+  if safe_name != chunk_name:
+    raise HTTPException(status_code=400, detail="Invalid chunk name.")
+  relay_chunks = _get_swarm_json_set(source, "relay_chunk_names")
+  if safe_name not in relay_chunks:
+    raise HTTPException(status_code=404, detail="Relayed swarm chunk is not available yet.")
+  target_path = _swarm_relay_source_folder(session["session_id"], source_id) / safe_name
+  if not target_path.exists() or not target_path.is_file():
+    raise HTTPException(status_code=404, detail="Relayed swarm chunk file was not found.")
+  session["expires_at"] = _swarm_session_expiry().isoformat()
+  session["updated_at"] = datetime.utcnow().isoformat()
+  return FileResponse(target_path, filename=safe_name, media_type="application/octet-stream")
+
+
+@router.post("/movies/{movie_id}/transfer/pairing", response_model=TransferPairingCreateResponse)
+def create_movie_transfer_pairing(
+  movie_id: str,
+  payload: TransferPairingCreateRequest,
+  current_user: dict[str, str] = Depends(get_current_user),
+  db: Session | None = Depends(get_db),
+) -> TransferPairingCreateResponse:
+  normalized_quality_code = _normalize_quality_code(payload.quality_code)
+  movie_items = (
+    persistence.list_movies(db, include_archived=True, viewer_user_id=current_user["id"])
+    if db
+    else demo_store.list_movies(include_archived=True, viewer_user_id=current_user["id"])
+  )
+  movie = next((item for item in movie_items if item["id"] == movie_id), None)
+  if movie is None:
+    raise HTTPException(status_code=404, detail="Movie not found.")
+  _require_delivery_entitlement(movie)
+  if db is not None:
+    _require_delivery_reservation(db, movie_id, current_user["id"], normalized_quality_code)
+
+  _cleanup_transfer_pairing_sessions()
+  existing_session = next(
+    (
+      session
+      for session in TRANSFER_PAIRING_SESSIONS.values()
+      if session["movie_id"] == movie_id
+      and session["quality_code"] == normalized_quality_code
+      and session["receiver_user_id"] == current_user["id"]
+      and session["session_status"] in {"waiting_for_sender", "paired", "syncing"}
+    ),
+    None,
+  )
+  if existing_session is not None:
+    expires_at = _transfer_pairing_expiry()
+    existing_session["expires_at"] = expires_at.isoformat()
+    return TransferPairingCreateResponse(
+      movie_id=movie_id,
+      quality_code=normalized_quality_code,
+      pairing_code=existing_session["pairing_code"],
+      expires_at=expires_at.isoformat(timespec="seconds") + "Z",
+      session_status=existing_session["session_status"],
+      receiver_user_id=current_user["id"],
+    )
+  pairing_code = _create_transfer_pairing_code()
+  expires_at = _transfer_pairing_expiry()
+  TRANSFER_PAIRING_SESSIONS[pairing_code] = {
+    "movie_id": movie_id,
+    "quality_code": normalized_quality_code,
+    "pairing_code": pairing_code,
+    "receiver_user_id": current_user["id"],
+    "sender_user_id": "",
+    "session_status": "waiting_for_sender",
+    "expires_at": expires_at.isoformat(),
+    "sender_chunk_names": "[]",
+    "receiver_chunk_names": "[]",
+    "relay_chunk_names": "[]",
+    "manifest_json": "",
+  }
+  return TransferPairingCreateResponse(
+    movie_id=movie_id,
+    quality_code=normalized_quality_code,
+    pairing_code=pairing_code,
+    expires_at=expires_at.isoformat(timespec="seconds") + "Z",
+    session_status="waiting_for_sender",
+    receiver_user_id=current_user["id"],
+  )
+
+
+@router.post("/movies/{movie_id}/transfer/pairing/join", response_model=TransferPairingJoinResponse)
+def join_movie_transfer_pairing(
+  movie_id: str,
+  payload: TransferPairingJoinRequest,
+  current_user: dict[str, str] = Depends(get_current_user),
+  db: Session | None = Depends(get_db),
+) -> TransferPairingJoinResponse:
+  normalized_quality_code = _normalize_quality_code(payload.quality_code)
+  movie_items = (
+    persistence.list_movies(db, include_archived=True, viewer_user_id=current_user["id"])
+    if db
+    else demo_store.list_movies(include_archived=True, viewer_user_id=current_user["id"])
+  )
+  movie = next((item for item in movie_items if item["id"] == movie_id), None)
+  if movie is None:
+    raise HTTPException(status_code=404, detail="Movie not found.")
+  _require_delivery_entitlement(movie)
+  if db is not None:
+    sender_reservation = _require_delivery_reservation(db, movie_id, current_user["id"], normalized_quality_code)
+    sender_enrollment = _get_or_create_delivery_enrollment(db, movie_id, current_user["id"], sender_reservation.quality_code or normalized_quality_code)
+    if not (sender_enrollment.local_encrypted_path or "").strip():
+      raise HTTPException(status_code=400, detail="This sender device does not have a registered local VCNR package yet.")
+
+  session = _get_transfer_pairing_session_or_404(payload.pairing_code)
+  if session["movie_id"] != movie_id:
+    raise HTTPException(status_code=400, detail="That pairing code belongs to a different title.")
+  if session["quality_code"] != normalized_quality_code:
+    raise HTTPException(status_code=400, detail="That pairing code belongs to a different title quality.")
+  if session["receiver_user_id"] != current_user["id"]:
+    raise HTTPException(status_code=403, detail="Phase 1 pairing currently works only for the same signed-in account on both devices.")
+
+  session["sender_user_id"] = current_user["id"]
+  session["session_status"] = "paired"
+  expires_at = _transfer_pairing_expiry()
+  session["expires_at"] = expires_at.isoformat()
+
+  return TransferPairingJoinResponse(
+    movie_id=movie_id,
+    quality_code=normalized_quality_code,
+    pairing_code=session["pairing_code"],
+    expires_at=expires_at.isoformat(timespec="seconds") + "Z",
+    session_status="paired",
+    receiver_user_id=session["receiver_user_id"],
+    sender_user_id=current_user["id"],
+    message="Pairing session confirmed. The next step is direct chunk discovery and sync between both phones.",
+  )
+
+
+@router.get("/movies/{movie_id}/transfer/pairing/status", response_model=TransferPairingStatusResponse)
+def get_movie_transfer_pairing_status(
+  movie_id: str,
+  pairing_code: str,
+  current_user: dict[str, str] = Depends(get_current_user),
+) -> TransferPairingStatusResponse:
+  session = _get_transfer_pairing_session_or_404(pairing_code)
+  if session["movie_id"] != movie_id:
+    raise HTTPException(status_code=400, detail="That pairing code belongs to a different title.")
+  if current_user["id"] not in {session["receiver_user_id"], session.get("sender_user_id") or ""}:
+    raise HTTPException(status_code=403, detail="You do not have access to this transfer session.")
+  return _serialize_transfer_status(session)
+
+
+@router.post("/movies/{movie_id}/transfer/pairing/inventory", response_model=TransferPairingInventoryResponse)
+def update_movie_transfer_pairing_inventory(
+  movie_id: str,
+  payload: TransferPairingInventoryRequest,
+  current_user: dict[str, str] = Depends(get_current_user),
+) -> TransferPairingInventoryResponse:
+  session = _get_transfer_pairing_session_or_404(payload.pairing_code)
+  normalized_quality_code = _normalize_quality_code(payload.quality_code)
+  if session["movie_id"] != movie_id:
+    raise HTTPException(status_code=400, detail="That pairing code belongs to a different title.")
+  if session["quality_code"] != normalized_quality_code:
+    raise HTTPException(status_code=400, detail="That pairing code belongs to a different title quality.")
+  expected_chunks = _get_transfer_expected_chunk_names(session)
+  reported_chunks = {Path(item).name for item in payload.chunk_names if item.strip() and Path(item).name == item.strip()}
+  if expected_chunks:
+    reported_chunks = reported_chunks.intersection(expected_chunks)
+  if payload.role == "receiver":
+    if current_user["id"] != session["receiver_user_id"]:
+      raise HTTPException(status_code=403, detail="Only the receiver device can update receiver inventory.")
+    _set_transfer_chunk_names(session, "receiver_chunk_names", reported_chunks)
+  else:
+    if current_user["id"] != (session.get("sender_user_id") or ""):
+      raise HTTPException(status_code=403, detail="Only the sender device can update sender inventory.")
+    _set_transfer_chunk_names(session, "sender_chunk_names", reported_chunks)
+    if session["session_status"] == "paired":
+      session["session_status"] = "syncing"
+  sender_chunks = expected_chunks or _get_transfer_chunk_names(session, "sender_chunk_names")
+  receiver_chunks = _get_transfer_chunk_names(session, "receiver_chunk_names")
+  if expected_chunks:
+    receiver_chunks = receiver_chunks.intersection(expected_chunks)
+  missing_chunks = sender_chunks.difference(receiver_chunks)
+  if sender_chunks and not missing_chunks:
+    session["session_status"] = "completed"
+    _delete_transfer_pairing_files(session["pairing_code"])
+  return TransferPairingInventoryResponse(
+    movie_id=movie_id,
+    quality_code=normalized_quality_code,
+    pairing_code=session["pairing_code"],
+    role=payload.role,
+    chunk_count=len(sender_chunks if payload.role == "sender" else receiver_chunks),
+    missing_chunk_count=len(missing_chunks),
+    session_status=session["session_status"],
+  )
+
+
+@router.post("/movies/{movie_id}/transfer/pairing/manifest", response_model=TransferPairingManifestResponse)
+def upload_movie_transfer_pairing_manifest(
+  movie_id: str,
+  payload: TransferPairingManifestRequest,
+  current_user: dict[str, str] = Depends(get_current_user),
+) -> TransferPairingManifestResponse:
+  session = _get_transfer_pairing_session_or_404(payload.pairing_code)
+  normalized_quality_code = _normalize_quality_code(payload.quality_code)
+  if session["movie_id"] != movie_id:
+    raise HTTPException(status_code=400, detail="That pairing code belongs to a different title.")
+  if session["quality_code"] != normalized_quality_code:
+    raise HTTPException(status_code=400, detail="That pairing code belongs to a different title quality.")
+  if current_user["id"] != (session.get("sender_user_id") or ""):
+    raise HTTPException(status_code=403, detail="Only the sender device can upload the transfer manifest.")
+
+  manifest = payload.manifest if isinstance(payload.manifest, dict) else {}
+  files = manifest.get("files", []) if isinstance(manifest.get("files", []), list) else []
+  _validate_transfer_manifest_integrity(manifest, normalized_quality_code)
+  session["manifest_json"] = json.dumps(manifest)
+  folder = _transfer_pairing_folder(session["pairing_code"])
+  folder.mkdir(parents=True, exist_ok=True)
+  (folder / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+  return TransferPairingManifestResponse(
+    movie_id=movie_id,
+    quality_code=normalized_quality_code,
+    pairing_code=session["pairing_code"],
+    session_status=session["session_status"],
+    manifest_available=True,
+    chunk_count=len(files),
+  )
+
+
+@router.get("/movies/{movie_id}/transfer/pairing/manifest", response_model=DeliveryManifestResponse)
+def get_movie_transfer_pairing_manifest(
+  movie_id: str,
+  pairing_code: str,
+  current_user: dict[str, str] = Depends(get_current_user),
+) -> DeliveryManifestResponse:
+  session = _get_transfer_pairing_session_or_404(pairing_code)
+  if session["movie_id"] != movie_id:
+    raise HTTPException(status_code=400, detail="That pairing code belongs to a different title.")
+  if current_user["id"] not in {session["receiver_user_id"], session.get("sender_user_id") or ""}:
+    raise HTTPException(status_code=403, detail="You do not have access to this transfer session.")
+  if not session.get("manifest_json"):
+    raise HTTPException(status_code=404, detail="Transfer manifest is not available yet.")
+  manifest = json.loads(session["manifest_json"])
+  return DeliveryManifestResponse(**_viewer_content_manifest_payload(manifest, session["quality_code"]))
+
+
+@router.post("/movies/{movie_id}/transfer/pairing/chunks/{chunk_name}", response_model=TransferRelayChunkUploadResponse)
+async def upload_movie_transfer_pairing_chunk(
+  movie_id: str,
+  chunk_name: str,
+  pairing_code: str = Form(...),
+  file: UploadFile = File(...),
+  current_user: dict[str, str] = Depends(get_current_user),
+) -> TransferRelayChunkUploadResponse:
+  session = _get_transfer_pairing_session_or_404(pairing_code)
+  if session["movie_id"] != movie_id:
+    raise HTTPException(status_code=400, detail="That pairing code belongs to a different title.")
+  if current_user["id"] != (session.get("sender_user_id") or ""):
+    raise HTTPException(status_code=403, detail="Only the sender device can upload transfer chunks.")
+  if not session.get("manifest_json"):
+    raise HTTPException(status_code=400, detail="Upload the sender manifest before relaying chunks.")
+
+  safe_name = Path(chunk_name).name
+  if safe_name != chunk_name:
+    raise HTTPException(status_code=400, detail="Invalid chunk name.")
+
+  manifest = _get_transfer_manifest(session)
+  chunk_lookup = _validate_transfer_manifest_integrity(manifest, session["quality_code"])
+  chunk_record = chunk_lookup.get(safe_name)
+  if chunk_record is None:
+    raise HTTPException(status_code=403, detail="This chunk does not belong to the paired title quality.")
+
+  folder = _transfer_pairing_folder(session["pairing_code"]) / "chunks"
+  folder.mkdir(parents=True, exist_ok=True)
+  target_path = folder / safe_name
+  with target_path.open("wb") as buffer:
+    while True:
+      content = await file.read(1024 * 1024)
+      if not content:
+        break
+      buffer.write(content)
+  uploaded_bytes = target_path.read_bytes()
+  expected_size = int(chunk_record.get("encrypted_size") or 0)
+  expected_sha256 = str(chunk_record.get("encrypted_sha256") or "").strip().lower()
+  expected_md5 = str(chunk_record.get("encrypted_md5") or "").strip().lower()
+  if len(uploaded_bytes) != expected_size:
+    target_path.unlink(missing_ok=True)
+    raise HTTPException(status_code=400, detail=f"Uploaded chunk size mismatch for {safe_name}.")
+  if expected_sha256 and hashlib.sha256(uploaded_bytes).hexdigest().lower() != expected_sha256:
+    target_path.unlink(missing_ok=True)
+    raise HTTPException(status_code=400, detail=f"Uploaded chunk checksum mismatch for {safe_name}.")
+  if not expected_sha256 and hashlib.md5(uploaded_bytes).hexdigest().lower() != expected_md5:
+    target_path.unlink(missing_ok=True)
+    raise HTTPException(status_code=400, detail=f"Uploaded chunk checksum mismatch for {safe_name}.")
+  relay_chunks = _get_transfer_chunk_names(session, "relay_chunk_names")
+  relay_chunks.add(safe_name)
+  _set_transfer_chunk_names(session, "relay_chunk_names", relay_chunks)
+  session["session_status"] = "syncing"
+  return TransferRelayChunkUploadResponse(
+    movie_id=movie_id,
+    quality_code=session["quality_code"],
+    pairing_code=session["pairing_code"],
+    chunk_name=safe_name,
+    relay_ready_chunk_count=len(relay_chunks),
+    session_status=session["session_status"],
+  )
+
+
+@router.get("/movies/{movie_id}/transfer/pairing/chunks/{chunk_name}")
+def download_movie_transfer_pairing_chunk(
+  movie_id: str,
+  chunk_name: str,
+  pairing_code: str,
+  current_user: dict[str, str] = Depends(get_current_user),
+) -> FileResponse:
+  session = _get_transfer_pairing_session_or_404(pairing_code)
+  if session["movie_id"] != movie_id:
+    raise HTTPException(status_code=400, detail="That pairing code belongs to a different title.")
+  if current_user["id"] not in {session["receiver_user_id"], session.get("sender_user_id") or ""}:
+    raise HTTPException(status_code=403, detail="You do not have access to this transfer session.")
+  safe_name = Path(chunk_name).name
+  if safe_name != chunk_name:
+    raise HTTPException(status_code=400, detail="Invalid chunk name.")
+  target_path = _transfer_pairing_folder(session["pairing_code"]) / "chunks" / safe_name
+  if not target_path.exists() or not target_path.is_file():
+    raise HTTPException(status_code=404, detail="Relayed transfer chunk not found yet.")
+  return FileResponse(target_path, filename=safe_name, media_type="application/octet-stream")
 
 
 @router.delete("/admin/movies/{movie_id}/assets/content-folder")
@@ -2290,12 +4486,29 @@ def admin_delete_movie(
   _: dict[str, str] = Depends(require_admin),
 ) -> dict:
   movie = _get_movie_or_404(db, movie_id)
-  _delete_movie_media_folder(movie_id)
   deleted_movie = persistence.delete_movie_permanently(db, movie_id) if db else demo_store.delete_movie_permanently(movie_id)
   if deleted_movie is None:
     raise HTTPException(status_code=404, detail="Movie not found.")
 
-  _delete_movie_media_folder(movie_id)
+  cleanup_warning: str | None = None
+  try:
+    _delete_movie_media_folder(movie_id)
+  except HTTPException as error:
+    if error.status_code == 409:
+      cleanup_warning = (
+        f'"{movie["title"]}" was deleted from VCNR, but Windows is still holding its media folder open. '
+        "Close File Explorer, BitComet, video players, or any process using that title, then remove the leftover folder later."
+      )
+    else:
+      raise
+
+  if cleanup_warning:
+    return {
+      "message": cleanup_warning,
+      "media_cleanup_pending": True,
+      "media_folder": str((LIBRARY_MEDIA_ROOT / movie_id).resolve()),
+    }
+
   return {"message": f'"{movie["title"]}" and all related media were deleted permanently.'}
 
 

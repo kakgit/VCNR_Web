@@ -15,6 +15,15 @@ def _normalize_database_url(value: str) -> str:
   return normalized
 
 
+def _parse_csv_urls(value: str) -> tuple[str, ...]:
+  urls: list[str] = []
+  for raw in value.split(","):
+    cleaned = raw.strip()
+    if cleaned and cleaned not in urls:
+      urls.append(cleaned)
+  return tuple(urls)
+
+
 def _load_env_file() -> None:
   env_path = Path(__file__).resolve().parent.parent.parent / ".env"
   if not env_path.exists():
@@ -25,7 +34,9 @@ def _load_env_file() -> None:
     if not line or line.startswith("#") or "=" not in line:
       continue
     key, value = line.split("=", 1)
-    os.environ.setdefault(key.strip(), value.strip())
+    # In local/dev runs we want the checked-in .env file to win so tunnel URL
+    # changes immediately affect regenerated torrent webseed metadata.
+    os.environ[key.strip()] = value.strip()
 
 
 @dataclass(frozen=True)
@@ -36,6 +47,11 @@ class Settings:
   app_port: int
   frontend_origin: str
   database_url: str
+  swarm_stun_url: str
+  swarm_turn_url: str
+  swarm_turn_username: str
+  swarm_turn_credential: str
+  public_torrent_trackers: tuple[str, ...]
 
 
 @lru_cache(maxsize=1)
@@ -51,6 +67,24 @@ def get_settings() -> Settings:
       os.getenv(
         "DATABASE_URL",
         "postgresql+psycopg://postgres:postgres@localhost:5432/cineproxima",
+      )
+    ),
+    swarm_stun_url=os.getenv("SWARM_STUN_URL", "stun:stun.l.google.com:19302").strip(),
+    swarm_turn_url=os.getenv("SWARM_TURN_URL", "").strip(),
+    swarm_turn_username=os.getenv("SWARM_TURN_USERNAME", "").strip(),
+    swarm_turn_credential=os.getenv("SWARM_TURN_CREDENTIAL", "").strip(),
+    public_torrent_trackers=_parse_csv_urls(
+      os.getenv(
+        "PUBLIC_TORRENT_TRACKERS",
+        ",".join(
+          [
+            "udp://tracker.opentrackr.org:1337/announce",
+            "udp://open.stealth.si:80/announce",
+            "udp://tracker.torrent.eu.org:451/announce",
+            "udp://explodie.org:6969/announce",
+            "https://tracker.opentrackr.org:443/announce",
+          ]
+        ),
       )
     ),
   )

@@ -4,23 +4,26 @@ Use this file to track items we intentionally keep active for now and revisit du
 
 ## Deferred Items
 
-### M-P2P prototype after stable hosted delivery
+### M-P2P prototype cleanup and next-phase hardening
 
-Status: Defer until after Railway deployment and short-title validation.
+Status: Active follow-up after first working milestone on July 23, 2026.
 
 Reason:
-- We now have a stable direct-download and VCNR direct-playback baseline.
-- Mobile-to-mobile peer transfer is valuable, but it should be added only after the hosted server flow is stable.
-- This avoids mixing two large delivery-path changes at once.
+- The first working same-user M-P2P transfer milestone has now been reached.
+- The prototype is useful and validated, but it still needs hardening before broader rollout.
+- Resume, cleanup, and cross-user entitlement rules still need more work.
 
 Current instruction:
-- Finish `VCNR_Web`.
-- Deploy the hosted flow to Railway.
-- Test a few shorter real titles first.
-- Then begin the `M-P2P` prototype.
+- Keep the current working same-user encrypted transfer path.
+- Improve resume and interruption recovery.
+- Improve cleanup and completion behavior.
+- Add cross-user entitlement-controlled transfer later.
+- Evaluate direct LAN or `libp2p` transport after the relay-backed prototype is stable.
 
 Reference:
 - [m-p2p-design-note.md](D:/Python/VCNR_Web/docs/m-p2p-design-note.md)
+- [m-p2p-phase-1-build-plan.md](D:/Python/VCNR_Web/docs/m-p2p-phase-1-build-plan.md)
+- [m-p2p-working-milestone-2026-07-23.md](D:/Python/VCNR_Web/docs/m-p2p-working-milestone-2026-07-23.md)
 
 ### Admin frontend cleanup after viewer-first work
 

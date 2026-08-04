@@ -295,6 +295,28 @@ class DeliveryManifestResponse(BaseModel):
   updated_at: str | None = None
 
 
+class DeliveryTorrentResponse(BaseModel):
+  movie_id: str
+  quality_code: str
+  info_hash_sha1: str = Field(min_length=40, max_length=40)
+  torrent_name: str
+  total_bytes: int
+  piece_length: int
+  piece_count: int
+  file_count: int
+  comment: str
+  created_by: str
+  created_at: int
+  trackers: list[str] = []
+  webseed_urls: list[str] = []
+  magnet_uri: str
+  torrent_base64: str
+  bootstrap_nodes: list[str]
+  use_dht: bool = True
+  use_lsd: bool = True
+  use_pex: bool = True
+
+
 class DeliverySlotHeartbeatRequest(BaseModel):
   slot_token: str = Field(min_length=12, max_length=120)
 
@@ -302,6 +324,307 @@ class DeliverySlotHeartbeatRequest(BaseModel):
 class DeliveryDownloadCompleteRequest(BaseModel):
   quality_code: str = Field(min_length=2, max_length=40)
   local_encrypted_path: str | None = Field(default=None, max_length=500)
+
+
+class TransferPairingCreateRequest(BaseModel):
+  quality_code: str = Field(min_length=2, max_length=40)
+
+
+class TransferPairingCreateResponse(BaseModel):
+  movie_id: str
+  quality_code: str
+  pairing_code: str
+  expires_at: str
+  session_status: str
+  receiver_user_id: str
+
+
+class TransferPairingJoinRequest(BaseModel):
+  quality_code: str = Field(min_length=2, max_length=40)
+  pairing_code: str = Field(min_length=4, max_length=12)
+
+
+class TransferPairingJoinResponse(BaseModel):
+  movie_id: str
+  quality_code: str
+  pairing_code: str
+  expires_at: str
+  session_status: str
+  receiver_user_id: str
+  sender_user_id: str
+  message: str
+
+
+class TransferPairingStatusResponse(BaseModel):
+  movie_id: str
+  quality_code: str
+  pairing_code: str
+  expires_at: str
+  session_status: str
+  receiver_user_id: str
+  sender_user_id: str | None = None
+  sender_joined: bool = False
+  sender_chunk_count: int = 0
+  receiver_chunk_count: int = 0
+  missing_chunk_count: int = 0
+  relay_ready_chunk_count: int = 0
+  relay_ready_chunk_names: list[str] = []
+  manifest_available: bool = False
+
+
+class TransferPairingInventoryRequest(BaseModel):
+  quality_code: str = Field(min_length=2, max_length=40)
+  pairing_code: str = Field(min_length=4, max_length=12)
+  role: str = Field(pattern="^(sender|receiver)$")
+  chunk_names: list[str] = []
+
+
+class TransferPairingInventoryResponse(BaseModel):
+  movie_id: str
+  quality_code: str
+  pairing_code: str
+  role: str
+  chunk_count: int
+  missing_chunk_count: int = 0
+  session_status: str
+
+
+class TransferPairingManifestRequest(BaseModel):
+  quality_code: str = Field(min_length=2, max_length=40)
+  pairing_code: str = Field(min_length=4, max_length=12)
+  manifest: dict = Field(default_factory=dict)
+
+
+class TransferPairingManifestResponse(BaseModel):
+  movie_id: str
+  quality_code: str
+  pairing_code: str
+  session_status: str
+  manifest_available: bool = False
+  chunk_count: int = 0
+
+
+class TransferRelayChunkUploadResponse(BaseModel):
+  movie_id: str
+  quality_code: str
+  pairing_code: str
+  chunk_name: str
+  relay_ready_chunk_count: int = 0
+  session_status: str
+
+
+class SwarmSessionCreateRequest(BaseModel):
+  quality_code: str = Field(min_length=2, max_length=40)
+  device_label: str | None = Field(default=None, max_length=120)
+
+
+class SwarmSessionResponse(BaseModel):
+  movie_id: str
+  quality_code: str
+  session_id: str
+  expires_at: str
+  user_id: str
+  device_label: str | None = None
+  manifest_available: bool = False
+  expected_chunk_count: int = 0
+  verified_chunk_count: int = 0
+  missing_chunk_count: int = 0
+
+
+class SwarmInventoryRequest(BaseModel):
+  quality_code: str = Field(min_length=2, max_length=40)
+  session_id: str = Field(min_length=8, max_length=80)
+  device_label: str | None = Field(default=None, max_length=120)
+  verified_chunk_names: list[str] = []
+
+
+class SwarmInventoryResponse(BaseModel):
+  movie_id: str
+  quality_code: str
+  session_id: str
+  accepted_chunk_count: int = 0
+  expected_chunk_count: int = 0
+  missing_chunk_count: int = 0
+
+
+class SwarmSourceEntry(BaseModel):
+  source_id: str
+  source_type: str
+  user_id: str | None = None
+  device_label: str | None = None
+  chunk_names: list[str] = []
+  chunk_count: int = 0
+  last_seen_at: str | None = None
+
+
+class SwarmSourcesResponse(BaseModel):
+  movie_id: str
+  quality_code: str
+  session_id: str
+  expected_chunk_count: int = 0
+  receiver_verified_chunk_count: int = 0
+  missing_chunk_count: int = 0
+  sources: list[SwarmSourceEntry] = []
+
+
+class SwarmSourcePublishRequest(BaseModel):
+  quality_code: str = Field(min_length=2, max_length=40)
+  session_id: str = Field(min_length=8, max_length=80)
+  device_label: str | None = Field(default=None, max_length=120)
+  available_chunk_names: list[str] = []
+
+
+class SwarmSourcePublishResponse(BaseModel):
+  movie_id: str
+  quality_code: str
+  session_id: str
+  source_id: str
+  accepted_chunk_count: int = 0
+  expected_chunk_count: int = 0
+
+
+class SwarmSeederAnnounceRequest(BaseModel):
+  quality_code: str = Field(min_length=2, max_length=40)
+  device_id: str | None = Field(default=None, max_length=120)
+  device_label: str | None = Field(default=None, max_length=120)
+  available_chunk_names: list[str] = []
+
+
+class SwarmSeederAnnounceResponse(BaseModel):
+  movie_id: str
+  quality_code: str
+  seeder_id: str
+  accepted_chunk_count: int = 0
+  expected_chunk_count: int = 0
+  expires_at: str
+
+
+class SwarmDemandCreateRequest(BaseModel):
+  quality_code: str = Field(min_length=2, max_length=40)
+  device_label: str | None = Field(default=None, max_length=120)
+  missing_chunk_names: list[str] = []
+
+
+class SwarmDemandResponse(BaseModel):
+  movie_id: str
+  quality_code: str
+  demand_id: str
+  receiver_count: int = 0
+  missing_chunk_count: int = 0
+  expires_at: str
+
+
+class SwarmDemandEntry(BaseModel):
+  movie_id: str
+  quality_code: str
+  receiver_count: int = 0
+  missing_chunk_count: int = 0
+  expires_at: str
+
+
+class SwarmDemandListResponse(BaseModel):
+  demands: list[SwarmDemandEntry] = []
+
+
+class SwarmSeederListResponse(BaseModel):
+  movie_id: str
+  quality_code: str
+  expected_chunk_count: int = 0
+  seeders: list[SwarmSourceEntry] = []
+
+
+class SwarmAutoSessionRequest(BaseModel):
+  quality_code: str = Field(min_length=2, max_length=40)
+  device_label: str | None = Field(default=None, max_length=120)
+  verified_chunk_names: list[str] = []
+
+
+class SwarmAutoSessionResponse(BaseModel):
+  movie_id: str
+  quality_code: str
+  session_id: str
+  selected_seeder_id: str | None = None
+  assigned_seeder_ids: list[str] = []
+  expected_chunk_count: int = 0
+  receiver_verified_chunk_count: int = 0
+  seeders: list[SwarmSourceEntry] = []
+  stun_url: str = "stun:stun.l.google.com:19302"
+  turn_url: str = ""
+  turn_username: str = ""
+  turn_credential: str = ""
+
+
+class SwarmSeederAssignmentResponse(BaseModel):
+  movie_id: str
+  quality_code: str
+  seeder_id: str
+  session_id: str | None = None
+  receiver_device_label: str | None = None
+  receiver_missing_chunk_count: int = 0
+  message: str
+  stun_url: str = "stun:stun.l.google.com:19302"
+  turn_url: str = ""
+  turn_username: str = ""
+  turn_credential: str = ""
+
+
+class SwarmSeederCooldownResponse(BaseModel):
+  movie_id: str
+  quality_code: str
+  seeder_id: str
+  cooldown_until: str
+  message: str
+
+
+class SwarmRelayChunkUploadResponse(BaseModel):
+  movie_id: str
+  quality_code: str
+  session_id: str
+  source_id: str
+  chunk_name: str
+  relay_ready_chunk_count: int = 0
+
+
+class SwarmSignalOfferRequest(BaseModel):
+  quality_code: str = Field(min_length=2, max_length=40)
+  session_id: str = Field(min_length=8, max_length=80)
+  seeder_id: str | None = Field(default=None, max_length=160)
+  offer: dict
+
+
+class SwarmSignalAnswerRequest(BaseModel):
+  quality_code: str = Field(min_length=2, max_length=40)
+  session_id: str = Field(min_length=8, max_length=80)
+  seeder_id: str | None = Field(default=None, max_length=160)
+  answer: dict
+
+
+class SwarmSignalCandidateRequest(BaseModel):
+  quality_code: str = Field(min_length=2, max_length=40)
+  session_id: str = Field(min_length=8, max_length=80)
+  seeder_id: str | None = Field(default=None, max_length=160)
+  role: str = Field(pattern="^(receiver|sender)$")
+  candidate: dict
+
+
+class SwarmSignalStateResponse(BaseModel):
+  movie_id: str
+  quality_code: str
+  session_id: str
+  seeder_id: str | None = None
+  offer: dict | None = None
+  answer: dict | None = None
+  receiver_candidates: list[dict] = Field(default_factory=list)
+  sender_candidates: list[dict] = Field(default_factory=list)
+  updated_at: str
+
+
+class SwarmSignalActionResponse(BaseModel):
+  movie_id: str
+  quality_code: str
+  session_id: str
+  message: str
+  updated_at: str
 
 
 class ApprovalUpdateRequest(BaseModel):

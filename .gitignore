@@ -17,3 +17,10 @@ sample-videos/
 mobile-viewer-app/
 VCNR_Android_Player/
 VCNR_Swarm_Test/
+
+# Runtime media (uploaded posters, trailers, content chunks, torrents, manifests).
+# Kept out of git — these are generated at runtime and are ephemeral on Render's
+# free tier disk. media/.gitkeep is still tracked so the folder exists in the image.
+media/library/
+media/*.vcnr
+media/*.torrent

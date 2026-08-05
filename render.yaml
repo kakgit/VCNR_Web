@@ -1,11 +1,14 @@
 # Render Blueprint for VCNR_Web (Free Tier Testing)
 # https://render.com/docs/blueprint-spec
 #
+# Render is the only deployment platform for VCNR_Web.
+#
 # Deploy steps:
 #   1. Push this repo to GitHub
 #   2. In Render dashboard: New + -> Blueprint -> select this repo
 #   3. Render creates the web service + PostgreSQL automatically
-#   4. Set remaining env vars in the service (FRONTEND_ORIGIN etc.)
+#   4. Frontend origin is auto-detected from RENDER_EXTERNAL_URL
+#      (no FRONTEND_ORIGIN manual setup needed)
 #
 # Free tier caveats:
 #   - Service sleeps after 15 min idle, wakes in ~50s on first request
@@ -38,10 +41,8 @@ services:
         fromDatabase:
           name: vcnr-postgres
           property: connectionString
-      - key: FRONTEND_ORIGIN
-        sync: false
-        # After first deploy set this to: https://vcnr-web.onrender.com
-        # (or whatever subdomain Render assigned the service)
+      # RENDER_EXTERNAL_URL is set automatically by Render.
+      # The backend uses it as the frontend origin for CORS and webseed URLs.
       - key: SWARM_STUN_URL
         value: stun:stun.l.google.com:19302
         # Optional: add your TURN server credentials here for better swarm connectivity:

@@ -1,7 +1,6 @@
 node_modules/
 .DS_Store
 Thumbs.db
-.railway/
 .gitrepo/
 .venv/
 __pycache__/

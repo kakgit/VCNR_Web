@@ -39,6 +39,23 @@ def _load_env_file() -> None:
     os.environ[key.strip()] = value.strip()
 
 
+def _resolve_frontend_origin() -> str:
+  """Resolve the public frontend origin.
+
+  Priority:
+    1. Explicit FRONTEND_ORIGIN env var (if provided)
+    2. RENDER_EXTERNAL_URL (automatically set by Render to the service URL)
+    3. Local default
+  """
+  configured = os.getenv("FRONTEND_ORIGIN", "").strip()
+  if configured:
+    return configured
+  render_url = os.getenv("RENDER_EXTERNAL_URL", "").strip()
+  if render_url:
+    return render_url
+  return "http://localhost:8000"
+
+
 @dataclass(frozen=True)
 class Settings:
   app_name: str
@@ -62,7 +79,7 @@ def get_settings() -> Settings:
     app_env=os.getenv("APP_ENV", "development"),
     app_host=os.getenv("APP_HOST", "0.0.0.0"),
     app_port=int(os.getenv("APP_PORT", "8000")),
-    frontend_origin=os.getenv("FRONTEND_ORIGIN", "http://localhost:8000"),
+    frontend_origin=_resolve_frontend_origin(),
     database_url=_normalize_database_url(
       os.getenv(
         "DATABASE_URL",

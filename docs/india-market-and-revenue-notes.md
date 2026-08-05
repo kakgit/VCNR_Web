@@ -98,12 +98,12 @@ Discussion conclusion:
 - They use CDN / edge delivery, pre-positioned content, segmented video delivery, adaptive bitrate streaming, and aggressive load testing
 - Cine Vault can solve launch-day traffic differently through pre-download plus release-time unlock
 
-## Railway Scaling Discussion
+## Render Scaling Discussion
 
 Discussion conclusion:
 
-- Railway can be useful for admin, metadata, approval, and general app services
-- Railway alone should not be trusted as the only hot-path launch-time unlock system for massive same-time demand
+- Render can be useful for admin, metadata, approval, and general app services
+- Render alone should not be trusted as the only hot-path launch-time unlock system for massive same-time demand
 - The unlock path should eventually use a larger architecture with CDN, queueing, caching, and distributed authorization
 
 ## Auto Delete / Revoke Discussion
@@ -424,7 +424,7 @@ Core business insight:
 
 - GitHub:
   - code only
-- Railway:
+- Render:
   - app frontend
   - backend API
   - Postgres
@@ -442,9 +442,9 @@ Core business insight:
   - ideal demo size: `50 MB to 200 MB`
   - acceptable heavy demo: up to about `1 GB`
 
-### Railway Demo Conclusion
+### Render Demo Conclusion
 
-- Railway is acceptable for a small controlled demo
+- Render is acceptable for a small controlled demo
 - 1 or 2 demo titles with a 30-minute playable sample is realistic for proof-of-concept use
 - this is valid only for:
   - internal testing
@@ -458,7 +458,7 @@ Core business insight:
 
 Discussion conclusion:
 
-- do not rely only on Railway for the core launch platform
+- do not rely only on Render for the core launch platform
 - use a serious production cloud stack
 
 Suggested architecture direction:

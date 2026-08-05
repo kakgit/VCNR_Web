@@ -1476,7 +1476,7 @@ Current short-term priorities:
 - Continue turning placeholder flows into real backend-driven features
 - Keep future architecture aligned with Android-first and iPhone-first app delivery
 - Finish the hosted stable delivery flow before starting `M-P2P`
-- After Railway deployment and short-title testing, begin the `M-P2P` prototype track
+- After Render deployment and short-title testing, begin the `M-P2P` prototype track
 
 ## 14. Change Log Notes
 

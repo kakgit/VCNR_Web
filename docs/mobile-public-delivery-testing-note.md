@@ -74,9 +74,9 @@ Date: July 22, 2026
 ## Recommended next step
 
 - Keep using the temporary Cloudflare quick tunnel for testing.
-- Move later to one of these for stable public delivery:
+- Move later to a stable public delivery option:
   - named Cloudflare Tunnel with owned domain
-  - public backend hosting such as Render or Railway
+  - public backend hosting on Render
 - Use the new stable delivery flow document as the working baseline for future mobile delivery changes.
 
 ## Notes for app testing

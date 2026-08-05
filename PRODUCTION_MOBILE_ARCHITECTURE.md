@@ -21,14 +21,14 @@ Why egress matters:
 ### App Layer
 
 - Mobile app: React Native viewer app for Android and iOS
-- Backend API: Railway
-- Database: Railway Postgres
+- Backend API: Render
+- Database: Render Postgres
 
 ### Content Layer
 
 - Encrypted movie chunks: object storage
 - Recommended primary target: Cloudflare R2
-- Alternative demo-first target: Railway Object Storage
+- Alternative demo-first target: Cloudflare R2 (or local cloudflared tunnel for ad-hoc testing)
 
 ### Delivery Modes
 
@@ -40,10 +40,10 @@ Why egress matters:
 
 ```mermaid
 flowchart LR
-    A["Viewer Mobile App<br/>React Native (Android + iOS)"] --> B["API Gateway / Backend<br/>Railway"]
-    A --> C["Object Storage / Content Layer<br/>Cloudflare R2 or Railway Object Storage"]
+    A["Viewer Mobile App<br/>React Native (Android + iOS)"] --> B["API Gateway / Backend<br/>Render"]
+    A --> C["Object Storage / Content Layer<br/>Cloudflare R2"]
 
-    B --> D["Railway Postgres<br/>Users, Wallets, Entitlements, Device Rules"]
+    B --> D["Render Postgres<br/>Users, Wallets, Entitlements, Device Rules"]
     B --> E["Admin / Super Admin Web"]
     E --> B
 
@@ -71,7 +71,7 @@ flowchart LR
 ### Server-Only Mode
 
 1. Viewer logs into mobile app
-2. Mobile app talks to Railway backend
+2. Mobile app talks to Render backend
 3. Backend checks user, wallet, purchase state, release rules, and device rules
 4. Backend returns catalog data and permissioned content access
 5. Mobile app downloads encrypted chunks from object storage
@@ -166,8 +166,8 @@ Recommended path shape:
 
 ## Why This Is Cost-Efficient
 
-- Railway handles API + DB well
-- Large content bytes should not be served directly from Railway app service
+- Render handles API + DB well
+- Large content bytes should not be served directly from the Render app service
 - Object storage is better for large encrypted content distribution
 - Server-only mode is simplest and safest first release
 - Peer-assisted mode can later reduce storage-origin delivery bandwidth without removing server fallback
@@ -177,15 +177,15 @@ Recommended path shape:
 ### Demo / Testing
 
 - React Native mobile app
-- Railway backend
-- Railway Postgres
-- Railway Object Storage or Cloudflare R2
+- Render backend (deploy via `render.yaml` blueprint)
+- Render Postgres (free tier, 30-day expiry; use Neon afterward)
+- Cloudflare R2 for encrypted chunks
 
 ### Production Direction
 
 - React Native mobile app
-- Railway backend
-- Railway Postgres
+- Render backend
+- Render Postgres (or Neon for permanent free storage)
 - Cloudflare R2 for encrypted chunks
 - Signed content access controlled by backend
 - Peer-assisted layer only after server-only delivery is proven stable

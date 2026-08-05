@@ -1,0 +1,72 @@
+# Koyeb Service Definition for VCNR_Web (Free Tier Testing)
+# https://www.koyeb.com/docs/deploy/koyeb-service-definition
+#
+# Deploy steps:
+#   1. Push the Docker image to a registry, OR let Koyeb build from GitHub:
+#      koyeb service create web \
+#        --app vcnr \
+#        --git github.com/kakgit/VCNR_Web \
+#        --git-branch main \
+#        --git-build-command "" \
+#        --git-run-command "uvicorn backend.main:app --host 0.0.0.0 --port 8000" \
+#        --ports 8000:http \
+#        --instance-type free
+#   2. Or use the dashboard: Create App -> Deploy from GitHub -> select repo
+#   3. Add env vars listed below in the app settings
+#
+# Koyeb free tier advantage for mobile testing:
+#   - Instance does NOT sleep (unlike Render free tier)
+#   - Free 0.1 vCPU / 512 MB RAM instance
+#   - Public URL: https://<app-name>-<org>.koyeb.app
+
+name: vcnr
+
+services:
+  - name: vcnr-web
+    type: web
+    instance_count: 1
+    instance_type: free
+    # Free instance: 0.1 vCPU, 512 MB RAM. Persistent disk not available on
+    # free tier, so media/ must use R2 or another object store for large files.
+
+    git:
+      repository: github.com/kakgit/VCNR_Web
+      branch: main
+      # Koyeb auto-detects the Dockerfile at the repo root.
+      build_command: ""
+      run_command: uvicorn backend.main:app --host 0.0.0.0 --port 8000
+
+    ports:
+      - port: 8000
+        protocol: http
+
+    health_checks:
+      - name: app-health
+        port: 8000
+        path: /api/health
+        check_interval: 30
+        restart_limit: 3
+
+    env:
+      - key: APP_ENV
+        value: production
+      - key: APP_HOST
+        value: 0.0.0.0
+      - key: APP_PORT
+        value: "8000"
+      - key: DATABASE_URL
+        # Set this to your Neon free Postgres connection string:
+        # postgresql+psycopg://<user>:<password>@<host>/neondb?sslmode=require
+        # (see docs/free-hosting-guide.md for Neon setup)
+        value: ""
+      - key: FRONTEND_ORIGIN
+        # After deploy set to: https://<app-name>-<org>.koyeb.app
+        value: ""
+      - key: SWARM_STUN_URL
+        value: stun:stun.l.google.com:19302
+      # - key: SWARM_TURN_URL
+      #   value: ""
+      # - key: SWARM_TURN_USERNAME
+      #   value: ""
+      # - key: SWARM_TURN_CREDENTIAL
+      #   value: ""

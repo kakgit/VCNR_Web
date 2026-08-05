@@ -16,7 +16,7 @@ from tempfile import NamedTemporaryFile
 import zipfile
 
 from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse
 from starlette.background import BackgroundTask
 user_site_packages = site.getusersitepackages()
 if user_site_packages and user_site_packages not in sys.path:
@@ -29,6 +29,14 @@ from sqlalchemy.orm import Session
 
 from backend import auth as session_auth
 from backend.core.config import get_settings
+from backend.core.storage import (
+  chunk_exists,
+  chunk_public_url,
+  chunk_webseed_base,
+  delete_chunk,
+  delete_movie_prefix,
+  upload_chunk,
+)
 from backend.core.time_utils import app_now, is_app_time_reached, parse_app_datetime
 from backend import persistence
 from backend.data import demo_store
@@ -1102,13 +1110,15 @@ def _serialize_swarm_session(session: dict[str, str], expected_chunks: set[str])
 
 def _server_swarm_source(movie_id: str, expected_chunks: set[str]) -> SwarmSourceEntry | None:
   content_root = _content_folder_path(movie_id)
-  if not content_root.exists():
-    return None
-  available = {
-    name
-    for name in expected_chunks
-    if next((file_path for file_path in content_root.rglob(name) if file_path.is_file()), None) is not None
-  }
+  available = set()
+  for name in expected_chunks:
+    local_exists = (
+      next((file_path for file_path in content_root.rglob(name) if file_path.is_file()), None) is not None
+      if content_root.exists()
+      else False
+    )
+    if local_exists or chunk_exists(movie_id, name):
+      available.add(name)
   if not available:
     return None
   return SwarmSourceEntry(
@@ -1347,6 +1357,7 @@ async def _encrypt_upload_file_into_chunks(
       output.write(encryptor.tag)
 
     encrypted_bytes = target_path.read_bytes()
+    upload_chunk(movie_id, target_path.name, encrypted_bytes)
     chunk_records.append({
       "name": target_path.name,
       "quality_code": quality_code,
@@ -1383,8 +1394,12 @@ def _write_content_manifest(movie_id: str, manifest: dict) -> None:
   manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=True), encoding="utf-8")
 
 
-def _normalize_upload_torrent_webseed_base() -> str:
+def _normalize_upload_torrent_webseed_base(movie_id: str | None = None) -> str:
   settings = get_settings()
+  if movie_id:
+    r2_base = chunk_webseed_base(movie_id)
+    if r2_base and r2_base.startswith(("http://", "https://")):
+      return r2_base.rstrip("/") + "/"
   base = settings.frontend_origin.strip().rstrip("/")
   lowered = base.lower()
   if not base.startswith(("http://", "https://")):
@@ -1480,6 +1495,10 @@ def _delete_quality_files(movie_id: str, manifest: dict, quality_code: str) -> i
   if target_root.exists():
     removed = sum(1 for file_path in target_root.rglob("*") if file_path.is_file())
     shutil.rmtree(target_root)
+  for chunk_record in quality_entry.get("files", []):
+    chunk_name = str(chunk_record.get("name") or "").strip()
+    if chunk_name:
+      delete_chunk(movie_id, chunk_name)
   manifest["qualities"] = [
     item for item in manifest.get("qualities", [])
     if _normalize_quality_code(str(item.get("quality_code") or "")) != quality_key
@@ -2700,6 +2719,9 @@ def download_movie_delivery_chunk(
   content_root = _content_folder_path(movie_id)
   target_path = next((file_path for file_path in content_root.rglob(safe_name) if file_path.is_file()), None) if content_root.exists() else None
   if target_path is None or not target_path.is_file():
+    r2_url = chunk_public_url(movie_id, safe_name)
+    if r2_url:
+      return RedirectResponse(r2_url)
     raise HTTPException(status_code=404, detail="Encrypted chunk not found.")
   return FileResponse(target_path, filename=safe_name, media_type="application/octet-stream")
 
@@ -2893,7 +2915,7 @@ def _save_quality_torrent_package(
     manifest,
     movie_id,
     normalized_quality_code,
-    _normalize_upload_torrent_webseed_base(),
+    _normalize_upload_torrent_webseed_base(movie_id),
   )
   torrent_path = _content_torrent_path(movie_id, normalized_quality_code)
   torrent_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2956,7 +2978,7 @@ def get_movie_delivery_torrent(
       **payload,
     )
 
-  webseed_base = _normalize_upload_torrent_webseed_base()
+  webseed_base = _normalize_upload_torrent_webseed_base(movie_id)
   payload, torrent_bytes, _info_hash = _build_torrent_for_quality(
     manifest,
     movie_id,
@@ -3020,6 +3042,9 @@ def _download_movie_public_delivery_chunk_impl(
     content_root2 = _content_folder_path(movie_id)
     target_path = next((p for p in content_root2.rglob(safe_name) if p.is_file()), None) if content_root2.exists() else None
   if target_path is None or not target_path.is_file():
+    r2_url = chunk_public_url(movie_id, safe_name)
+    if r2_url:
+      return RedirectResponse(r2_url)
     raise HTTPException(status_code=404, detail="Encrypted chunk not found.")
   expected_size = None
   for item in quality_files:
@@ -3782,6 +3807,11 @@ def download_movie_swarm_chunk(
   content_root = _content_folder_path(movie_id)
   target_path = next((file_path for file_path in content_root.rglob(safe_name) if file_path.is_file()), None) if content_root.exists() else None
   if target_path is None or not target_path.is_file():
+    r2_url = chunk_public_url(movie_id, safe_name)
+    if r2_url:
+      session["expires_at"] = _swarm_session_expiry().isoformat()
+      session["updated_at"] = datetime.utcnow().isoformat()
+      return RedirectResponse(r2_url)
     raise HTTPException(status_code=404, detail="Encrypted chunk not found.")
   session["expires_at"] = _swarm_session_expiry().isoformat()
   session["updated_at"] = datetime.utcnow().isoformat()
@@ -4221,6 +4251,7 @@ def admin_delete_movie_content_folder(
 ) -> dict:
   movie = _get_movie_or_404(db, movie_id)
   _delete_movie_content_folder(movie_id)
+  delete_movie_prefix(movie_id)
   if db:
     persistence.clear_movie_content_release_state(db, movie_id)
   else:
@@ -4536,6 +4567,7 @@ def admin_delete_movie(
     raise HTTPException(status_code=404, detail="Movie not found.")
 
   cleanup_warning: str | None = None
+  delete_movie_prefix(movie_id)
   try:
     _delete_movie_media_folder(movie_id)
   except HTTPException as error:

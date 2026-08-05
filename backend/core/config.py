@@ -69,6 +69,11 @@ class Settings:
   swarm_turn_username: str
   swarm_turn_credential: str
   public_torrent_trackers: tuple[str, ...]
+  r2_account_id: str
+  r2_access_key_id: str
+  r2_secret_access_key: str
+  r2_bucket_name: str
+  r2_public_base_url: str
 
 
 @lru_cache(maxsize=1)
@@ -104,4 +109,9 @@ def get_settings() -> Settings:
         ),
       )
     ),
+    r2_account_id=os.getenv("R2_ACCOUNT_ID", "").strip(),
+    r2_access_key_id=os.getenv("R2_ACCESS_KEY_ID", "").strip(),
+    r2_secret_access_key=os.getenv("R2_SECRET_ACCESS_KEY", "").strip(),
+    r2_bucket_name=os.getenv("R2_BUCKET_NAME", "").strip(),
+    r2_public_base_url=os.getenv("R2_PUBLIC_BASE_URL", "").strip().rstrip("/"),
   )

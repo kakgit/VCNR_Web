@@ -1418,6 +1418,10 @@ async def _encrypt_upload_file_into_chunks(
   chunk_records: list[dict] = []
   chunk_index = 0
   source_name = upload.filename or f"source-{source_index}"
+  # BEP19 package folder for the torrent ``name``; chunks are also mirrored as
+  # ``{movie_id}/content/{package_name}/{chunk_name}`` so multi-file web seed
+  # clients can resolve ``url-list base + name + path`` against the CDN.
+  package_name = f"{movie_id}-{_normalize_quality_code(quality_code)}.vcnr-pkg"
 
   while True:
     plaintext = await upload.read(CONTENT_PLAINTEXT_CHUNK_SIZE)
@@ -1441,7 +1445,7 @@ async def _encrypt_upload_file_into_chunks(
       output.write(encryptor.tag)
 
     encrypted_bytes = target_path.read_bytes()
-    upload_chunk(movie_id, target_path.name, encrypted_bytes)
+    upload_chunk(movie_id, target_path.name, encrypted_bytes, package_name=package_name)
     chunk_records.append({
       "name": target_path.name,
       "quality_code": quality_code,

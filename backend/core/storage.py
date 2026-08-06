@@ -138,18 +138,80 @@ def _delete_object(key: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-def upload_chunk(movie_id: str, chunk_name: str, data: bytes) -> None:
+def content_package_object_key(movie_id: str, package_name: str, chunk_name: str) -> str | None:
+  """Return the BEP19 package-nested R2 key for a chunk, or None when unsafe.
+
+  Multi-file web seed clients (BEP19: BitComet, libtorrent, qBittorrent) build
+  chunk URLs as ``url-list base + torrent ``name`` folder + file path``.  When
+  the url-list base is ``{movie_id}/content/`` and the torrent ``name`` is the
+  package folder, the key those clients request is the mirrored
+  ``{movie_id}/content/{package_name}/{chunk_name}`` layout.
+  """
+  safe_package = Path(package_name).name
+  safe_chunk = Path(chunk_name).name
+  if not safe_package or safe_package != package_name:
+    return None
+  if not safe_chunk or safe_chunk != chunk_name:
+    return None
+  return f"{movie_id}/content/{safe_package}/{safe_chunk}"
+
+
+def upload_chunk(movie_id: str, chunk_name: str, data: bytes, package_name: str | None = None) -> None:
   """Upload an encrypted chunk to R2 when configured, otherwise no-op.
 
   The caller is responsible for writing the chunk to local disk as well;
   this function only mirrors the chunk to R2 for permanent storage.
+
+  When ``package_name`` is given, the chunk is also mirrored under the BEP19
+  package-nested key ``content/{package_name}/{chunk_name}`` so multi-file web
+  seed clients (which append the torrent ``name`` folder to the url-list base)
+  can fetch the chunk directly from the CDN.
   """
   if not _r2_enabled():
     return
   try:
     _put_object(_object_key(movie_id, chunk_name), data)
+    if package_name:
+      nested_key = content_package_object_key(movie_id, package_name, chunk_name)
+      if nested_key:
+        _put_object(nested_key, data)
   except Exception:
     logger.exception("R2 upload failed for %s/%s", movie_id, chunk_name)
+
+
+def copy_chunk_to_package(movie_id: str, package_name: str, chunk_name: str) -> bool:
+  """Server-side copy a flat chunk into the BEP19 package-nested key.
+
+  Backfill for chunks uploaded before the package-nested layout existed.  Uses
+  R2's S3 copy (no bytes cross the client).  Returns True when R2 handled the
+  copy, False when R2 is not configured or the copy failed.
+  """
+  if not _r2_enabled():
+    return False
+  nested_key = content_package_object_key(movie_id, package_name, chunk_name)
+  if nested_key is None:
+    return False
+  try:
+    client = _get_r2_client()
+    client.copy_object(
+      Bucket=get_settings().r2_bucket_name,
+      Key=nested_key,
+      CopySource={"Bucket": get_settings().r2_bucket_name, "Key": _object_key(movie_id, chunk_name)},
+    )
+    return True
+  except Exception:
+    logger.exception("R2 chunk package copy failed for %s/%s -> %s", movie_id, chunk_name, package_name)
+    return False
+
+
+def chunk_has_package_copy(movie_id: str, package_name: str, chunk_name: str) -> bool:
+  """Return True when the BEP19 package-nested copy already exists in R2."""
+  if not _r2_enabled():
+    return False
+  nested_key = content_package_object_key(movie_id, package_name, chunk_name)
+  if nested_key is None:
+    return False
+  return _object_exists(nested_key)
 
 
 def chunk_exists(movie_id: str, chunk_name: str) -> bool:

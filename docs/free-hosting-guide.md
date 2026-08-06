@@ -137,21 +137,48 @@ Your real test package is ~2.5 GB. Free app tiers cannot hold many of those on
 their ephemeral disks. R2 gives you **10 GB free storage + 1M reads/month** with no
 egress fees — which is ideal for serving `.vcnr` chunks to phones.
 
+### Current implementation (already wired in)
+
+The app now uses R2 for **admin media assets** (posters, trailers, gallery, music):
+
+- The admin UI calls `POST /api/admin/movies/{id}/assets/presign` to get a
+  presigned R2 PUT URL, uploads the file **directly to R2** (bypassing the Render
+  API), then calls `POST /api/admin/movies/{id}/assets/register` to update the
+  movie record.
+- Media URLs returned to the viewer are R2 public URLs, so Render's ephemeral
+  disk and bandwidth are not used for these files.
+- The encrypted content-chunk delivery system (`.vcnr` chunks, torrent/swarm)
+  intentionally stays on the local filesystem and is **not** part of this R2
+  media-asset flow.
+
 ### Setup
 
 1. Sign up at <https://dash.cloudflare.com> (free account) → **R2**.
 2. Create a bucket, e.g. `vcnr-media`.
-3. Create an API token with **Object Read & Write** permissions.
-4. Options:
-   - **Public bucket**: enable the public R2.dev URL and redirect download URLs.
-   - **Presigned uploads**: your backend generates presigned PUT/GET URLs.
+3. Create an R2 Access Key with **Object Read & Write** permissions.
+4. Enable **Public access** on the bucket to get a public base URL, e.g.
+   `https://pub-xxxxxxxxxxxx.r2.dev`.
+5. Set these env vars on the Render service (see `.env.example`):
+   ```text
+   R2_ACCOUNT_ID=your-cloudflare-account-id
+   R2_ACCESS_KEY_ID=your-r2-access-key-id
+   R2_SECRET_ACCESS_KEY=your-r2-secret-access-key
+   R2_BUCKET_NAME=vcnr-media
+   R2_PUBLIC_BASE_URL=https://pub-xxxxxxxxxxxx.r2.dev
+   ```
+6. Redeploy. Admin media uploads now go straight to R2.
 
-### Integration ideas
+### Migrating existing local media to R2
 
-- Upload `media/library/<movie_id>/content/*.vcnr` to R2.
-- Store the manifest in Postgres (Neon) and have the backend return R2 presigned
-  URLs in `/api/delivery/...` responses.
+A one-time migration script is included at `tools/migrate_media_to_r2.py`. It walks the
+local `media/library/` tree and uploads existing posters, trailers, gallery, and music files
+to R2 using the same object-key layout the backend expects. Run it once from the repo root
+with the same R2 env vars configured.
+
+### Integration notes
+
 - Keep the free app server light so your instance is not filled with media files.
+- The encrypted content chunks (`.vcnr`) and torrent delivery remain on local disk by design.
 
 ---
 

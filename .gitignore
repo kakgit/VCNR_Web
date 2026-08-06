@@ -24,3 +24,8 @@ VCNR_Swarm_Test/
 media/library/
 media/*.vcnr
 media/*.torrent
+
+# Local test screenshots / UI dumps (not part of the app).
+*.png
+*.xml
+cloudflared-tunnel.err

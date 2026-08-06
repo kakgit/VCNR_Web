@@ -34,8 +34,19 @@ from backend.core.storage import (
   chunk_public_url,
   chunk_webseed_base,
   delete_chunk,
+  delete_media_object,
+  delete_media_prefix,
   delete_movie_prefix,
+  download_media_object,
+  list_media_keys,
+  media_download_url,
+  media_object_exists,
+  media_object_key,
+  media_public_url,
+  presign_media_upload,
+  r2_enabled,
   upload_chunk,
+  upload_media_object,
 )
 from backend.core.time_utils import app_now, is_app_time_reached, parse_app_datetime
 from backend import persistence
@@ -276,6 +287,9 @@ def _relative_media_path(file_path: Path) -> str:
 
 
 def _delete_movie_media_folder(movie_id: str) -> None:
+  # R2 is the source of truth for media objects; clear the movie prefix first.
+  delete_media_prefix(f"{movie_id}/")
+
   target_path = (LIBRARY_MEDIA_ROOT / movie_id).resolve()
   library_root = LIBRARY_MEDIA_ROOT.resolve()
   try:
@@ -305,6 +319,9 @@ def _delete_movie_media_folder(movie_id: str) -> None:
 
 
 def _delete_movie_content_folder(movie_id: str) -> None:
+  # R2 content objects (chunks, manifest, torrents) are removed via the prefix.
+  delete_media_prefix(f"{movie_id}/content/")
+
   target_path = (LIBRARY_MEDIA_ROOT / movie_id / "content").resolve()
   library_root = LIBRARY_MEDIA_ROOT.resolve()
   try:
@@ -322,6 +339,33 @@ def _media_asset_payload(file_path: Path, kind: str, orientation: str | None = N
     "name": file_path.name,
     "path": relative_path,
     "url": f'/{relative_path}',
+    "kind": kind,
+    "orientation": orientation,
+  }
+
+
+def _media_asset_payload_from_key(key: str, kind: str, orientation: str | None = None) -> dict:
+  """Build a MediaAssetResponse payload from an R2 object key.
+
+  The public URL is used when R2 is configured; otherwise the local
+  relative media path is used as a fallback.
+  """
+  name = Path(key).name
+  public_url = media_public_url(key)
+  if public_url:
+    return {
+      "name": name,
+      "path": key,
+      "url": public_url,
+      "kind": kind,
+      "orientation": orientation,
+    }
+  # Fallback: derive a local media path from the R2-style key.
+  relative_path = f"media/library/{key}"
+  return {
+    "name": name,
+    "path": relative_path,
+    "url": f"/{relative_path}",
     "kind": kind,
     "orientation": orientation,
   }
@@ -349,10 +393,21 @@ def _sanitize_movie_payload(movie: dict | None) -> dict | None:
   normalized["cast_credits"] = cast_credits if isinstance(cast_credits, list) else []
 
   poster_path = normalized.get("poster")
-  if isinstance(poster_path, str) and poster_path.startswith("media/"):
+  if isinstance(poster_path, str) and poster_path.startswith(("http://", "https://")):
+    # Public R2 URL: keep as-is. Without R2 configured these never occur.
+    pass
+  elif isinstance(poster_path, str) and poster_path.startswith("media/") and not r2_enabled():
     local_path = LIBRARY_MEDIA_ROOT.parent / Path(poster_path).relative_to("media")
     if not local_path.exists():
       normalized["poster"] = None
+  elif isinstance(poster_path, str) and r2_enabled():
+    # Legacy local path stored before R2 was enabled; map to the R2 key if reachable.
+    relative_key = poster_path.removeprefix("media/library/")
+    if relative_key and not media_object_exists(relative_key):
+      normalized["poster"] = None
+    elif relative_key:
+      # Public R2 URL is preferred so the viewer can render the poster.
+      normalized["poster"] = media_public_url(relative_key) or poster_path
   return normalized
 
 
@@ -361,6 +416,24 @@ def _sanitize_movie_payloads(items: list[dict]) -> list[dict]:
 
 
 def _list_media_assets(movie_id: str, kind: str) -> list[dict]:
+  # R2 is the source of truth for media objects when configured.
+  if r2_enabled():
+    if kind == "posters":
+      items: list[dict] = []
+      for key in list_media_keys(f"{movie_id}/posters/"):
+        parts = key.split("/")
+        orientation = parts[2] if len(parts) >= 4 else None
+        items.append(_media_asset_payload_from_key(key, kind, orientation))
+      return items
+    folder_name = "trailers" if kind == "trailer" else "gallery" if kind == "gallery" else "music" if kind == "music" else "content"
+    prefix = f"{movie_id}/{folder_name}/"
+    items = []
+    for key in list_media_keys(prefix):
+      if kind == "content" and Path(key).name == "manifest.json":
+        continue
+      items.append(_media_asset_payload_from_key(key, kind))
+    return items
+
   base_path = LIBRARY_MEDIA_ROOT / movie_id
   items: list[dict] = []
 
@@ -385,9 +458,11 @@ def _list_media_assets(movie_id: str, kind: str) -> list[dict]:
 
 def _poster_asset_summary(movie_id: str) -> tuple[str | None, str]:
   poster_items = _list_media_assets(movie_id, "posters")
-  primary = next((item["path"] for item in poster_items if item.get("orientation") == "vertical"), None)
+  # Prefer a public R2 URL so the viewer can render the poster directly;
+  # otherwise use the relative media path for local disk storage.
+  primary = next((item["url"] for item in poster_items if item.get("orientation") == "vertical"), None)
   if primary is None and poster_items:
-    primary = poster_items[0]["path"]
+    primary = poster_items[0]["url"]
   count_label = f"{len(poster_items)} poster upload{'s' if len(poster_items) != 1 else ''}" if poster_items else "Poster upload pending"
   return primary, count_label
 
@@ -396,6 +471,14 @@ def _delete_media_asset(movie_id: str, kind: str, asset_name: str) -> None:
   safe_asset_name = Path(asset_name).name
   if safe_asset_name != asset_name:
     raise HTTPException(status_code=400, detail="Invalid asset name.")
+
+  # Remove from R2 first when configured.
+  if r2_enabled():
+    if kind == "posters":
+      for orientation in ("vertical", "horizontal"):
+        delete_media_object(media_object_key(movie_id, kind, safe_asset_name, orientation))
+    else:
+      delete_media_object(media_object_key(movie_id, kind, safe_asset_name))
 
   if kind == "posters":
     candidate_paths = [
@@ -1380,18 +1463,26 @@ async def _encrypt_upload_file_into_chunks(
 
 def _read_content_manifest(movie_id: str) -> dict | None:
   manifest_path = _content_manifest_path(movie_id)
-  if not manifest_path.exists():
+  if manifest_path.exists():
+    try:
+      return json.loads(manifest_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+      pass
+  raw = download_media_object(media_object_key(movie_id, "content", "manifest.json"))
+  if raw is None:
     return None
   try:
-    return json.loads(manifest_path.read_text(encoding="utf-8"))
+    return json.loads(raw.decode("utf-8"))
   except json.JSONDecodeError:
     return None
 
 
 def _write_content_manifest(movie_id: str, manifest: dict) -> None:
+  payload = json.dumps(manifest, indent=2, ensure_ascii=True).encode("utf-8")
+  upload_media_object(media_object_key(movie_id, "content", "manifest.json"), payload, "application/json")
   manifest_path = _content_manifest_path(movie_id)
   manifest_path.parent.mkdir(parents=True, exist_ok=True)
-  manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=True), encoding="utf-8")
+  manifest_path.write_bytes(payload)
 
 
 def _normalize_upload_torrent_webseed_base(movie_id: str | None = None) -> str:
@@ -2178,6 +2269,10 @@ async def admin_upload_movie_posters(
     filename = _build_asset_filename(movie_id, "PSTR", file, variant=variant_code)
     relative_path = Path("media") / "library" / movie_id / "posters" / normalized_orientation / filename
     await _save_upload_file(LIBRARY_MEDIA_ROOT.parent / relative_path.relative_to("media"), file)
+    # Mirror the poster to R2 when configured.
+    if r2_enabled():
+      key = media_object_key(movie_id, "posters", filename, normalized_orientation)
+      upload_media_object(key, (LIBRARY_MEDIA_ROOT / movie_id / "posters" / normalized_orientation / filename).read_bytes())
     if normalized_orientation == "vertical":
       saved_vertical.append(relative_path.as_posix())
     else:
@@ -2191,6 +2286,96 @@ async def admin_upload_movie_posters(
   return AdminMovieActionResponse(
     item=_sanitize_movie_payload(movie),
     message=f'Poster upload saved for "{movie["title"]}". Vertical: {len(saved_vertical)}, Horizontal: {len(saved_horizontal)}. Sent for Super Admin approval.',
+  )
+
+
+@router.post("/admin/movies/{movie_id}/assets/presign")
+def admin_presign_movie_asset_upload(
+  movie_id: str,
+  kind: str = Form(...),
+  filename: str = Form(...),
+  orientation: str | None = Form(default=None),
+  _: dict[str, str] = Depends(require_admin),
+) -> dict:
+  """Return a presigned R2 PUT URL for a direct browser upload.
+
+  The admin UI uploads the file straight to R2 (bypassing the Render API),
+  then calls the matching register endpoint to update the movie record.
+  """
+  if not r2_enabled():
+    raise HTTPException(status_code=503, detail="R2 storage is not configured on this server.")
+
+  safe_kind = str(kind or "").strip().lower()
+  if safe_kind not in {"posters", "trailer", "gallery", "music"}:
+    raise HTTPException(status_code=400, detail="Unsupported media kind for presigned upload.")
+
+  safe_name = Path(filename).name
+  if safe_name != filename or not safe_name:
+    raise HTTPException(status_code=400, detail="Invalid filename.")
+
+  normalized_orientation = None
+  if safe_kind == "posters":
+    normalized_orientation = "horizontal" if orientation == "horizontal" else "vertical"
+
+  key = media_object_key(movie_id, safe_kind, safe_name, normalized_orientation)
+  upload_url = presign_media_upload(key)
+  if upload_url is None:
+    raise HTTPException(status_code=503, detail="Unable to create a presigned upload URL right now.")
+
+  return {
+    "movie_id": movie_id,
+    "kind": safe_kind,
+    "filename": safe_name,
+    "orientation": normalized_orientation,
+    "key": key,
+    "upload_url": upload_url,
+    "public_url": media_public_url(key),
+  }
+
+
+@router.post("/admin/movies/{movie_id}/assets/register")
+def admin_register_movie_asset_upload(
+  movie_id: str,
+  kind: str = Form(...),
+  filename: str = Form(...),
+  orientation: str | None = Form(default=None),
+  db: Session | None = Depends(get_db),
+  _: dict[str, str] = Depends(require_admin),
+) -> AdminMovieActionResponse:
+  """Register a media asset that was uploaded directly to R2.
+
+  Called by the admin UI after a successful presigned PUT to R2.
+  """
+  safe_kind = _safe_name(kind or "").strip().lower()
+  if safe_kind not in {"posters", "trailer", "gallery", "music"}:
+    raise HTTPException(status_code=400, detail="Unsupported media kind.")
+
+  safe_name = Path(filename).name
+  if safe_name != filename or not safe_name:
+    raise HTTPException(status_code=400, detail="Invalid filename.")
+
+  normalized_orientation = None
+  if safe_kind == "posters":
+    normalized_orientation = "horizontal" if orientation == "horizontal" else "vertical"
+
+  key = media_object_key(movie_id, safe_kind, safe_name, normalized_orientation)
+  if not media_object_exists(key):
+    raise HTTPException(status_code=404, detail="The uploaded file was not found in storage. Please retry the upload.")
+
+  if db:
+    persistence.prime_movie_asset_change(db, movie_id)
+
+  if safe_kind == "posters":
+    primary_poster, poster_count_label = _poster_asset_summary(movie_id)
+    movie = persistence.update_movie_poster_assets(db, movie_id, primary_poster, poster_count_label) if db else demo_store.update_movie_poster_assets(movie_id, primary_poster, poster_count_label)
+  else:
+    movie = persistence.register_movie_asset_change(db, movie_id, safe_kind) if db else demo_store.register_movie_asset_change(movie_id, safe_kind)
+  if movie is None:
+    raise HTTPException(status_code=404, detail="Movie not found.")
+
+  return AdminMovieActionResponse(
+    item=_sanitize_movie_payload(movie),
+    message=f'{safe_kind.title()} uploaded for "{movie["title"]}" and sent for Super Admin approval.',
   )
 
 
@@ -2216,6 +2401,8 @@ async def admin_upload_movie_trailer(
   filename = _build_asset_filename(movie_id, "TRLR", file)
   target_path = LIBRARY_MEDIA_ROOT / movie_id / "trailers" / filename
   await _save_upload_file(target_path, file)
+  if r2_enabled():
+    upload_media_object(media_object_key(movie_id, "trailer", filename), target_path.read_bytes())
   matched = persistence.register_movie_asset_change(db, movie_id, "trailer") if db else demo_store.register_movie_asset_change(movie_id, "trailer")
   if matched is None:
     raise HTTPException(status_code=404, detail="Movie not found.")
@@ -2920,6 +3107,13 @@ def _save_quality_torrent_package(
   torrent_path = _content_torrent_path(movie_id, normalized_quality_code)
   torrent_path.parent.mkdir(parents=True, exist_ok=True)
   torrent_path.write_bytes(torrent_bytes)
+  # Mirror the torrent package to R2 when configured.
+  if r2_enabled():
+    upload_media_object(
+      media_object_key(movie_id, "content", torrent_path.name),
+      torrent_bytes,
+      "application/x-bittorrent",
+    )
   saved_at = datetime.utcnow().isoformat(timespec="seconds") + "Z"
   torrent_metadata = {
     key: value
@@ -4310,6 +4504,8 @@ async def admin_upload_movie_gallery(
   filename = _build_asset_filename(movie_id, "GLLR", file)
   target_path = LIBRARY_MEDIA_ROOT / movie_id / "gallery" / filename
   await _save_upload_file(target_path, file)
+  if r2_enabled():
+    upload_media_object(media_object_key(movie_id, "gallery", filename), target_path.read_bytes())
   matched = persistence.register_movie_asset_change(db, movie_id, "gallery") if db else demo_store.register_movie_asset_change(movie_id, "gallery")
   if matched is None:
     raise HTTPException(status_code=404, detail="Movie not found.")
@@ -4341,6 +4537,8 @@ async def admin_upload_movie_music(
   filename = _build_asset_filename(movie_id, "MUSC", file)
   target_path = LIBRARY_MEDIA_ROOT / movie_id / "music" / filename
   await _save_upload_file(target_path, file)
+  if r2_enabled():
+    upload_media_object(media_object_key(movie_id, "music", filename), target_path.read_bytes())
   matched = persistence.register_movie_asset_change(db, movie_id, "music") if db else demo_store.register_movie_asset_change(movie_id, "music")
   if matched is None:
     raise HTTPException(status_code=404, detail="Movie not found.")

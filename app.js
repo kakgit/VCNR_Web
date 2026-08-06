@@ -5373,15 +5373,38 @@ async function updateAdminMovieReleaseMainContentRemote(movieId, payload) {
   adminHelper.textContent = response.message;
 }
 
+async function presignAndUploadMediaAsset(movieId, kind, file, orientation) {
+  const presignForm = new FormData();
+  presignForm.append("kind", kind);
+  presignForm.append("filename", file.name);
+  if (orientation) {
+    presignForm.append("orientation", orientation);
+  }
+  const presign = await apiUploadRequest(`/admin/movies/${movieId}/assets/presign`, presignForm);
+
+  const putResponse = await fetch(presign.upload_url, {
+    method: "PUT",
+    body: file,
+  });
+  if (!putResponse.ok) {
+    throw new Error(`Direct upload to storage failed with HTTP ${putResponse.status}.`);
+  }
+
+  const registerForm = new FormData();
+  registerForm.append("kind", kind);
+  registerForm.append("filename", presign.filename);
+  if (presign.orientation) {
+    registerForm.append("orientation", presign.orientation);
+  }
+  return apiUploadRequest(`/admin/movies/${movieId}/assets/register`, registerForm);
+}
+
 async function uploadAdminMoviePostersRemote(movieId, files) {
   const classifiedFiles = await Promise.all(files.map((file) => classifyPosterFile(file)));
-  const formData = new FormData();
-  classifiedFiles.forEach((item) => {
-    formData.append("files", item.file);
-    formData.append("orientations", item.orientation);
-  });
-
-  const response = await apiUploadRequest(`/admin/movies/${movieId}/assets/posters`, formData);
+  let response = null;
+  for (const item of classifiedFiles) {
+    response = await presignAndUploadMediaAsset(movieId, "posters", item.file, item.orientation);
+  }
   const updatedMovie = normalizeMovie(response.item);
   updateMovieCollections(updatedMovie);
   renderAdminMovieList();
@@ -5400,10 +5423,7 @@ async function uploadAdminMoviePostersRemote(movieId, files) {
 }
 
 async function uploadAdminMovieTrailerRemote(movieId, file) {
-  const formData = new FormData();
-  formData.append("file", file);
-
-  const response = await apiUploadRequest(`/admin/movies/${movieId}/assets/trailer`, formData);
+  const response = await presignAndUploadMediaAsset(movieId, "trailer", file);
   const updatedMovie = normalizeMovie(response.item);
   updateMovieCollections(updatedMovie);
   renderAdminMovieList();
@@ -5418,10 +5438,7 @@ async function uploadAdminMovieTrailerRemote(movieId, file) {
 }
 
 async function uploadAdminMovieGalleryRemote(movieId, file) {
-  const formData = new FormData();
-  formData.append("file", file);
-
-  const response = await apiUploadRequest(`/admin/movies/${movieId}/assets/gallery`, formData);
+  const response = await presignAndUploadMediaAsset(movieId, "gallery", file);
   const updatedMovie = normalizeMovie(response.item);
   updateMovieCollections(updatedMovie);
   renderAdminMovieList();
@@ -5436,10 +5453,7 @@ async function uploadAdminMovieGalleryRemote(movieId, file) {
 }
 
 async function uploadAdminMovieMusicRemote(movieId, file) {
-  const formData = new FormData();
-  formData.append("file", file);
-
-  const response = await apiUploadRequest(`/admin/movies/${movieId}/assets/music`, formData);
+  const response = await presignAndUploadMediaAsset(movieId, "music", file);
   const updatedMovie = normalizeMovie(response.item);
   updateMovieCollections(updatedMovie);
   renderAdminMovieList();

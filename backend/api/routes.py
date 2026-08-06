@@ -43,6 +43,7 @@ from backend.core.storage import (
   media_object_exists,
   media_object_key,
   media_public_url,
+  presign_media_download,
   presign_media_upload,
   r2_enabled,
   upload_chunk,
@@ -1495,35 +1496,53 @@ def _normalize_upload_torrent_webseed_base(
   append each torrent file path (a single chunk filename) to this base to build
   the chunk download URL.
 
-  Two webseed layouts are supported:
+  Webseed layouts:
 
-  * **R2 (Cloudflare)**: the webseed points straight at the movie's public R2
-    content folder ``{r2_public_base_url}/{movie_id}/content/``, where the
-    chunk files already live. No API path is appended.
-  * **Local disk**: the webseed points at the delivery API folder
-    ``{frontend_origin}/api/movies/{movie_id}/delivery/public-chunks/{quality}/``,
-    which streams chunks from the server's local ``media/library`` disk.
+  * **App API (preferred)**: ``{frontend_origin}/api/movies/{movie_id}/delivery/
+    public-chunks/{quality}/``. Every chunk request is answered by the app,
+    which streams from local disk when the chunk is present or redirects to a
+    short-lived presigned R2 GET URL otherwise. This works whether or not the R2
+    bucket has public read access enabled, so it is the reliable default.
 
-  Returns an empty string when no usable public webseed base is configured
-  (e.g. no R2 and a loopback-only frontend origin).
+  * **Direct R2 (optional secondary in ``url-list``)**: the public content folder
+    ``{r2_public_base_url}/{movie_id}/content/``. Only usable when the bucket's
+    public access is enabled.
+
+  Returns an empty string when no usable webseed base is configured (e.g. no R2
+  and a loopback-only frontend origin).
   """
   settings = get_settings()
+  base = settings.frontend_origin.strip().rstrip("/")
+  lowered = base.lower()
+  loopback_hosts = ("localhost", "127.0.0.1", "0.0.0.0")
+  if (
+    base.startswith(("http://", "https://"))
+    and not any(token in lowered for token in loopback_hosts)
+    and movie_id
+  ):
+    normalized = _normalize_quality_code(quality_code)
+    if normalized:
+      return f"{base}/api/movies/{movie_id}/delivery/public-chunks/{normalized}/"
+  # No usable public app origin: fall back to the direct R2 public bucket folder.
   if movie_id:
     r2_base = chunk_webseed_base(movie_id)
     if r2_base and r2_base.startswith(("http://", "https://")):
       return r2_base.rstrip("/") + "/"
-  base = settings.frontend_origin.strip().rstrip("/")
-  lowered = base.lower()
-  if not base.startswith(("http://", "https://")):
-    return ""
-  if "localhost" in lowered or "127.0.0.1" in lowered or "0.0.0.0" in lowered:
-    return ""
-  if not movie_id:
-    return ""
-  normalized = _normalize_quality_code(quality_code)
-  if not normalized:
-    return ""
-  return f"{base}/api/movies/{movie_id}/delivery/public-chunks/{normalized}/"
+  return ""
+
+
+def _r2_chunk_download_url(movie_id: str, chunk_name: str) -> str | None:
+  """Return a short-lived presigned R2 GET URL for a chunk, or None.
+
+  Chunk delivery goes through the app's API, which signs an R2 GET on demand and
+  redirects the torrent client / mobile app to it. This works even when the R2
+  bucket's public read access is NOT enabled (the ``pub-...r2.dev`` URL would
+  otherwise return Cloudflare's "Is this your bucket?" 404 page).
+  """
+  if not r2_enabled():
+    return None
+  key = media_object_key(movie_id, "content", chunk_name)
+  return presign_media_download(key, expires_seconds=3600)
 
 
 def _default_content_manifest(movie: dict) -> dict:
@@ -2932,7 +2951,7 @@ def download_movie_delivery_chunk(
   content_root = _content_folder_path(movie_id)
   target_path = next((file_path for file_path in content_root.rglob(safe_name) if file_path.is_file()), None) if content_root.exists() else None
   if target_path is None or not target_path.is_file():
-    r2_url = chunk_public_url(movie_id, safe_name)
+    r2_url = _r2_chunk_download_url(movie_id, safe_name)
     if r2_url:
       return RedirectResponse(r2_url)
     raise HTTPException(status_code=404, detail="Encrypted chunk not found.")
@@ -2964,6 +2983,90 @@ def _bencode_value(value) -> bytes:
     out += b"e"
     return bytes(out)
   raise TypeError(f"Cannot bencode type {type(value)!r}")
+
+
+def _bdecode(data: bytes):
+  """Minimal bencode decoder returning lists/dicts/ints/bytes (root dict keys are bytes)."""
+  def _val(i: int):
+    token = data[i:i + 1]
+    if token == b"i":
+      j = data.index(b"e", i + 1)
+      return int(data[i + 1:j]), j + 1
+    if token == b"l":
+      i += 1
+      out = []
+      while data[i:i + 1] != b"e":
+        v, i = _val(i)
+        out.append(v)
+      return out, i + 1
+    if token == b"d":
+      i += 1
+      out = {}
+      while data[i:i + 1] != b"e":
+        k, i = _val(i)
+        v, i = _val(i)
+        out[k] = v
+      return out, i + 1
+    j = data.index(b":", i)
+    n = int(data[i:j])
+    i = j + 1
+    return data[i:i + n], i + n
+  root, _ = _val(0)
+  return root
+
+
+def _torrent_with_webseeds(
+  torrent_bytes: bytes,
+  webseed_urls: list[str],
+  trackers: list[str],
+) -> bytes:
+  """Re-bencode a stored torrent with the current webseed/tracker lists.
+
+  Only the top-level ``url-list`` / ``announce`` keys change, so the ``info``
+  section (and therefore the torrent infohash) is left untouched. This lets us
+  recover a torrent from R after an ephemeral disk wipe and refresh its webseed
+  without re-reading the chunk bytes to recompute piece hashes.
+  """
+  root = _bdecode(torrent_bytes)
+  if not isinstance(root, dict) or b"info" not in root:
+    raise ValueError("torrent root is missing the info section")
+  if webseed_urls:
+    root[b"url-list"] = [u.encode("utf-8") for u in webseed_urls]
+  else:
+    root.pop(b"url-list", None)
+  if trackers:
+    root[b"announce"] = trackers[0].encode("utf-8")
+    root[b"announce-list"] = [[t.encode("utf-8")] for t in trackers]
+  else:
+    root.pop(b"announce", None)
+    root.pop(b"announce-list", None)
+  return _bencode_value(root)
+
+
+def _torrent_webseed_urls(movie_id: str, quality_code: str) -> list[str]:
+  """Build the current webseed list (App-API primary + direct R2 secondary)."""
+  webseed_urls: list[str] = []
+  api_base = _normalize_upload_torrent_webseed_base(movie_id, quality_code)
+  if api_base:
+    webseed_urls.append(api_base.rstrip("/") + "/")
+  r2_folder = chunk_webseed_base(movie_id) if r2_enabled() else None
+  if r2_folder and r2_folder.startswith(("http://", "https://")):
+    norm_r2 = r2_folder.rstrip("/") + "/"
+    if norm_r2 not in webseed_urls:
+      webseed_urls.append(norm_r2)
+  return webseed_urls
+
+
+def _info_hash_from_torrent_bytes(torrent_bytes: bytes) -> str:
+  """Return the SHA1 infohash of a bencoded torrent's info section, or ''."""
+  try:
+    root = _bdecode(torrent_bytes)
+    info = root.get(b"info") if isinstance(root, dict) else None
+    if isinstance(info, dict):
+      return hashlib.sha1(_bencode_value(info)).hexdigest()
+  except Exception:
+    pass
+  return ""
 
 
 def _iter_streamed_content(content_root: Path, file_entries: list[tuple[str, int]]):
@@ -3080,10 +3183,20 @@ def _build_torrent_for_quality(
     root_meta["announce-list"] = [[tracker] for tracker in trackers]
   webseed_urls: list[str] = []
   if webseed_base_url:
-    # ``webseed_base_url`` is already the full HTTP webseed root (either the R2
-    # content folder or the local delivery API folder). Only normalise the
-    # trailing slash so torrent clients append chunk paths correctly.
+    # ``webseed_base_url`` is already the full HTTP webseed root (normally the
+    # delivery API folder). Only normalise the trailing slash so torrent clients
+    # append chunk paths correctly.
     webseed_urls.append(webseed_base_url.rstrip("/") + "/")
+  # Advertise the direct public R2 content folder as an extra webseed so torrent
+  # clients can fetch straight from the CDN when the bucket's public read access
+  # is enabled (no app proxy hop). Delivery via the app API remains the primary
+  # webseed because it works even when public access is disabled.
+  if r2_enabled() and movie_id:
+    r2_folder = chunk_webseed_base(movie_id)
+    if r2_folder and r2_folder.startswith(("http://", "https://")):
+      normalized_r2 = r2_folder.rstrip("/") + "/"
+      if normalized_r2 not in webseed_urls:
+        webseed_urls.append(normalized_r2)
   if webseed_urls:
     root_meta["url-list"] = webseed_urls
   magnet_parts = [
@@ -3198,6 +3311,86 @@ def get_movie_delivery_torrent(
       **payload,
     )
 
+  # Local torrent file missing (e.g. fresh ephemeral disk after a redeploy).
+  # Recover the previously generated torrent package from R2 and re-apply the
+  # CURRENT webseed/tracker lists so clients get the working App-API webseed
+  # without re-uploading the content.
+  webseed_urls = _torrent_webseed_urls(movie_id, normalized)
+  trackers = [tracker for tracker in get_settings().public_torrent_trackers if tracker]
+  if r2_enabled():
+    try:
+      stored_bytes = download_media_object(media_object_key(movie_id, "content", torrent_path.name))
+    except Exception:
+      stored_bytes = None
+    if stored_bytes:
+      try:
+        recovered_torrent = _torrent_with_webseeds(stored_bytes, webseed_urls, trackers)
+      except Exception:
+        recovered_torrent = None
+      if recovered_torrent:
+        torrent_metadata = None
+        try:
+          torrent_path.parent.mkdir(parents=True, exist_ok=True)
+          torrent_path.write_bytes(recovered_torrent)
+          upload_media_object(
+            media_object_key(movie_id, "content", torrent_path.name),
+            recovered_torrent,
+            "application/x-bittorrent",
+          )
+          info_hash = _info_hash_from_torrent_bytes(recovered_torrent) or str(saved_metadata.get("info_hash_sha1") or "")
+          torrent_name = str(saved_metadata.get("torrent_name") or f"{movie_id}-{normalized}.vcnr-pkg")
+          magnet_parts = [f"xt=urn:btih:{info_hash}", f"dn={torrent_name}"]
+          for ws in webseed_urls:
+            magnet_parts.append(f"ws={ws}")
+          for tracker in trackers:
+            magnet_parts.append(f"tr={tracker}")
+          saved_at = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+          torrent_metadata = {
+            "info_hash_sha1": info_hash,
+            "torrent_name": torrent_name,
+            "total_bytes": int(saved_metadata.get("total_bytes") or 0),
+            "piece_length": int(saved_metadata.get("piece_length") or 0),
+            "piece_count": int(saved_metadata.get("piece_count") or 0),
+            "file_count": int(saved_metadata.get("file_count") or 0),
+            "comment": str(saved_metadata.get("comment") or ""),
+            "created_by": str(saved_metadata.get("created_by") or ""),
+            "created_at": int(saved_metadata.get("created_at") or 0),
+            "trackers": list(trackers),
+            "webseed_urls": list(webseed_urls),
+            "magnet_uri": "magnet:?" + "&".join(magnet_parts),
+            "bootstrap_nodes": list(saved_metadata.get("bootstrap_nodes") or TORRENT_BOOTSTRAP_DHT_NODES),
+            "use_dht": True,
+            "use_lsd": True,
+            "use_pex": True,
+            "torrent_file_name": torrent_path.name,
+            "saved_at": saved_at,
+          }
+          manifest.setdefault("torrent_packages", {})
+          manifest["torrent_packages"][normalized] = torrent_metadata
+          quality_lookup = _content_quality_lookup(manifest)
+          quality_entry = quality_lookup.get(normalized)
+          if quality_entry is not None:
+            quality_entry["torrent"] = torrent_metadata
+          manifest["updated_at"] = saved_at
+          _write_content_manifest(movie_id, manifest)
+        except Exception:
+          # Best-effort: still hand out the recovered torrent even if persisting it failed.
+          pass
+        if torrent_metadata is not None:
+          payload = {
+            key: value
+            for key, value in torrent_metadata.items()
+            if key not in {"torrent_file_name", "saved_at"}
+          }
+          payload["torrent_base64"] = b64encode(recovered_torrent).decode("ascii")
+          return DeliveryTorrentResponse(
+            movie_id=movie_id,
+            quality_code=normalized,
+            **payload,
+          )
+
+  # No recoverable torrent package: build a fresh torrent from local chunk files
+  # (used at upload time and when R2 is unavailable).
   webseed_base = _normalize_upload_torrent_webseed_base(movie_id, normalized)
   payload, torrent_bytes, _info_hash = _build_torrent_for_quality(
     manifest,
@@ -3209,6 +3402,12 @@ def get_movie_delivery_torrent(
   try:
     torrent_path.parent.mkdir(parents=True, exist_ok=True)
     torrent_path.write_bytes(torrent_bytes)
+    if r2_enabled():
+      upload_media_object(
+        media_object_key(movie_id, "content", torrent_path.name),
+        torrent_bytes,
+        "application/x-bittorrent",
+      )
     saved_at = datetime.utcnow().isoformat(timespec="seconds") + "Z"
     torrent_metadata = {
       key: value
@@ -3262,7 +3461,7 @@ def _download_movie_public_delivery_chunk_impl(
     content_root2 = _content_folder_path(movie_id)
     target_path = next((p for p in content_root2.rglob(safe_name) if p.is_file()), None) if content_root2.exists() else None
   if target_path is None or not target_path.is_file():
-    r2_url = chunk_public_url(movie_id, safe_name)
+    r2_url = _r2_chunk_download_url(movie_id, safe_name)
     if r2_url:
       return RedirectResponse(r2_url)
     raise HTTPException(status_code=404, detail="Encrypted chunk not found.")
@@ -4027,7 +4226,7 @@ def download_movie_swarm_chunk(
   content_root = _content_folder_path(movie_id)
   target_path = next((file_path for file_path in content_root.rglob(safe_name) if file_path.is_file()), None) if content_root.exists() else None
   if target_path is None or not target_path.is_file():
-    r2_url = chunk_public_url(movie_id, safe_name)
+    r2_url = _r2_chunk_download_url(movie_id, safe_name)
     if r2_url:
       session["expires_at"] = _swarm_session_expiry().isoformat()
       session["updated_at"] = datetime.utcnow().isoformat()

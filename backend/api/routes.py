@@ -1485,7 +1485,28 @@ def _write_content_manifest(movie_id: str, manifest: dict) -> None:
   manifest_path.write_bytes(payload)
 
 
-def _normalize_upload_torrent_webseed_base(movie_id: str | None = None) -> str:
+def _normalize_upload_torrent_webseed_base(
+  movie_id: str | None = None,
+  quality_code: str = "",
+) -> str:
+  """Return the full webseed folder URL for a movie's delivery torrent.
+
+  The returned value is a BitTorrent HTTP webseed base.  BitComet / libtorrent
+  append each torrent file path (a single chunk filename) to this base to build
+  the chunk download URL.
+
+  Two webseed layouts are supported:
+
+  * **R2 (Cloudflare)**: the webseed points straight at the movie's public R2
+    content folder ``{r2_public_base_url}/{movie_id}/content/``, where the
+    chunk files already live. No API path is appended.
+  * **Local disk**: the webseed points at the delivery API folder
+    ``{frontend_origin}/api/movies/{movie_id}/delivery/public-chunks/{quality}/``,
+    which streams chunks from the server's local ``media/library`` disk.
+
+  Returns an empty string when no usable public webseed base is configured
+  (e.g. no R2 and a loopback-only frontend origin).
+  """
   settings = get_settings()
   if movie_id:
     r2_base = chunk_webseed_base(movie_id)
@@ -1497,7 +1518,12 @@ def _normalize_upload_torrent_webseed_base(movie_id: str | None = None) -> str:
     return ""
   if "localhost" in lowered or "127.0.0.1" in lowered or "0.0.0.0" in lowered:
     return ""
-  return base
+  if not movie_id:
+    return ""
+  normalized = _normalize_quality_code(quality_code)
+  if not normalized:
+    return ""
+  return f"{base}/api/movies/{movie_id}/delivery/public-chunks/{normalized}/"
 
 
 def _default_content_manifest(movie: dict) -> dict:
@@ -3054,10 +3080,10 @@ def _build_torrent_for_quality(
     root_meta["announce-list"] = [[tracker] for tracker in trackers]
   webseed_urls: list[str] = []
   if webseed_base_url:
-    base = webseed_base_url.rstrip("/")
-    webseed_urls.append(
-      f"{base}/api/movies/{movie_id}/delivery/public-chunks/{normalized}/"
-    )
+    # ``webseed_base_url`` is already the full HTTP webseed root (either the R2
+    # content folder or the local delivery API folder). Only normalise the
+    # trailing slash so torrent clients append chunk paths correctly.
+    webseed_urls.append(webseed_base_url.rstrip("/") + "/")
   if webseed_urls:
     root_meta["url-list"] = webseed_urls
   magnet_parts = [
@@ -3102,7 +3128,7 @@ def _save_quality_torrent_package(
     manifest,
     movie_id,
     normalized_quality_code,
-    _normalize_upload_torrent_webseed_base(movie_id),
+    _normalize_upload_torrent_webseed_base(movie_id, normalized_quality_code),
   )
   torrent_path = _content_torrent_path(movie_id, normalized_quality_code)
   torrent_path.parent.mkdir(parents=True, exist_ok=True)
@@ -3172,7 +3198,7 @@ def get_movie_delivery_torrent(
       **payload,
     )
 
-  webseed_base = _normalize_upload_torrent_webseed_base(movie_id)
+  webseed_base = _normalize_upload_torrent_webseed_base(movie_id, normalized)
   payload, torrent_bytes, _info_hash = _build_torrent_for_quality(
     manifest,
     movie_id,

@@ -4047,11 +4047,15 @@ function buildApprovalPosterAssetUrl(movieId, value) {
     return "";
   }
 
-  if (String(value).startsWith("media/")) {
-    return toAssetUrl(value);
+  const normalized = String(value).trim();
+
+  // Full absolute URLs (R2 public bucket), absolute paths, or media/ paths
+  // are used as-is; toAssetUrl() passes them through untouched.
+  if (/^(https?:)?\/\//i.test(normalized) || normalized.startsWith("/") || normalized.startsWith("media/")) {
+    return toAssetUrl(normalized);
   }
 
-  const normalized = String(value).trim();
+  // Legacy local snapshot shape: "Vertical: <filename>" / "Horizontal: <filename>".
   const orientation = normalized.toLowerCase().startsWith("horizontal:") ? "horizontal" : "vertical";
   const fileName = normalized.includes(":") ? normalized.split(":").slice(1).join(":").trim() : normalized;
   if (!fileName) {

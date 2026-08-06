@@ -10,6 +10,7 @@ import secrets
 
 from sqlalchemy.orm import Session
 
+from backend.core.storage import list_media_keys, media_public_url, r2_enabled
 from backend.core.time_utils import is_app_time_reached, parse_app_datetime
 from backend.data.demo_store import ADMIN_STATE, MOVIES, PUBLISH_QUEUE, USERS
 from backend.models import (
@@ -477,6 +478,24 @@ def _capture_movie_snapshot_with_extras(session: Session, movie: MovieRecord) ->
   return payload
 
 
+def _movie_poster_snapshot_item(movie_id: str, orientation: str | None, filename: str) -> str:
+  """Build the poster item string captured in the approval review snapshot.
+
+  When R2 is configured the asset lives in the bucket, so we store the public
+  R2 URL (the same value the viewer/admin UI resolves). Otherwise we keep the
+  legacy ``"Vertical: <filename>"`` shape that the frontend expands into a
+  local ``/media/library/...`` path.
+  """
+  if r2_enabled():
+    key = f"{movie_id}/posters/{orientation or 'vertical'}/{filename}"
+    public_url = media_public_url(key)
+    if public_url:
+      return public_url
+    return f"media/library/{key}"
+  label = "Horizontal" if orientation == "horizontal" else "Vertical"
+  return f"{label}: {filename}"
+
+
 def _capture_movie_asset_snapshot(movie_id: str) -> dict[str, list[str]]:
   base_path = LIBRARY_MEDIA_ROOT / movie_id
   snapshot = {
@@ -486,6 +505,22 @@ def _capture_movie_asset_snapshot(movie_id: str) -> dict[str, list[str]]:
     "music": [],
     "content": [],
   }
+
+  # R2 is the canonical media store when enabled; capture from the bucket so
+  # the approval review (and any pending asset overview) reflects real assets.
+  if r2_enabled():
+    for key in list_media_keys(f"{movie_id}/posters/"):
+      parts = key.split("/")
+      orientation = parts[2] if len(parts) >= 4 else None
+      filename = Path(key).name
+      snapshot["posters"].append(_movie_poster_snapshot_item(movie_id, orientation, filename))
+    for kind, folder_name in (("trailer", "trailers"), ("gallery", "gallery"), ("music", "music"), ("content", "content")):
+      prefix = f"{movie_id}/{folder_name}/"
+      for key in list_media_keys(prefix):
+        if kind == "content" and Path(key).name == "manifest.json":
+          continue
+        snapshot[kind].append(Path(key).name)
+    return snapshot
 
   for orientation, label in (("vertical", "Vertical"), ("horizontal", "Horizontal")):
     folder = base_path / "posters" / orientation

@@ -323,13 +323,16 @@ def presign_media_upload(
 ) -> str | None:
   """Return a presigned R2 PUT URL for direct browser upload, or None.
 
-  The returned URL allows the caller to PUT the object directly to R2,
-  bypassing the Render API entirely.  Expires after ``expires_seconds``.
+  The URL allows the caller to PUT the object directly to R2, bypassing
+  the Render API entirely.  Expires after ``expires_seconds``.
+
+  ``content_type`` is intentionally NOT included in the signed params.  The
+  browser sends its own Content-Type header when uploading a File, and if it
+  differs from a signed value the signature check fails with 403.  Omitting
+  it lets the browser send any Content-Type (R2 stores whatever it receives).
   """
   if not _r2_enabled():
     return None
-  if content_type is None:
-    content_type = media_content_type(key)
   try:
     client = _get_r2_client()
     return client.generate_presigned_url(
@@ -337,7 +340,6 @@ def presign_media_upload(
       Params={
         "Bucket": get_settings().r2_bucket_name,
         "Key": key,
-        "ContentType": content_type,
       },
       ExpiresIn=expires_seconds,
     )

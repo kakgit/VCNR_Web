@@ -166,7 +166,25 @@ The app now uses R2 for **admin media assets** (posters, trailers, gallery, musi
    R2_BUCKET_NAME=vcnr-media
    R2_PUBLIC_BASE_URL=https://pub-xxxxxxxxxxxx.r2.dev
    ```
-6. Redeploy. Admin media uploads now go straight to R2.
+6. **Configure CORS on the bucket** — this is REQUIRED. The admin panel runs in
+   the browser and PUTs files directly to the R2 URL returned by the presign
+   endpoint. Without CORS the browser blocks the upload with a
+   `No 'Access-Control-Allow-Origin'` error. In the Cloudflare dashboard:
+   R2 → your bucket → **Settings** → **CORS** → add a rule:
+   ```json
+   [
+     {
+       "AllowedOrigins": ["https://vcnr-web.onrender.com", "http://localhost:8000", "http://127.0.0.1:8000"],
+       "AllowedMethods": ["PUT", "GET", "HEAD", "POST", "DELETE"],
+       "AllowedHeaders": ["*"],
+       "ExposeHeaders": ["ETag"],
+       "MaxAgeSeconds": 3600
+     }
+   ]
+   ```
+   (Or use `"AllowedOrigins": ["*"]` for public buckets. `localhost` entries
+   let you test the same flow from your laptop.)
+7. Redeploy. Admin media uploads now go straight to R2.
 
 ### Migrating existing local media to R2
 

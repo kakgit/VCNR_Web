@@ -238,12 +238,21 @@ def chunk_webseed_base(movie_id: str) -> str | None:
   return f"{settings.r2_public_base_url}/{movie_id}/content/"
 
 
-def delete_chunk(movie_id: str, chunk_name: str) -> None:
-  """Delete a chunk from R2 when configured."""
+def delete_chunk(movie_id: str, chunk_name: str, package_name: str | None = None) -> None:
+  """Delete a chunk from R2 when configured.
+
+  When ``package_name`` is given, the BEP19 package-nested copy
+  ``content/{package_name}/{chunk_name}`` is removed as well so no orphaned
+  ``*.vcnr-pkg`` webseed objects are left behind on delete or re-upload.
+  """
   if not _r2_enabled():
     return
   try:
     _delete_object(_object_key(movie_id, chunk_name))
+    if package_name:
+      nested_key = content_package_object_key(movie_id, package_name, chunk_name)
+      if nested_key:
+        _delete_object(nested_key)
   except Exception:
     logger.exception("R2 delete failed for %s/%s", movie_id, chunk_name)
 

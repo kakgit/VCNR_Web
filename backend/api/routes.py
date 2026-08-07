@@ -1635,10 +1635,14 @@ def _delete_quality_files(movie_id: str, manifest: dict, quality_code: str) -> i
   if target_root.exists():
     removed = sum(1 for file_path in target_root.rglob("*") if file_path.is_file())
     shutil.rmtree(target_root)
+  # BEP19 package folder for the torrent ``name``. Delete the nested webseed
+  # copies together with the flat chunks so re-upload/deletion does not leave
+  # orphaned ``{movie_id}/content/{package_name}/{chunk}`` objects in R2.
+  package_name = f"{movie_id}-{_normalize_quality_code(quality_code)}.vcnr-pkg"
   for chunk_record in quality_entry.get("files", []):
     chunk_name = str(chunk_record.get("name") or "").strip()
     if chunk_name:
-      delete_chunk(movie_id, chunk_name)
+      delete_chunk(movie_id, chunk_name, package_name=package_name)
   manifest["qualities"] = [
     item for item in manifest.get("qualities", [])
     if _normalize_quality_code(str(item.get("quality_code") or "")) != quality_key

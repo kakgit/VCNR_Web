@@ -27,6 +27,12 @@ Usage:
 
     # Preview what the client will fetch (no copies are made)
     python tools/mirror_torrent_package_webseeds.py --movie title-1-admin-1 --dry-run
+
+    # Delete package-nested copies whose chunk is no longer in the manifest
+    # (orphans left behind by deletes/re-uploads before the delete path was fixed).
+    # Always preview first with --dry-run:
+    python tools/mirror_torrent_package_webseeds.py --prune-orphans --dry-run
+    python tools/mirror_torrent_package_webseeds.py --prune-orphans
 """
 
 from __future__ import annotations
@@ -160,11 +166,78 @@ def backfill_movie(movie_id: str, quality_filter: str | None, dry_run: bool, ver
   return copied, skipped
 
 
+def prune_orphan_package_copies(
+  movie_id: str,
+  quality_filter: str | None,
+  dry_run: bool,
+  verbosity: int,
+) -> tuple[int, int]:
+  """Delete BEP19 package-nested copies that the current manifest no longer references.
+
+  Older uploads wrote the nested ``{movie_id}/content/{package}/{chunk}`` keys but
+  the delete/re-upload path only removed the flat chunks, leaving orphaned
+  ``*.vcnr-pkg`` objects in R2.  This sweeps only keys under the package-nested
+  layout whose chunk name is not listed in the manifest (the flat canonical copy
+  is never touched).  Movies without a readable manifest are skipped entirely.
+
+  Returns ``(deleted, kept)``.
+  """
+  manifest_key = storage.media_object_key(movie_id, "content", "manifest.json")
+  raw = storage.download_media_object(manifest_key)
+  if raw is None:
+    print(f"[skip] {movie_id}: manifest.json not found in R2", flush=True)
+    return 0, 0
+  try:
+    manifest = json.loads(raw.decode("utf-8"))
+  except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+    print(f"[skip] {movie_id}: manifest.json is not valid JSON ({exc})", flush=True)
+    return 0, 0
+
+  expected_keys: set[str] = set()
+  for quality in manifest_qualities(manifest):
+    code = normalize_quality_code(str(quality.get("quality_code") or "").strip())
+    if not code:
+      continue
+    if quality_filter and normalize_quality_code(quality_filter) != code:
+      continue
+    for chunk_name in quality_chunk_names(manifest, code):
+      nested_key = storage.content_package_object_key(movie_id, package_folder(movie_id, code), chunk_name)
+      if nested_key:
+        expected_keys.add(nested_key)
+
+  deleted = 0
+  kept = 0
+  for key in storage.list_media_keys(f"{movie_id}/content/"):
+    parts = key.split("/")
+    # Only the nested layout: {movie_id}/content/{package}/{chunk}
+    if len(parts) != 4 or not parts[2].endswith(".vcnr-pkg"):
+      continue
+    if quality_filter and parts[2] != package_folder(movie_id, quality_filter):
+      continue
+    if key in expected_keys:
+      kept += 1
+      continue
+    if dry_run:
+      print(f"  would delete {key}", flush=True)
+      deleted += 1
+      continue
+    if storage.delete_media_object(key):
+      deleted += 1
+      if verbosity:
+        print(f"  [deleted] {key}", flush=True)
+    else:
+      print(f"  [FAILED] {key}", flush=True)
+
+  print(f"[{movie_id}] prune summary: deleted={deleted} kept={kept}", flush=True)
+  return deleted, kept
+
+
 def main() -> None:
   parser = argparse.ArgumentParser(description=__doc__)
   parser.add_argument("--movie", action="append", default=None, help="Movie id to backfill (repeatable). Default: all movies found in the bucket.")
   parser.add_argument("--quality", default=None, help="Only backfill this normalized quality code (e.g. 720p).")
-  parser.add_argument("--dry-run", action="store_true", help="Print the nested keys that would be created without touching R2.")
+  parser.add_argument("--dry-run", action="store_true", help="Print the keys that would be written/deleted without touching R2.")
+  parser.add_argument("--prune-orphans", action="store_true", help="Delete package-nested copies not listed in the current manifest (orphans).")
   parser.add_argument("-v", "--verbose", action="count", default=0, help="Print each key being processed (-v), or full detail (-vv).")
   args = parser.parse_args()
 
@@ -182,14 +255,23 @@ def main() -> None:
     print("R2_PUBLIC_BASE_URL is empty; verification URLs cannot be printed.", flush=True)
   print(
     f"bucket={settings.r2_bucket_name or '(unset)'} movie_filter={args.movie or '(all)'} "
-    f"quality_filter={args.quality or '(all)'} dry_run={args.dry_run}",
+    f"quality_filter={args.quality or '(all)'} dry_run={args.dry_run} prune_orphans={args.prune_orphans}",
     flush=True,
   )
 
   movies = args.movie or discover_movie_ids()
   if not movies:
-    print("No movies to backfill.", flush=True)
+    print("No movies to process.", flush=True)
     sys.exit(0)
+
+  if args.prune_orphans:
+    totals = {"deleted": 0, "kept": 0}
+    for movie_id in movies:
+      deleted, kept = prune_orphan_package_copies(movie_id, args.quality, args.dry_run, args.verbose)
+      totals["deleted"] += deleted
+      totals["kept"] += kept
+    print(f"\n[all] movies={len(movies)} prune deleted={totals['deleted']} kept={totals['kept']}", flush=True)
+    return
 
   totals = {"copied": 0, "skip": 0}
   for movie_id in movies:

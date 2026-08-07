@@ -654,9 +654,12 @@ class AdminMovieUpdateRequest(BaseModel):
   genre: str
   cast_credits: list[CastCreditEntry] = []
   story_line: str
-  stars_required: int = Field(default=1, ge=1, le=10)
-  stars_required_theatre: int = Field(default=3, ge=1, le=10)
-  expected_stars: int = Field(ge=0)
+  # Star/pricing fields are optional here because the "Edit Title" form does not
+  # manage them; when omitted the existing values are preserved (see
+  # update_movie_details in persistence.py / demo_store.py).
+  stars_required: int | None = Field(default=None, ge=1, le=10)
+  stars_required_theatre: int | None = Field(default=None, ge=1, le=10)
+  expected_stars: int | None = Field(default=None, ge=0)
   release_date: str | None = None
 
 

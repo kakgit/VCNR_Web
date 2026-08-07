@@ -2036,10 +2036,12 @@ def update_movie_details(session: Session, movie_id: str, payload: dict) -> dict
   pending_snapshot["genre"] = payload["genre"]
   pending_snapshot["cast_credits"] = _normalize_cast_credit_entries(payload.get("cast_credits", []))
   pending_snapshot["description"] = payload["story_line"]
-  pending_snapshot["stars_required"] = payload["stars_required"]
-  pending_snapshot["stars_required_theatre"] = payload["stars_required_theatre"]
-  pending_snapshot["expected_stars"] = payload["expected_stars"]
-  pending_snapshot["expected_revenue"] = f'{payload["expected_stars"]} stars'
+  # Star/pricing values are preserved when the update payload omits them so a
+  # plain "Edit Title" save never resets the configured star targets.
+  pending_snapshot["stars_required"] = payload.get("stars_required") if payload.get("stars_required") is not None else (pending_snapshot.get("stars_required") or 1)
+  pending_snapshot["stars_required_theatre"] = payload.get("stars_required_theatre") if payload.get("stars_required_theatre") is not None else (pending_snapshot.get("stars_required_theatre") or 3)
+  pending_snapshot["expected_stars"] = payload.get("expected_stars") if payload.get("expected_stars") is not None else (pending_snapshot.get("expected_stars") or 0)
+  pending_snapshot["expected_revenue"] = f'{pending_snapshot["expected_stars"]} stars'
   if payload.get("release_date"):
     pending_snapshot["release_date"] = payload["release_date"]
   _save_pending_movie_snapshot(change_request, pending_snapshot)

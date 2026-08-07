@@ -525,10 +525,12 @@ def update_movie_details(movie_id: str, payload: dict) -> dict | None:
     request["pending"]["genre"] = payload["genre"]
     request["pending"]["cast_credits"] = deepcopy(payload.get("cast_credits") or [])
     request["pending"]["description"] = payload["story_line"]
-    request["pending"]["stars_required"] = payload["stars_required"]
-    request["pending"]["stars_required_theatre"] = payload["stars_required_theatre"]
-    request["pending"]["expected_stars"] = payload["expected_stars"]
-    request["pending"]["expected_revenue"] = f'{payload["expected_stars"]} stars'
+    # Star/pricing values are preserved when the update payload omits them so a
+    # plain "Edit Title" save never resets the configured star targets.
+    request["pending"]["stars_required"] = payload.get("stars_required") if payload.get("stars_required") is not None else (request["pending"].get("stars_required") or 1)
+    request["pending"]["stars_required_theatre"] = payload.get("stars_required_theatre") if payload.get("stars_required_theatre") is not None else (request["pending"].get("stars_required_theatre") or 3)
+    request["pending"]["expected_stars"] = payload.get("expected_stars") if payload.get("expected_stars") is not None else (request["pending"].get("expected_stars") or 0)
+    request["pending"]["expected_revenue"] = f'{request["pending"]["expected_stars"]} stars'
     if payload.get("release_date"):
       request["pending"]["release_date"] = payload["release_date"]
     if not movie.get("archived"):

@@ -517,9 +517,10 @@ def _capture_movie_asset_snapshot(movie_id: str) -> dict[str, list[str]]:
     for kind, folder_name in (("trailer", "trailers"), ("gallery", "gallery"), ("music", "music"), ("content", "content")):
       prefix = f"{movie_id}/{folder_name}/"
       for key in list_media_keys(prefix):
-        if kind == "content" and Path(key).name == "manifest.json":
+        key_name = Path(key).name
+        if (kind == "content" and key_name == "manifest.json") or (kind == "trailer" and key_name == "teasers.json"):
           continue
-        snapshot[kind].append(Path(key).name)
+        snapshot[kind].append(key_name)
     return snapshot
 
   for orientation, label in (("vertical", "Vertical"), ("horizontal", "Horizontal")):
@@ -530,7 +531,7 @@ def _capture_movie_asset_snapshot(movie_id: str) -> dict[str, list[str]]:
   for kind, folder_name in (("trailer", "trailers"), ("gallery", "gallery"), ("music", "music"), ("content", "content")):
     folder = base_path / folder_name
     if folder.exists():
-      snapshot[kind] = [item.name for item in sorted(folder.iterdir()) if item.is_file()]
+      snapshot[kind] = [item.name for item in sorted(folder.iterdir()) if item.is_file() and (kind != "trailer" or item.name != "teasers.json")]
 
   return snapshot
 
@@ -1283,7 +1284,7 @@ def get_movie_approval_review(session: Session, movie_id: str) -> dict | None:
     )
 
   asset_changes = []
-  for kind, label in (("posters", "Posters"), ("trailer", "Trailer"), ("gallery", "Gallery"), ("music", "Music"), ("content", "Content")):
+  for kind, label in (("posters", "Posters"), ("trailer", "Teaser"), ("gallery", "Gallery"), ("music", "Music"), ("content", "Content")):
     current_items = [str(item) for item in current_assets.get(kind, [])]
     pending_items = [str(item) for item in pending_assets.get(kind, current_items)]
     added_items = [item for item in pending_items if item not in current_items]

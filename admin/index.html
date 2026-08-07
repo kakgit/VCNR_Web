@@ -1109,8 +1109,8 @@
     <div class="admin-modal-card admin-media-preview-modal" role="dialog" aria-modal="true" aria-labelledby="adminTrailerUploadTitle">
       <div class="admin-modal-header">
         <div>
-          <p class="section-kicker">Upload Trailer</p>
-          <h2 id="adminTrailerUploadTitle">Trailer Asset</h2>
+          <p class="section-kicker">Upload Teasers</p>
+          <h2 id="adminTrailerUploadTitle">Teaser Links</h2>
         </div>
         <button type="button" class="icon-btn" data-admin-trailer-close aria-label="Close dialog">x</button>
       </div>
@@ -1119,11 +1119,21 @@
         <input id="adminTrailerMovieId" type="hidden">
         <div id="adminTrailerAssetList" class="admin-media-carousel"></div>
         <label class="field">
-          <span>Trailer File</span>
+          <span>Teaser File (optional video)</span>
           <input id="adminTrailerFile" type="file" accept="video/*">
         </label>
+        <section class="admin-teaser-links-section">
+          <h3>YouTube Teaser Links</h3>
+          <p class="admin-teaser-links-hint">Add multiple YouTube links. Click a saved link to open it in a new window and preview the video.</p>
+          <div id="adminTrailerLinkList" class="admin-teaser-link-list"></div>
+          <div id="adminTrailerLinkPreview" class="admin-teaser-link-preview hidden"></div>
+          <div class="admin-teaser-link-add">
+            <input id="adminTrailerLinkInput" type="url" placeholder="Paste a YouTube link, e.g. https://www.youtube.com/watch?v=...">
+            <button type="button" id="adminTrailerLinkAddButton" class="primary-btn">Add Link</button>
+          </div>
+        </section>
         <div class="taxonomy-form-actions">
-          <button type="submit" class="primary-btn">Upload Trailer</button>
+          <button type="submit" class="primary-btn">Upload Teasers</button>
           <button type="button" class="ghost-btn" id="adminTrailerCancelButton">Close</button>
         </div>
       </form>
@@ -1145,8 +1155,8 @@
         <input id="adminGalleryMovieId" type="hidden">
         <div id="adminGalleryAssetList" class="admin-media-carousel"></div>
         <label class="field">
-          <span>Gallery File</span>
-          <input id="adminGalleryFile" type="file" accept="video/*">
+          <span>Gallery File (image or video)</span>
+          <input id="adminGalleryFile" type="file" accept="image/*,video/*">
         </label>
         <div class="taxonomy-form-actions">
           <button type="submit" class="primary-btn">Upload Gallery</button>

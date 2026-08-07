@@ -280,6 +280,10 @@ const adminTrailerMovieId = document.getElementById("adminTrailerMovieId");
 const adminTrailerFile = document.getElementById("adminTrailerFile");
 const adminTrailerAssetList = document.getElementById("adminTrailerAssetList");
 const adminTrailerCancelButton = document.getElementById("adminTrailerCancelButton");
+const adminTrailerLinkList = document.getElementById("adminTrailerLinkList");
+const adminTrailerLinkInput = document.getElementById("adminTrailerLinkInput");
+const adminTrailerLinkAddButton = document.getElementById("adminTrailerLinkAddButton");
+const adminTrailerLinkPreview = document.getElementById("adminTrailerLinkPreview");
 const adminGalleryUploadModal = document.getElementById("adminGalleryUploadModal");
 const adminGalleryUploadForm = document.getElementById("adminGalleryUploadForm");
 const adminGalleryMovieId = document.getElementById("adminGalleryMovieId");
@@ -394,6 +398,9 @@ let adminPosterAssets = [];
 let adminPosterCarouselIndex = 0;
 let adminTrailerAssets = [];
 let adminTrailerCarouselIndex = 0;
+let adminTrailerLinks = [];
+let adminTrailerLinkPreviewIndex = -1;
+let adminTrailerLinkEditingIndex = -1;
 let adminGalleryAssets = [];
 let adminGalleryCarouselIndex = 0;
 let adminMusicAssets = [];
@@ -3292,10 +3299,14 @@ function renderViewerAssetCarousel() {
         <img class="viewer-carousel-poster" src="${toAssetUrl(asset.url)}" alt="Poster image" loading="lazy">
       </a>
     `;
-  } else if (kind === "trailers" || kind === "gallery") {
+  } else if (kind === "trailers") {
     mediaMarkup = `
       <video controls preload="metadata" class="viewer-media-player viewer-carousel-video" src="${toAssetUrl(asset.url)}"></video>
     `;
+  } else if (kind === "gallery") {
+    mediaMarkup = isImageAsset(asset)
+      ? `<img class="viewer-media-player viewer-carousel-image" src="${toAssetUrl(asset.url)}" alt="Gallery image" loading="lazy">`
+      : `<video controls preload="metadata" class="viewer-media-player viewer-carousel-video" src="${toAssetUrl(asset.url)}"></video>`;
   } else if (kind === "music") {
     mediaMarkup = `
       <div class="viewer-carousel-audio-shell">
@@ -3868,7 +3879,7 @@ function renderAdminMovieList() {
           <div class="admin-movie-actions-top">
             <button type="button" class="icon-btn" data-admin-movie-action="edit" title="Edit title" aria-label="Edit title">&#9998;</button>
             <button type="button" class="icon-btn admin-movie-action-posters" data-admin-movie-action="posters" title="Upload posters" aria-label="Upload posters" ${movie.archived ? "disabled" : ""}>&#128247;</button>
-            <button type="button" class="icon-btn admin-movie-action-trailer" data-admin-movie-action="trailer" title="Upload trailer" aria-label="Upload trailer" ${movie.archived ? "disabled" : ""}>&#127909;</button>
+            <button type="button" class="icon-btn admin-movie-action-trailer" data-admin-movie-action="trailer" title="Upload teasers" aria-label="Upload teasers" ${movie.archived ? "disabled" : ""}>&#127909;</button>
             <button type="button" class="icon-btn admin-movie-action-gallery" data-admin-movie-action="gallery" title="Upload gallery" aria-label="Upload gallery" ${movie.archived ? "disabled" : ""}>&#127748;</button>
             <button type="button" class="icon-btn admin-movie-action-music" data-admin-movie-action="music" title="Upload music" aria-label="Upload music" ${movie.archived ? "disabled" : ""}>&#9835;</button>
             <button type="button" class="icon-btn" data-admin-movie-action="delivery-queue" title="Open delivery queue" aria-label="Open delivery queue">&#9201;</button>
@@ -4257,14 +4268,27 @@ function openAdminTrailerUploadModal(movie) {
   }
   adminTrailerCarouselIndex = 0;
   if (adminTrailerAssetList) {
-    adminTrailerAssetList.innerHTML = `<div class="admin-media-empty">Loading trailers...</div>`;
+    adminTrailerAssetList.innerHTML = `<div class="admin-media-empty">Loading teasers...</div>`;
   }
+  adminTrailerLinks = [];
+  adminTrailerLinkEditingIndex = -1;
+  adminTrailerLinkPreviewIndex = -1;
+  if (adminTrailerLinkInput) {
+    adminTrailerLinkInput.value = "";
+  }
+  if (adminTrailerLinkAddButton) {
+    adminTrailerLinkAddButton.textContent = "Add Link";
+  }
+  renderAdminTrailerLinkList();
   adminTrailerUploadModal.classList.remove("hidden");
   adminTrailerUploadModal.setAttribute("aria-hidden", "false");
   loadAdminMediaAssets(movie.id, "trailer").catch((error) => {
     if (adminTrailerAssetList) {
       adminTrailerAssetList.innerHTML = `<div class="admin-media-empty">${escapeHtml(error.message)}</div>`;
     }
+  });
+  loadAdminTrailerLinks(movie.id).catch((error) => {
+    adminHelper.textContent = error.message;
   });
 }
 
@@ -4284,6 +4308,22 @@ function closeAdminTrailerUploadModal() {
   }
   adminTrailerAssets = [];
   adminTrailerCarouselIndex = 0;
+  adminTrailerLinks = [];
+  adminTrailerLinkEditingIndex = -1;
+  adminTrailerLinkPreviewIndex = -1;
+  if (adminTrailerLinkInput) {
+    adminTrailerLinkInput.value = "";
+  }
+  if (adminTrailerLinkAddButton) {
+    adminTrailerLinkAddButton.textContent = "Add Link";
+  }
+  if (adminTrailerLinkList) {
+    adminTrailerLinkList.innerHTML = "";
+  }
+  if (adminTrailerLinkPreview) {
+    adminTrailerLinkPreview.classList.add("hidden");
+    adminTrailerLinkPreview.innerHTML = "";
+  }
 }
 
 function openAdminGalleryUploadModal(movie) {
@@ -4822,6 +4862,14 @@ function renderAdminPosterCarousel(items) {
   `;
 }
 
+const ADMIN_MEDIA_IMAGE_EXTENSIONS = ["jpg", "jpeg", "png", "gif", "webp", "bmp", "avif", "svg"];
+
+function isImageAsset(asset) {
+  const rawName = String(asset?.name || asset?.url || "");
+  const extension = rawName.split("?")[0].split(".").pop().toLowerCase();
+  return ADMIN_MEDIA_IMAGE_EXTENSIONS.includes(extension);
+}
+
 function renderAdminMediaCarousel(kind, items) {
   const container = kind === "trailer" ? adminTrailerAssetList : kind === "gallery" ? adminGalleryAssetList : adminMusicAssetList;
   if (!container) {
@@ -4832,7 +4880,7 @@ function renderAdminMediaCarousel(kind, items) {
     adminTrailerAssets = items || [];
     if (!adminTrailerAssets.length) {
       adminTrailerCarouselIndex = 0;
-      container.innerHTML = `<div class="admin-media-empty">No trailers uploaded yet.</div>`;
+      container.innerHTML = `<div class="admin-media-empty">No teasers uploaded yet.</div>`;
       return;
     }
     adminTrailerCarouselIndex = Math.max(0, Math.min(adminTrailerCarouselIndex, adminTrailerAssets.length - 1));
@@ -4858,22 +4906,31 @@ function renderAdminMediaCarousel(kind, items) {
   const activeIndex = kind === "trailer" ? adminTrailerCarouselIndex : kind === "gallery" ? adminGalleryCarouselIndex : adminMusicCarouselIndex;
   const activeAsset = assetList[activeIndex];
   const mediaUrl = `${toAssetUrl(activeAsset.url || activeAsset.path)}?asset=${encodeURIComponent(activeAsset.name)}`;
-  const mediaMarkup = kind === "trailer" || kind === "gallery"
-    ? `<video src="${escapeHtml(mediaUrl)}" controls preload="metadata"></video>`
-    : `<audio src="${escapeHtml(mediaUrl)}" controls preload="metadata"></audio>`;
+  const kindLabel = kind === "trailer" ? "teaser" : kind === "gallery" ? "gallery" : "music";
+
+  let mediaMarkup = "";
+  if (kind === "trailer") {
+    mediaMarkup = `<video src="${escapeHtml(mediaUrl)}" controls preload="metadata"></video>`;
+  } else if (kind === "gallery") {
+    mediaMarkup = isImageAsset(activeAsset)
+      ? `<img class="admin-media-image" src="${escapeHtml(mediaUrl)}" alt="${escapeHtml(activeAsset.name)}" loading="lazy">`
+      : `<video src="${escapeHtml(mediaUrl)}" controls preload="metadata"></video>`;
+  } else {
+    mediaMarkup = `<audio src="${escapeHtml(mediaUrl)}" controls preload="metadata"></audio>`;
+  }
 
   container.innerHTML = `
     <div class="admin-media-stage">
-      <button type="button" class="icon-btn admin-media-arrow left" data-admin-media-nav="${escapeHtml(kind)}-prev" aria-label="Previous ${escapeHtml(kind)}" ${assetList.length <= 1 ? "disabled" : ""}>&#8249;</button>
-      <button type="button" class="icon-btn admin-media-arrow right" data-admin-media-nav="${escapeHtml(kind)}-next" aria-label="Next ${escapeHtml(kind)}" ${assetList.length <= 1 ? "disabled" : ""}>&#8250;</button>
+      <button type="button" class="icon-btn admin-media-arrow left" data-admin-media-nav="${escapeHtml(kind)}-prev" aria-label="Previous ${escapeHtml(kindLabel)}" ${assetList.length <= 1 ? "disabled" : ""}>&#8249;</button>
+      <button type="button" class="icon-btn admin-media-arrow right" data-admin-media-nav="${escapeHtml(kind)}-next" aria-label="Next ${escapeHtml(kindLabel)}" ${assetList.length <= 1 ? "disabled" : ""}>&#8250;</button>
       <div class="admin-media-slide">
-        <button type="button" class="icon-btn danger admin-media-delete" data-admin-media-delete="${escapeHtml(kind)}" data-admin-media-name="${escapeHtml(activeAsset.name)}" title="Delete ${escapeHtml(kind)}" aria-label="Delete ${escapeHtml(kind)}">&#128465;</button>
+        <button type="button" class="icon-btn danger admin-media-delete" data-admin-media-delete="${escapeHtml(kind)}" data-admin-media-name="${escapeHtml(activeAsset.name)}" title="Delete ${escapeHtml(kindLabel)}" aria-label="Delete ${escapeHtml(kindLabel)}">&#128465;</button>
         ${mediaMarkup}
       </div>
     </div>
     <div class="admin-media-meta">
       <span>${escapeHtml(activeAsset.name)}</span>
-      <span>${activeIndex + 1} / ${assetList.length} • ${escapeHtml(kind)} file</span>
+      <span>${activeIndex + 1} / ${assetList.length} • ${escapeHtml(kindLabel)} file</span>
     </div>
   `;
 }
@@ -4973,6 +5030,131 @@ async function loadAdminMediaAssets(movieId, kind) {
   } else if (kind === "content") {
     renderAdminMediaAssets(adminContentAssetList, items, "content");
   }
+}
+
+function extractYouTubeVideoId(link) {
+  const candidate = String(link || "").trim();
+  const patterns = [
+    /(?:https?:\/\/)?(?:www\.)?youtube\.com\/watch\?(?:.*[?&])?v=([A-Za-z0-9_-]{11})/,
+    /(?:https?:\/\/)?(?:www\.)?youtu\.be\/([A-Za-z0-9_-]{11})/,
+    /(?:https?:\/\/)?(?:www\.)?youtube\.com\/shorts\/([A-Za-z0-9_-]{11})/,
+    /(?:https?:\/\/)?(?:www\.)?youtube\.com\/embed\/([A-Za-z0-9_-]{11})/,
+    /(?:https?:\/\/)?(?:www\.)?youtube\.com\/live\/([A-Za-z0-9_-]{11})/,
+  ];
+  for (const pattern of patterns) {
+    const match = candidate.match(pattern);
+    if (match) {
+      return match[1];
+    }
+  }
+  return null;
+}
+
+function normalizeTeaserLink(link) {
+  const videoId = extractYouTubeVideoId(link);
+  if (!videoId) {
+    return null;
+  }
+  return `https://www.youtube.com/watch?v=${videoId}`;
+}
+
+function setAdminTrailerLinkPreview(index) {
+  if (!adminTrailerLinkPreview) {
+    return;
+  }
+  const link = adminTrailerLinks[index];
+  const videoId = link ? extractYouTubeVideoId(link) : null;
+  if (!videoId) {
+    adminTrailerLinkPreview.classList.add("hidden");
+    adminTrailerLinkPreview.innerHTML = "";
+    return;
+  }
+  adminTrailerLinkPreviewIndex = index;
+  adminTrailerLinkPreview.classList.remove("hidden");
+  adminTrailerLinkPreview.innerHTML = `
+    <div class="admin-teaser-link-preview-label">
+      <span>Previewing</span>
+      <a href="${escapeHtml(link)}" target="_blank" rel="noopener noreferrer">Open in new window &#8599;</a>
+    </div>
+    <iframe
+      src="https://www.youtube-nocookie.com/embed/${escapeHtml(videoId)}"
+      title="YouTube teaser preview"
+      allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+      referrerpolicy="strict-origin-when-cross-origin"
+      allowfullscreen
+    ></iframe>
+  `;
+}
+
+function renderAdminTrailerLinkList() {
+  if (!adminTrailerLinkList) {
+    return;
+  }
+  if (!adminTrailerLinks.length) {
+    adminTrailerLinkList.innerHTML = `<div class="admin-teaser-link-empty">No YouTube teaser links added yet.</div>`;
+    return;
+  }
+  adminTrailerLinkList.innerHTML = adminTrailerLinks.map((link, index) => {
+    const videoId = extractYouTubeVideoId(link);
+    const displayLabel = videoId ? `YouTube • ${videoId}` : link;
+    return `
+      <div class="admin-teaser-link-row">
+        <a
+          class="admin-teaser-link-url"
+          href="${escapeHtml(link)}"
+          target="_blank"
+          rel="noopener noreferrer"
+          data-admin-teaser-link-play="${index}"
+          title="Open in a new window and play"
+        >&#9654; ${escapeHtml(displayLabel)}</a>
+        <span class="admin-teaser-link-actions">
+          <button type="button" class="icon-btn" data-admin-teaser-link-edit="${index}" title="Edit link" aria-label="Edit link">&#9998;</button>
+          <button type="button" class="icon-btn danger" data-admin-teaser-link-delete="${index}" title="Delete link" aria-label="Delete link">&#128465;</button>
+        </span>
+      </div>
+    `;
+  }).join("");
+  if (adminTrailerLinkPreviewIndex < 0 || adminTrailerLinkPreviewIndex >= adminTrailerLinks.length) {
+    setAdminTrailerLinkPreview(0);
+  } else {
+    setAdminTrailerLinkPreview(adminTrailerLinkPreviewIndex);
+  }
+}
+
+async function loadAdminTrailerLinks(movieId) {
+  if (!movieId) {
+    return;
+  }
+  const response = await apiRequest(`/admin/movies/${movieId}/teasers`);
+  adminTrailerLinks = Array.isArray(response.items)
+    ? response.items.filter((link) => typeof link === "string" && link.trim())
+    : [];
+  adminTrailerLinkEditingIndex = -1;
+  adminTrailerLinkPreviewIndex = -1;
+  if (adminTrailerLinkAddButton) {
+    adminTrailerLinkAddButton.textContent = "Add Link";
+  }
+  if (adminTrailerLinkInput) {
+    adminTrailerLinkInput.value = "";
+  }
+  renderAdminTrailerLinkList();
+}
+
+async function saveAdminTrailerLinks(movieId) {
+  if (!movieId) {
+    throw new Error("Please choose a title first.");
+  }
+  const response = await apiRequest(`/admin/movies/${movieId}/teasers`, {
+    method: "PUT",
+    body: JSON.stringify({ links: adminTrailerLinks }),
+  });
+  const updatedMovie = normalizeMovie(response.item);
+  updateMovieCollections(updatedMovie);
+  renderAdminMovieList();
+  renderAdminArchiveMovieList();
+  renderMovieGrid();
+  syncDetailPanel();
+  return response;
 }
 
 function openAdminLibraryEditor(movie = null) {
@@ -7752,9 +7934,120 @@ if (adminTrailerUploadForm) {
 
     try {
       if (!movieId || !file) {
-        throw new Error("Please choose a trailer file.");
+        throw new Error("Please choose a teaser file.");
       }
       await uploadAdminMovieTrailerRemote(movieId, file);
+    } catch (error) {
+      adminHelper.textContent = error.message;
+    }
+  });
+}
+
+if (adminTrailerLinkAddButton) {
+  const handleAdminTrailerLinkAdd = () => {
+    const movieId = adminTrailerMovieId?.value.trim();
+    const rawLink = adminTrailerLinkInput?.value.trim() || "";
+    try {
+      if (!movieId) {
+        throw new Error("Please choose a title first.");
+      }
+      if (!rawLink) {
+        throw new Error("Paste a YouTube link first.");
+      }
+      const normalized = normalizeTeaserLink(rawLink);
+      if (!normalized) {
+        throw new Error("Enter a valid YouTube link (watch, short, share, or embed).");
+      }
+      if (adminTrailerLinkEditingIndex >= 0 && adminTrailerLinks[adminTrailerLinkEditingIndex]) {
+        adminTrailerLinks[adminTrailerLinkEditingIndex] = normalized;
+        adminTrailerLinkEditingIndex = -1;
+        if (adminTrailerLinkAddButton) {
+          adminTrailerLinkAddButton.textContent = "Add Link";
+        }
+      } else if (!adminTrailerLinks.includes(normalized)) {
+        adminTrailerLinks.push(normalized);
+      }
+      if (adminTrailerLinkInput) {
+        adminTrailerLinkInput.value = "";
+      }
+      renderAdminTrailerLinkList();
+      saveAdminTrailerLinks(movieId).then((response) => {
+        adminHelper.textContent = `${response.message} Super Admin approval remains required before viewer-facing publish.`;
+      }).catch((error) => {
+        adminHelper.textContent = error.message;
+      });
+    } catch (error) {
+      adminHelper.textContent = error.message;
+    }
+  };
+  adminTrailerLinkAddButton.addEventListener("click", handleAdminTrailerLinkAdd);
+  if (adminTrailerLinkInput) {
+    adminTrailerLinkInput.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        handleAdminTrailerLinkAdd();
+      }
+    });
+  }
+}
+
+if (adminTrailerLinkList) {
+  adminTrailerLinkList.addEventListener("click", (event) => {
+    const playLink = event.target.closest("[data-admin-teaser-link-play]");
+    if (playLink) {
+      setAdminTrailerLinkPreview(Number(playLink.dataset.adminTeaserLinkPlay));
+      return;
+    }
+
+    const editButton = event.target.closest("[data-admin-teaser-link-edit]");
+    if (editButton) {
+      const index = Number(editButton.dataset.adminTeaserLinkEdit);
+      if (adminTrailerLinks[index]) {
+        adminTrailerLinkEditingIndex = index;
+        if (adminTrailerLinkInput) {
+          adminTrailerLinkInput.value = adminTrailerLinks[index];
+          adminTrailerLinkInput.focus();
+        }
+        if (adminTrailerLinkAddButton) {
+          adminTrailerLinkAddButton.textContent = "Update Link";
+        }
+      }
+      return;
+    }
+
+    const deleteButton = event.target.closest("[data-admin-teaser-link-delete]");
+    if (!deleteButton) {
+      return;
+    }
+
+    const movieId = adminTrailerMovieId?.value.trim();
+    const index = Number(deleteButton.dataset.adminTeaserLinkDelete);
+    if (!adminTrailerLinks[index]) {
+      return;
+    }
+    adminTrailerLinks.splice(index, 1);
+    if (adminTrailerLinkPreviewIndex >= adminTrailerLinks.length) {
+      adminTrailerLinkPreviewIndex = adminTrailerLinks.length - 1;
+    }
+    if (adminTrailerLinkEditingIndex === index) {
+      adminTrailerLinkEditingIndex = -1;
+      if (adminTrailerLinkInput) {
+        adminTrailerLinkInput.value = "";
+      }
+      if (adminTrailerLinkAddButton) {
+        adminTrailerLinkAddButton.textContent = "Add Link";
+      }
+    }
+    renderAdminTrailerLinkList();
+    try {
+      if (!movieId) {
+        throw new Error("Please choose a title first.");
+      }
+      saveAdminTrailerLinks(movieId).then((response) => {
+        adminHelper.textContent = `${response.message} Super Admin approval remains required before viewer-facing publish.`;
+      }).catch((error) => {
+        adminHelper.textContent = error.message;
+      });
     } catch (error) {
       adminHelper.textContent = error.message;
     }

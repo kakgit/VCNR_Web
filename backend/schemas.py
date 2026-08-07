@@ -142,6 +142,14 @@ class MediaAssetListResponse(BaseModel):
   items: list[MediaAssetResponse]
 
 
+class TeaserLinksResponse(BaseModel):
+  items: list[str] = []
+
+
+class TeaserLinksUpdateRequest(BaseModel):
+  links: list[str] = []
+
+
 class ContentQualityResponse(BaseModel):
   quality_code: str
   quality_label: str

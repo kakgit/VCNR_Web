@@ -116,6 +116,8 @@ from backend.schemas import (
   AdminSummaryResponse,
   StarPricingSettingsRequest,
   StarPricingSettingsResponse,
+  TeaserLinksResponse,
+  TeaserLinksUpdateRequest,
   AdminUserCreateRequest,
   MovieDetailResponse,
   RegisterRequest,
@@ -372,6 +374,69 @@ def _media_asset_payload_from_key(key: str, kind: str, orientation: str | None =
   }
 
 
+TEASER_LINKS_SIDECAR_NAME = "teasers.json"
+
+
+def _teaser_links_sidecar_key(movie_id: str) -> str:
+  return f"{movie_id}/trailers/{TEASER_LINKS_SIDECAR_NAME}"
+
+
+def _read_teaser_links(movie_id: str) -> list[str]:
+  """Read the saved YouTube teaser links for a movie, if any."""
+  if r2_enabled():
+    raw = download_media_object(_teaser_links_sidecar_key(movie_id))
+    if not raw:
+      return []
+    try:
+      parsed = json.loads(raw.decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
+      return []
+    return [link for link in parsed if isinstance(link, str) and link.strip()] if isinstance(parsed, list) else []
+
+  sidecar_path = LIBRARY_MEDIA_ROOT / movie_id / "trailers" / TEASER_LINKS_SIDECAR_NAME
+  if not sidecar_path.exists():
+    return []
+  try:
+    parsed = json.loads(sidecar_path.read_text(encoding="utf-8"))
+  except (json.JSONDecodeError, OSError, ValueError):
+    return []
+  return [link for link in parsed if isinstance(link, str) and link.strip()] if isinstance(parsed, list) else []
+
+
+def _save_teaser_links(movie_id: str, links: list[str]) -> None:
+  """Persist the YouTube teaser link list for a movie (local + R2 sidecar)."""
+  normalized_links = [str(link or "").strip() for link in links if str(link or "").strip()]
+  payload = json.dumps(normalized_links, ensure_ascii=False, indent=2)
+  if r2_enabled():
+    upload_media_object(_teaser_links_sidecar_key(movie_id), payload.encode("utf-8"))
+  folder = LIBRARY_MEDIA_ROOT / movie_id / "trailers"
+  folder.mkdir(parents=True, exist_ok=True)
+  (folder / TEASER_LINKS_SIDECAR_NAME).write_text(payload, encoding="utf-8")
+
+
+def _normalize_teaser_link(link: str) -> str | None:
+  """Validate a YouTube link and normalize it to a canonical watch URL."""
+  candidate = (link or "").strip()
+  if not candidate:
+    return None
+  video_id = None
+  patterns = (
+    r"(?:https?://)?(?:www\.)?youtube\.com/watch\?(?:.*[?&])?v=([A-Za-z0-9_-]{11})",
+    r"(?:https?://)?(?:www\.)?youtu\.be/([A-Za-z0-9_-]{11})",
+    r"(?:https?://)?(?:www\.)?youtube\.com/shorts/([A-Za-z0-9_-]{11})",
+    r"(?:https?://)?(?:www\.)?youtube\.com/embed/([A-Za-z0-9_-]{11})",
+    r"(?:https?://)?(?:www\.)?youtube\.com/live/([A-Za-z0-9_-]{11})",
+  )
+  for pattern in patterns:
+    match = re.search(pattern, candidate)
+    if match:
+      video_id = match.group(1)
+      break
+  if not video_id:
+    return None
+  return f"https://www.youtube.com/watch?v={video_id}"
+
+
 def _sanitize_movie_payload(movie: dict | None) -> dict | None:
   if movie is None:
     return None
@@ -430,7 +495,8 @@ def _list_media_assets(movie_id: str, kind: str) -> list[dict]:
     prefix = f"{movie_id}/{folder_name}/"
     items = []
     for key in list_media_keys(prefix):
-      if kind == "content" and Path(key).name == "manifest.json":
+      key_name = Path(key).name
+      if (kind == "content" and key_name == "manifest.json") or (kind == "trailer" and key_name == TEASER_LINKS_SIDECAR_NAME):
         continue
       items.append(_media_asset_payload_from_key(key, kind))
     return items
@@ -450,7 +516,7 @@ def _list_media_assets(movie_id: str, kind: str) -> list[dict]:
     folder = base_path / folder_name
     if folder.exists():
       for file_path in sorted([item for item in folder.iterdir() if item.is_file()]):
-        if kind == "content" and file_path.name == "manifest.json":
+        if (kind == "content" and file_path.name == "manifest.json") or (kind == "trailer" and file_path.name == TEASER_LINKS_SIDECAR_NAME):
           continue
         items.append(_media_asset_payload(file_path, kind))
 
@@ -2426,9 +2492,10 @@ def admin_register_movie_asset_upload(
   if movie is None:
     raise HTTPException(status_code=404, detail="Movie not found.")
 
+  kind_label = "Teaser" if safe_kind == "trailer" else safe_kind.title()
   return AdminMovieActionResponse(
     item=_sanitize_movie_payload(movie),
-    message=f'{safe_kind.title()} uploaded for "{movie["title"]}" and sent for Super Admin approval.',
+    message=f'{kind_label} uploaded for "{movie["title"]}" and sent for Super Admin approval.',
   )
 
 
@@ -2461,7 +2528,7 @@ async def admin_upload_movie_trailer(
     raise HTTPException(status_code=404, detail="Movie not found.")
   return AdminMovieActionResponse(
     item=_sanitize_movie_payload(matched),
-    message=f'Trailer uploaded for "{matched["title"]}" and sent for Super Admin approval.',
+    message=f'Teaser uploaded for "{matched["title"]}" and sent for Super Admin approval.',
   )
 
 
@@ -2473,6 +2540,45 @@ def admin_list_movie_trailers(
 ) -> MediaAssetListResponse:
   _get_movie_or_404(db, movie_id)
   return MediaAssetListResponse(items=[MediaAssetResponse(**item) for item in _list_media_assets(movie_id, "trailer")])
+
+
+@router.get("/admin/movies/{movie_id}/teasers", response_model=TeaserLinksResponse)
+def admin_list_movie_teaser_links(
+  movie_id: str,
+  db: Session | None = Depends(get_db),
+  _: dict[str, str] = Depends(require_admin),
+) -> TeaserLinksResponse:
+  _get_movie_or_404(db, movie_id)
+  return TeaserLinksResponse(items=_read_teaser_links(movie_id))
+
+
+@router.put("/admin/movies/{movie_id}/teasers", response_model=AdminMovieActionResponse)
+def admin_update_movie_teaser_links(
+  movie_id: str,
+  payload: TeaserLinksUpdateRequest,
+  db: Session | None = Depends(get_db),
+  _: dict[str, str] = Depends(require_admin),
+) -> AdminMovieActionResponse:
+  movie = _get_movie_or_404(db, movie_id)
+  normalized_links: list[str] = []
+  for link in payload.links:
+    normalized = _normalize_teaser_link(link)
+    if normalized is None:
+      raise HTTPException(status_code=400, detail="Each teaser link must be a valid YouTube watch, short, share, or embed link.")
+    if normalized not in normalized_links:
+      normalized_links.append(normalized)
+  _save_teaser_links(movie_id, normalized_links)
+  if db:
+    persistence.prime_movie_asset_change(db, movie_id)
+    matched = persistence.register_movie_asset_change(db, movie_id, "trailer")
+  else:
+    matched = demo_store.register_movie_asset_change(movie_id, "trailer")
+  if matched is None:
+    raise HTTPException(status_code=404, detail="Movie not found.")
+  return AdminMovieActionResponse(
+    item=_sanitize_movie_payload(matched),
+    message=f'Teaser links saved for "{matched["title"]}" and sent for Super Admin approval.',
+  )
 
 
 @router.post("/admin/movies/{movie_id}/assets/content/{quality_code}", response_model=AdminMovieActionResponse)

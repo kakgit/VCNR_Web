@@ -7,6 +7,11 @@ class CastCreditEntry(BaseModel):
   role: str = Field(min_length=2, max_length=80)
   name: str = Field(min_length=1, max_length=255)
   link: str | None = Field(default=None, max_length=500)
+  image: str | None = Field(default=None, max_length=500)
+
+
+class CastImageLookupRequest(BaseModel):
+  name: str = Field(min_length=2, max_length=255)
 
 
 class HealthResponse(BaseModel):
@@ -86,6 +91,7 @@ class MovieResponse(BaseModel):
   title: str
   title_caption: str | None = None
   poster: str | None = None
+  teaser_links: list[str] = []
   genre: str
   cast_credits: list[CastCreditEntry] = []
   stars_required: int = 1

@@ -13,6 +13,9 @@ import sys
 import time
 from datetime import datetime, timedelta
 from tempfile import NamedTemporaryFile
+import urllib.error
+import urllib.parse
+import urllib.request
 import zipfile
 
 from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, UploadFile
@@ -106,6 +109,7 @@ from backend.schemas import (
   AdminMovieUpdateRequest,
   AdminMovieActionResponse,
   AdminMovieListResponse,
+  CastImageLookupRequest,
   ContentQualityListResponse,
   ContentQualityResponse,
   DeliveryQueueItemResponse,
@@ -148,6 +152,9 @@ from backend.schemas import (
 router = APIRouter(prefix="/api")
 SUPPORTED_TAXONOMIES = {"categories", "genres", "grades"}
 LIBRARY_MEDIA_ROOT = Path(__file__).resolve().parents[2] / "media" / "library"
+STAR_CAST_ROOT = Path(__file__).resolve().parents[2] / "media" / "star_cast"
+WIKIPEDIA_API_URL = "https://en.wikipedia.org/w/api.php"
+WIKIPEDIA_API_USER_AGENT = "VCNR-Admin/1.0 (https://github.com/vcnr; contact: admin@vcnr.local)"
 CONTENT_KDF_ITERATIONS = 390_000
 CONTENT_TAG_SIZE = 16
 CONTENT_NONCE_SIZE = 12
@@ -227,6 +234,96 @@ def _build_asset_filename(movie_id: str, asset_code: str, upload: UploadFile, va
 
 def _normalize_quality_code(value: str) -> str:
   return re.sub(r"[^a-z0-9]+", "-", value.strip().lower()).strip("-")
+
+
+def _sanitize_cast_image_name(name: str) -> str:
+  slug = re.sub(r"[^a-z0-9]+", "_", name.strip().lower()).strip("_")
+  return slug or "person"
+
+
+def _wikipedia_get_json(params: dict[str, str], timeout: float = 10.0) -> dict | None:
+  query = urllib.parse.urlencode(params)
+  request = urllib.request.Request(
+    f"{WIKIPEDIA_API_URL}?{query}",
+    headers={
+      "User-Agent": WIKIPEDIA_API_USER_AGENT,
+      "Accept": "application/json",
+    },
+  )
+  try:
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+      if response.status != 200:
+        return None
+      return json.loads(response.read().decode("utf-8"))
+  except (OSError, ValueError):
+    return None
+
+
+def _resolve_wikipedia_portrait(name: str) -> dict | None:
+  """Resolve the celebrity name to a Wikipedia portrait thumbnail URL."""
+  search = _wikipedia_get_json(
+    {
+      "action": "query",
+      "list": "search",
+      "srsearch": name,
+      "srlimit": 1,
+      "format": "json",
+      "origin": "*",
+    }
+  )
+  if not search:
+    return None
+  hits = (search.get("query") or {}).get("search") or []
+  if not hits:
+    return None
+  title = str(hits[0].get("title") or "").strip()
+  if not title:
+    return None
+  image = _wikipedia_get_json(
+    {
+      "action": "query",
+      "prop": "pageimages",
+      "piprop": "thumbnail",
+      "pithumbsize": 300,
+      "titles": title,
+      "format": "json",
+      "origin": "*",
+    }
+  )
+  if not image:
+    return None
+  pages = (image.get("query") or {}).get("pages") or {}
+  if not isinstance(pages, dict):
+    return None
+  for page in pages.values():
+    if not isinstance(page, dict):
+      continue
+    thumbnail = page.get("thumbnail") or {}
+    source = str(thumbnail.get("source") or "").strip()
+    if source:
+      return {"source": source, "title": title}
+  return None
+
+
+def _cast_image_extension(source_url: str) -> str:
+  extension = Path(urllib.parse.urlparse(source_url).path).suffix.lower()
+  if not extension.startswith(".") or len(extension) > 10:
+    extension = ".jpg"
+  return extension
+
+
+def _download_cast_image(source_url: str, timeout: float = 30.0) -> bytes | None:
+  request = urllib.request.Request(
+    source_url,
+    headers={"User-Agent": WIKIPEDIA_API_USER_AGENT},
+  )
+  try:
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+      if response.status != 200:
+        return None
+      return response.read()
+  except (OSError, ValueError):
+    return None
 
 
 def _movie_content_qualities(movie: dict) -> list[dict]:
@@ -474,6 +571,9 @@ def _sanitize_movie_payload(movie: dict | None) -> dict | None:
     elif relative_key:
       # Public R2 URL is preferred so the viewer can render the poster.
       normalized["poster"] = media_public_url(relative_key) or poster_path
+
+  movie_id = str(normalized.get("id") or "")
+  normalized["teaser_links"] = _read_teaser_links(movie_id) if movie_id else []
   return normalized
 
 
@@ -2252,6 +2352,50 @@ def admin_delete_taxonomy(
     message=f'{kind[:-1].title()} "{item["name"]}" deleted.',
     item=item,
   )
+
+
+@router.post("/admin/cast-lookup")
+def admin_cast_image_lookup(
+  payload: CastImageLookupRequest,
+  _: dict[str, str] = Depends(require_admin),
+) -> dict:
+  name = payload.name.strip()
+  slug = _sanitize_cast_image_name(name)
+  STAR_CAST_ROOT.mkdir(parents=True, exist_ok=True)
+
+  existing = sorted(STAR_CAST_ROOT.glob(f"{slug}.*"))
+  if existing:
+    return {
+      "success": True,
+      "name": name,
+      "image_path": f"/media/star_cast/{existing[0].name}",
+      "source": "wikipedia",
+    }
+
+  portrait = _resolve_wikipedia_portrait(name)
+  if not portrait:
+    return {
+      "success": False,
+      "name": name,
+      "message": "No profile image found for this name on Wikipedia.",
+    }
+
+  image_bytes = _download_cast_image(portrait["source"])
+  if not image_bytes:
+    return {
+      "success": False,
+      "name": name,
+      "message": "Could not download the profile image from Wikipedia.",
+    }
+
+  target = STAR_CAST_ROOT / f"{slug}{_cast_image_extension(portrait['source'])}"
+  target.write_bytes(image_bytes)
+  return {
+    "success": True,
+    "name": name,
+    "image_path": f"/media/star_cast/{target.name}",
+    "source": "wikipedia",
+  }
 
 
 @router.get("/admin/movies", response_model=AdminMovieListResponse)

@@ -1315,6 +1315,7 @@ function normalizeMovie(movie) {
           role: String(item?.role || "").trim(),
           name: String(item?.name || "").trim(),
           link: String(item?.link || "").trim(),
+          image: String(item?.image || "").trim(),
         }))
         .filter((item) => item.role && item.name)
       : [],
@@ -1365,6 +1366,7 @@ function normalizeCastCreditEntry(entry = {}) {
     role: String(entry.role || "").trim(),
     name: String(entry.name || "").trim(),
     link: String(entry.link || "").trim(),
+    image: String(entry.image || "").trim(),
   };
 }
 
@@ -1478,12 +1480,22 @@ function renderViewerCastCredits(movie) {
   detailCastCredits.innerHTML = items.map((item) => {
     const hasLink = item.link && /^https?:\/\//i.test(item.link);
     const nameMarkup = hasLink
-      ? `<a class="viewer-title-cast-link" href="${escapeHtml(item.link)}" target="_blank" rel="noreferrer noopener">${escapeHtml(item.name)}</a>`
+      ? `<a class="viewer-title-cast-name viewer-title-cast-link" href="${escapeHtml(item.link)}" target="_blank" rel="noreferrer noopener">${escapeHtml(item.name)}</a>`
       : `<span class="viewer-title-cast-name">${escapeHtml(item.name)}</span>`;
+    const photoInner = item.image
+      ? `<img class="viewer-title-cast-photo-img" src="${escapeHtml(toAssetUrl(item.image))}" alt="" loading="lazy" onerror="this.classList.add('viewer-title-cast-photo-img--error')">`
+      : "";
+    const photoMarkup = `
+      <span class="viewer-title-cast-photo">
+        ${photoInner}
+        <span class="viewer-title-cast-photo-fallback" aria-hidden="true">${escapeHtml(item.name.charAt(0).toUpperCase() || "?")}</span>
+      </span>
+    `;
     return `
-      <div class="viewer-title-cast-row">
+      <div class="viewer-title-cast-card">
+        ${photoMarkup}
         <span class="viewer-title-cast-role">${escapeHtml(item.role)}</span>
-        <div>${nameMarkup}</div>
+        ${nameMarkup}
       </div>
     `;
   }).join("");
@@ -1612,6 +1624,13 @@ function renderAdminCastCreditRows(items = []) {
 
     return `
       <div class="admin-cast-credit-row" data-cast-credit-row="${index}">
+        <span class="admin-cast-credit-avatar" data-cast-credit-avatar title="Profile image">
+          <span class="admin-cast-credit-avatar-photo${normalized.image ? "" : " admin-cast-credit-avatar-empty"}" data-cast-credit-avatar-photo data-initial="${escapeHtml((normalized.name || "?").charAt(0).toUpperCase())}">
+            ${normalized.image
+              ? `<img data-cast-credit-image-preview src="${escapeHtml(toAssetUrl(normalized.image))}" alt="" onerror="this.remove(); this.parentElement.classList.add('admin-cast-credit-avatar-empty');">`
+              : ""}
+          </span>
+        </span>
         <label class="field">
           <span class="sr-only">Role Title</span>
           <input type="text" data-cast-credit-role placeholder="Role title" value="${escapeHtml(normalized.role)}">
@@ -1625,9 +1644,89 @@ function renderAdminCastCreditRows(items = []) {
           <input type="url" data-cast-credit-link placeholder="https://example.com/profile" value="${escapeHtml(normalized.link)}">
         </label>
         <button type="button" class="icon-btn danger" data-remove-cast-credit-row title="Remove row" aria-label="Remove row">&#128465;</button>
+        <input type="hidden" data-cast-credit-image value="${escapeHtml(normalized.image || "")}">
+        <span class="admin-cast-credit-status" data-cast-credit-status hidden></span>
       </div>
     `;
   }).join("");
+}
+
+function setAdminCastCreditStatus(statusEl, message = "", loading = false) {
+  if (!statusEl) {
+    return;
+  }
+  statusEl.textContent = message;
+  statusEl.toggleAttribute("hidden", !message);
+  if (message) {
+    statusEl.dataset.loading = loading ? "true" : "false";
+  } else {
+    delete statusEl.dataset.loading;
+  }
+}
+
+function setAdminCastCreditPreview(row, imagePath) {
+  if (!row) {
+    return;
+  }
+  const photoEl = row.querySelector("[data-cast-credit-avatar-photo]");
+  const imageInput = row.querySelector("[data-cast-credit-image]");
+  const preview = row.querySelector("[data-cast-credit-image-preview]");
+  if (imageInput) {
+    imageInput.value = imagePath || "";
+  }
+  if (imagePath) {
+    if (preview) {
+      preview.src = toAssetUrl(imagePath);
+    } else if (photoEl) {
+      const img = document.createElement("img");
+      img.dataset.castCreditImagePreview = "";
+      img.alt = "";
+      img.addEventListener("error", () => {
+        img.remove();
+        photoEl.classList.add("admin-cast-credit-avatar-empty");
+      });
+      photoEl.append(img);
+      img.src = toAssetUrl(imagePath);
+    }
+    photoEl?.classList.remove("admin-cast-credit-avatar-empty");
+  } else {
+    preview?.remove();
+    photoEl?.classList.add("admin-cast-credit-avatar-empty");
+  }
+}
+
+async function lookupCastImage(row, name) {
+  if (!row || !name || row.dataset.castImageLookupPending === "true") {
+    return;
+  }
+  const statusEl = row.querySelector("[data-cast-credit-status]");
+  row.dataset.castImageLookupPending = "true";
+  row.classList.add("is-cast-image-lookup");
+  setAdminCastCreditStatus(statusEl, "Fetching profile image…", true);
+
+  try {
+    const response = await apiRequest("/admin/cast-lookup", {
+      method: "POST",
+      body: JSON.stringify({ name }),
+    });
+
+    if (response && response.success && response.image_path) {
+      row.dataset.castImageLookupName = name;
+      setAdminCastCreditPreview(row, response.image_path);
+      setAdminCastCreditStatus(statusEl);
+    } else {
+      row.dataset.castImageLookupName = name;
+      setAdminCastCreditPreview(row, "");
+      setAdminCastCreditStatus(statusEl, response?.message || "No profile image found for this name.", false);
+    }
+  } catch {
+    row.dataset.castImageLookupName = name;
+    setAdminCastCreditPreview(row, "");
+    setAdminCastCreditStatus(statusEl, "Could not fetch profile image. Try again later.", false);
+  } finally {
+    row.dataset.castImageLookupPending = "false";
+    row.classList.remove("is-cast-image-lookup");
+  }
 }
 
 function readAdminCastCreditRows() {
@@ -1640,13 +1739,14 @@ function readAdminCastCreditRows() {
       role: row.querySelector("[data-cast-credit-role]")?.value.trim() || "",
       name: row.querySelector("[data-cast-credit-name]")?.value.trim() || "",
       link: row.querySelector("[data-cast-credit-link]")?.value.trim() || "",
+      image: row.querySelector("[data-cast-credit-image]")?.value.trim() || "",
     }))
     .filter((item) => item.role || item.name || item.link);
 }
 
 function appendAdminCastCreditRow() {
   const items = readAdminCastCreditRows();
-  items.push({ role: "", name: "", link: "" });
+  items.push({ role: "", name: "", link: "", image: "" });
   renderAdminCastCreditRows(items);
 }
 
@@ -7621,6 +7721,27 @@ if (adminLibraryCastCredits) {
     const rowIndex = Number(row.getAttribute("data-cast-credit-row"));
     const nextRows = currentRows.filter((_, index) => index !== rowIndex);
     renderAdminCastCreditRows(nextRows);
+  });
+
+  adminLibraryCastCredits.addEventListener("focusout", (event) => {
+    const nameInput = event.target.closest("[data-cast-credit-name]");
+    if (!nameInput) {
+      return;
+    }
+    const row = nameInput.closest("[data-cast-credit-row]");
+    if (!row) {
+      return;
+    }
+    const name = nameInput.value.trim();
+    if (!name) {
+      return;
+    }
+    const imageInput = row.querySelector("[data-cast-credit-image]");
+    const currentImage = imageInput?.value || "";
+    if (row.dataset.castImageLookupName === name && currentImage) {
+      return;
+    }
+    void lookupCastImage(row, name);
   });
 }
 

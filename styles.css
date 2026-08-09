@@ -637,27 +637,70 @@ body.creator-entry #guestEntryButton {
 
 .viewer-title-cast-list {
   display: grid;
-  gap: 12px;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 18px 14px;
 }
 
-.viewer-title-cast-row {
-  display: grid;
-  grid-template-columns: minmax(140px, 200px) minmax(0, 1fr);
-  gap: 14px;
-  align-items: start;
+.viewer-title-cast-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  text-align: center;
+}
+
+.viewer-title-cast-photo {
+  position: relative;
+  width: 120px;
+  height: 120px;
+  border-radius: 50%;
+  overflow: hidden;
+  flex-shrink: 0;
+  background: rgba(255, 255, 255, 0.08);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.viewer-title-cast-photo-img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.viewer-title-cast-photo-fallback {
+  color: rgba(255, 255, 255, 0.55);
+  font-size: 2.4rem;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.viewer-title-cast-photo img.viewer-title-cast-photo-img:not(.viewer-title-cast-photo-img--error) ~ .viewer-title-cast-photo-fallback {
+  display: none;
 }
 
 .viewer-title-cast-role {
   color: rgba(255, 255, 255, 0.62);
-  font-size: 0.92rem;
+  font-size: 0.72rem;
   text-transform: uppercase;
   letter-spacing: 0.05em;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .viewer-title-cast-name,
 .viewer-title-cast-link {
+  margin-top: auto;
   color: #f7f2ea;
   font-weight: 600;
+  font-size: 0.95rem;
+  line-height: 1.25;
+  text-align: center;
 }
 
 .viewer-title-cast-link {
@@ -1960,6 +2003,13 @@ body.creator-entry #guestEntryButton {
   border: 1px solid rgba(255, 255, 255, 0.06);
 }
 
+/* The admin helper banner is only shown when it carries a message. Messages
+   are written via textContent in app.js (e.g. Edit Title save feedback), so an
+   empty banner hides itself automatically. */
+.admin-helper-banner:empty {
+  display: none;
+}
+
 .admin-panel {
   display: none;
 }
@@ -2086,9 +2136,70 @@ body.creator-entry #guestEntryButton {
 
 .admin-cast-credit-row {
   display: grid;
-  grid-template-columns: minmax(190px, 0.9fr) minmax(180px, 0.9fr) minmax(220px, 1.2fr) auto;
+  grid-template-columns: 44px minmax(170px, 0.9fr) minmax(170px, 0.9fr) minmax(200px, 1.2fr) auto;
   gap: 10px;
   align-items: center;
+}
+
+.admin-cast-credit-avatar {
+  width: 44px;
+  height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.admin-cast-credit-avatar-photo {
+  position: relative;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  overflow: hidden;
+  flex-shrink: 0;
+  background: rgba(255, 255, 255, 0.08);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.admin-cast-credit-avatar-photo img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.admin-cast-credit-avatar-empty::after {
+  content: attr(data-initial);
+  color: rgba(255, 255, 255, 0.55);
+  font-size: 16px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.admin-cast-credit-avatar-photo:not(.admin-cast-credit-avatar-empty)::after {
+  display: none;
+}
+
+.admin-cast-credit-status {
+  grid-column: 1 / -1;
+  font-size: 0.8rem;
+  color: rgba(255, 211, 162, 0.9);
+  padding-left: 2px;
+}
+
+.admin-cast-credit-status[hidden] {
+  display: none;
+}
+
+.admin-cast-credit-status[data-loading="true"] {
+  color: rgba(255, 255, 255, 0.6);
+}
+
+.admin-cast-credit-row.is-cast-image-lookup .admin-cast-credit-avatar {
+  opacity: 0.6;
 }
 
 .admin-cast-credits-actions {

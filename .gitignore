@@ -22,6 +22,7 @@ VCNR_Swarm_Test/
 # Kept out of git — these are generated at runtime and are ephemeral on Render's
 # free tier disk. media/.gitkeep is still tracked so the folder exists in the image.
 media/library/
+media/star_cast/
 media/*.vcnr
 media/*.torrent
 

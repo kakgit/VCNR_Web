@@ -282,10 +282,14 @@ def _normalize_cast_credit_entries(entries) -> list[dict]:
     link = str(item.get("link") or "").strip() or None
     if not role or not name:
       continue
+    image = str(item.get("image") or "").strip() or None
+    if image and not image.startswith("/media/"):
+      image = None
     normalized.append({
       "role": role,
       "name": name,
       "link": link,
+      "image": image,
     })
   return normalized
 

@@ -283,7 +283,9 @@ def _normalize_cast_credit_entries(entries) -> list[dict]:
     if not role or not name:
       continue
     image = str(item.get("image") or "").strip() or None
-    if image and not image.startswith("/media/"):
+    # Allow local /media/ paths plus absolute http(s) URLs (e.g. public R2
+    # profile-photo URLs); anything else is treated as missing.
+    if image and not image.startswith("/media/") and not image.startswith(("http://", "https://")):
       image = None
     normalized.append({
       "role": role,
@@ -1942,6 +1944,42 @@ def update_movie_interest(
     reservation_modes.get("online"),
     reservation_modes.get("theatre"),
   ), True
+
+
+def remove_movie_wish(
+  session: Session,
+  movie_id: str,
+  user_id: str,
+) -> dict | None:
+  ensure_seeded(session)
+  movie = session.get(MovieRecord, movie_id)
+  if movie is None or movie.archived:
+    return None
+  wish = (
+    session.query(MovieWishRecord)
+    .filter(MovieWishRecord.movie_id == movie_id, MovieWishRecord.user_id == user_id)
+    .first()
+  )
+  if wish is not None:
+    if wish.wish_kind == "online":
+      movie.wish_online_count = max(0, int(movie.wish_online_count or 0) - 1)
+    else:
+      movie.wish_theatre_count = max(0, int(movie.wish_theatre_count or 0) - 1)
+    movie.wish_count = max(0, int(movie.wish_count or 0) - 1)
+    session.delete(wish)
+    session.commit()
+    session.refresh(movie)
+  approval_status = _resolve_movie_approval_statuses(session, [movie.id]).get(movie.id, "published")
+  reservation_modes = _resolve_viewer_reservations(session, user_id, [movie.id]).get(movie.id, {})
+  return _movie_to_dict_for_session(
+    session,
+    movie,
+    approval_status,
+    None,
+    _combine_viewer_reservation_status(reservation_modes),
+    reservation_modes.get("online"),
+    reservation_modes.get("theatre"),
+  )
 
 
 def get_admin_summary(session: Session) -> dict:

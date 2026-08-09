@@ -555,6 +555,26 @@ def _sanitize_movie_payload(movie: dict | None) -> dict | None:
       cast_credits = []
   normalized["cast_credits"] = cast_credits if isinstance(cast_credits, list) else []
 
+  # Cast profile photos are stored as local /media/star_cast/ paths, but that
+  # folder is gitignored runtime media - it only exists on an app server while a
+  # file was written there and does not survive a Render redeploy. When R2 is
+  # configured, serve the images from the public R2 URL instead; if the object is
+  # missing there too, null the image so the viewer falls back to its
+  # initial-letter placeholder instead of a broken/blank photo.
+  if r2_enabled() and isinstance(cast_credits, list):
+    for entry in cast_credits:
+      if not isinstance(entry, dict):
+        continue
+      cast_image = str(entry.get("image") or "").strip()
+      if not cast_image.startswith("/media/star_cast/"):
+        continue
+      relative_key = cast_image.removeprefix("/media/star_cast/")
+      r2_key = f"star_cast/{relative_key}" if relative_key else ""
+      if r2_key and media_object_exists(r2_key):
+        entry["image"] = media_public_url(r2_key) or cast_image
+      else:
+        entry["image"] = None
+
   poster_path = normalized.get("poster")
   if isinstance(poster_path, str) and poster_path.startswith(("http://", "https://")):
     # Public R2 URL: keep as-is. Without R2 configured these never occur.
@@ -2199,6 +2219,28 @@ def movie_interest(
   )
 
 
+@router.delete("/movies/{movie_id}/wish", response_model=MovieInterestResponse)
+def remove_movie_wish(
+  movie_id: str,
+  db: Session | None = Depends(get_db),
+  current_user: dict[str, str] = Depends(get_current_user),
+) -> MovieInterestResponse:
+  try:
+    movie = (
+      persistence.remove_movie_wish(db, movie_id, current_user["id"])
+      if db
+      else demo_store.remove_movie_wish(movie_id, current_user["id"])
+    )
+  except ValueError as error:
+    raise HTTPException(status_code=400, detail=str(error)) from error
+  if movie is None:
+    raise HTTPException(status_code=404, detail="Movie not found.")
+  return MovieInterestResponse(
+    item=_sanitize_movie_payload(movie),
+    message=f'"{movie["title"]}" removed from your wish list.',
+  )
+
+
 @router.get("/producer/queue", response_model=QueueListResponse)
 def producer_queue(db: Session | None = Depends(get_db)) -> QueueListResponse:
   items = persistence.list_publish_queue(db) if db else demo_store.list_publish_queue()
@@ -2365,6 +2407,8 @@ def admin_cast_image_lookup(
 
   existing = sorted(STAR_CAST_ROOT.glob(f"{slug}.*"))
   if existing:
+    if r2_enabled():
+      upload_media_object(f"star_cast/{existing[0].name}", existing[0].read_bytes())
     return {
       "success": True,
       "name": name,
@@ -2390,6 +2434,8 @@ def admin_cast_image_lookup(
 
   target = STAR_CAST_ROOT / f"{slug}{_cast_image_extension(portrait['source'])}"
   target.write_bytes(image_bytes)
+  if r2_enabled():
+    upload_media_object(f"star_cast/{target.name}", image_bytes)
   return {
     "success": True,
     "name": name,

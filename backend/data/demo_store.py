@@ -383,6 +383,24 @@ def update_movie_interest(
   return None
 
 
+def remove_movie_wish(movie_id: str, user_id: str) -> dict | None:
+  for movie in MOVIES:
+    if movie["id"] != movie_id:
+      continue
+    if movie.get("archived", False):
+      return None
+    existing_wish = next((item for item in MOVIE_WISHES if item["movie_id"] == movie_id and item["user_id"] == user_id), None)
+    if existing_wish is not None:
+      MOVIE_WISHES.remove(existing_wish)
+      movie["wish_count"] = max(0, int(movie.get("wish_count", 0)) - 1)
+      if existing_wish["wish_kind"] == "online":
+        movie["wish_online_count"] = max(0, int(movie.get("wish_online_count", 0)) - 1)
+      else:
+        movie["wish_theatre_count"] = max(0, int(movie.get("wish_theatre_count", 0)) - 1)
+    return _decorate_movie(movie, None)
+  return None
+
+
 def get_admin_summary() -> dict:
   queue = list_publish_queue()
   active_movies = [movie for movie in MOVIES if not movie.get("archived", False)]

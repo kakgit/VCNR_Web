@@ -5206,7 +5206,7 @@ def admin_push_test(
     body = (payload.message or body).strip()[:200] or body
 
   if db:
-    tokens = _list_all_active_push_tokens(db)
+    tokens = persistence._list_all_active_push_tokens(db)
   else:
     tokens = demo_store.list_all_active_push_tokens()
 

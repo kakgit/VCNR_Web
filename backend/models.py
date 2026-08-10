@@ -357,6 +357,25 @@ class NotificationRecord(Base):
   created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False, index=True)
 
 
+class PushDeviceTokenRecord(Base):
+  """Expo push token for one installed app instance.
+
+  Stored per device so an offline viewer still receives download-date approvals
+  through FCM/APNs instead of only seeing them on the next app open.
+  """
+
+  __tablename__ = "push_device_tokens"
+
+  id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+  user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), nullable=False, index=True)
+  push_token: Mapped[str] = mapped_column(String(255), nullable=False, unique=True, index=True)
+  platform: Mapped[str] = mapped_column(String(20), nullable=False, default="unknown")
+  device_label: Mapped[str | None] = mapped_column(String(255), nullable=True)
+  is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True)
+  created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+  updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+
+
 class PublishSubmissionRecord(Base):
   __tablename__ = "publish_submissions"
 

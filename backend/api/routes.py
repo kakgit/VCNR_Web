@@ -32,6 +32,7 @@ from sqlalchemy.orm import Session
 
 from backend import auth as session_auth
 from backend.core.config import get_settings
+from backend.core.push import is_expo_push_token
 from backend.core.storage import (
   chunk_exists,
   chunk_public_url,
@@ -124,6 +125,9 @@ from backend.schemas import (
   TeaserLinksUpdateRequest,
   AdminUserCreateRequest,
   MovieDetailResponse,
+  PushDeviceRegisterRequest,
+  PushDeviceResponse,
+  PushDeviceUnregisterRequest,
   RegisterRequest,
   ReleaseMainContentRequest,
   TaxonomyActionResponse,
@@ -2177,6 +2181,54 @@ def auth_me(
   if user is None:
     raise HTTPException(status_code=404, detail="User not found.")
   return ViewerSessionResponse(**user)
+
+
+@router.post("/push/devices", response_model=PushDeviceResponse)
+def register_push_device(
+  payload: PushDeviceRegisterRequest,
+  db: Session | None = Depends(get_db),
+  current_user: dict[str, str] = Depends(get_current_user),
+) -> PushDeviceResponse:
+  """Store the device push token so alerts arrive while the app is closed."""
+  if not is_expo_push_token(payload.push_token):
+    raise HTTPException(status_code=400, detail="A valid Expo push token is required.")
+
+  registered = (
+    persistence.register_push_device_token(
+      db,
+      current_user["id"],
+      payload.push_token,
+      payload.platform,
+      payload.device_label,
+    )
+    if db
+    else demo_store.register_push_device_token(
+      current_user["id"],
+      payload.push_token,
+      payload.platform,
+      payload.device_label,
+    )
+  )
+  if not registered:
+    raise HTTPException(status_code=400, detail="This device could not be registered for alerts.")
+  return PushDeviceResponse(registered=True, message="This device will now receive Cine Vault alerts.")
+
+
+@router.delete("/push/devices", response_model=PushDeviceResponse)
+def unregister_push_device(
+  payload: PushDeviceUnregisterRequest,
+  db: Session | None = Depends(get_db),
+  current_user: dict[str, str] = Depends(get_current_user),
+) -> PushDeviceResponse:
+  removed = (
+    persistence.unregister_push_device_token(db, current_user["id"], payload.push_token)
+    if db
+    else demo_store.unregister_push_device_token(current_user["id"], payload.push_token)
+  )
+  return PushDeviceResponse(
+    registered=False,
+    message="This device will no longer receive Cine Vault alerts." if removed else "This device was not registered.",
+  )
 
 
 @router.post("/movies/{movie_id}/interest", response_model=MovieInterestResponse)

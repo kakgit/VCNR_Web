@@ -62,6 +62,21 @@ class ViewerReservationResponse(BaseModel):
   release_date: str | None = None
 
 
+class PushDeviceRegisterRequest(BaseModel):
+  push_token: str = Field(min_length=8, max_length=255)
+  platform: str | None = Field(default=None, max_length=20)
+  device_label: str | None = Field(default=None, max_length=255)
+
+
+class PushDeviceUnregisterRequest(BaseModel):
+  push_token: str = Field(min_length=8, max_length=255)
+
+
+class PushDeviceResponse(BaseModel):
+  registered: bool
+  message: str
+
+
 class ViewerNotificationResponse(BaseModel):
   id: int
   movie_id: str

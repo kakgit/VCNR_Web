@@ -92,6 +92,9 @@ def init_db() -> bool:
       connection.execute(text("ALTER TABLE reservations ADD COLUMN IF NOT EXISTS reservation_kind VARCHAR(20) NOT NULL DEFAULT 'online'"))
       connection.execute(text("ALTER TABLE reservations ADD COLUMN IF NOT EXISTS quality_code VARCHAR(40)"))
       connection.execute(text("ALTER TABLE content_delivery_enrollments ADD COLUMN IF NOT EXISTS quality_code VARCHAR(40) NOT NULL DEFAULT ''"))
+      connection.execute(text("ALTER TABLE push_device_tokens ADD COLUMN IF NOT EXISTS platform VARCHAR(20) NOT NULL DEFAULT 'unknown'"))
+      connection.execute(text("ALTER TABLE push_device_tokens ADD COLUMN IF NOT EXISTS device_label VARCHAR(255)"))
+      connection.execute(text("ALTER TABLE push_device_tokens ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT TRUE"))
       connection.execute(
         text(
           """

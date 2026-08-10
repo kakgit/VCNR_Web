@@ -74,6 +74,7 @@ class Settings:
   r2_secret_access_key: str
   r2_bucket_name: str
   r2_public_base_url: str
+  expo_access_token: str
 
 
 @lru_cache(maxsize=1)
@@ -114,4 +115,5 @@ def get_settings() -> Settings:
     r2_secret_access_key=os.getenv("R2_SECRET_ACCESS_KEY", "").strip(),
     r2_bucket_name=os.getenv("R2_BUCKET_NAME", "").strip(),
     r2_public_base_url=os.getenv("R2_PUBLIC_BASE_URL", "").strip().rstrip("/"),
+    expo_access_token=os.getenv("EXPO_ACCESS_TOKEN", "").strip(),
   )

@@ -4,6 +4,13 @@ from copy import deepcopy
 from datetime import datetime
 import hashlib
 
+from backend.core.push import (
+  build_push_message,
+  normalize_push_token,
+  send_push_messages_async,
+)
+from backend.core.time_utils import parse_app_datetime
+
 
 APPROVAL_STATUS_LABELS = {
   "draft": "Draft",
@@ -27,6 +34,7 @@ DEFAULT_STAR_PRICE_SETTINGS = {
   "effective_from": None,
 }
 MOVIE_NOTIFICATIONS: list[dict] = []
+PUSH_DEVICE_TOKENS: list[dict] = []
 
 
 def _approval_label(status: str) -> str:
@@ -125,6 +133,91 @@ def _get_viewer_reservation_status(movie_id: str, user_id: str | None, reservati
   return match["status"] if match else None
 
 
+def register_push_device_token(
+  user_id: str,
+  push_token: str,
+  platform: str | None = None,
+  device_label: str | None = None,
+) -> bool:
+  normalized_token = normalize_push_token(push_token)
+  if not normalized_token or not user_id:
+    return False
+
+  normalized_platform = str(platform or "unknown").strip().lower()[:20] or "unknown"
+  normalized_label = str(device_label or "").strip()[:255] or None
+
+  for record in PUSH_DEVICE_TOKENS:
+    if record["push_token"] == normalized_token:
+      record["user_id"] = user_id
+      record["platform"] = normalized_platform
+      if normalized_label:
+        record["device_label"] = normalized_label
+      record["is_active"] = True
+      return True
+
+  PUSH_DEVICE_TOKENS.append(
+    {
+      "user_id": user_id,
+      "push_token": normalized_token,
+      "platform": normalized_platform,
+      "device_label": normalized_label,
+      "is_active": True,
+    }
+  )
+  return True
+
+
+def unregister_push_device_token(user_id: str, push_token: str) -> bool:
+  normalized_token = normalize_push_token(push_token)
+  if not normalized_token:
+    return False
+  for record in PUSH_DEVICE_TOKENS:
+    if record["push_token"] == normalized_token and record["user_id"] == user_id:
+      record["is_active"] = False
+      return True
+  return False
+
+
+def _deactivate_push_tokens(tokens: list[str]) -> None:
+  dead = {normalize_push_token(token) for token in tokens}
+  for record in PUSH_DEVICE_TOKENS:
+    if record["push_token"] in dead:
+      record["is_active"] = False
+
+
+def dispatch_push_for_notifications(outbox: list[dict]) -> int:
+  if not outbox:
+    return 0
+
+  token_map: dict[str, list[str]] = {}
+  for record in PUSH_DEVICE_TOKENS:
+    if record.get("is_active"):
+      token_map.setdefault(record["user_id"], []).append(record["push_token"])
+  if not token_map:
+    return 0
+
+  messages: list[dict] = []
+  for entry in outbox:
+    for token in token_map.get(str(entry.get("user_id") or ""), []):
+      messages.append(
+        build_push_message(
+          token,
+          str(entry.get("title") or "Cine Vault"),
+          str(entry.get("message") or ""),
+          {
+            "movie_id": entry.get("movie_id"),
+            "notification_type": entry.get("notification_type"),
+          },
+        )
+      )
+
+  if not messages:
+    return 0
+
+  send_push_messages_async(messages, on_dead_tokens=_deactivate_push_tokens)
+  return len(messages)
+
+
 def _get_viewer_notifications(user_id: str | None, limit: int = 10) -> list[dict]:
   if not user_id:
     return []
@@ -162,6 +255,72 @@ def _notify_wishers_for_reserve_start(movie: dict) -> int:
         "created_at": datetime.utcnow().isoformat(timespec="minutes"),
       }
     )
+    count += 1
+  return count
+
+
+def _format_delivery_date_label(value: str | None) -> str:
+  parsed = parse_app_datetime(value)
+  if parsed is None:
+    normalized = str(value or "").strip()
+    return normalized or "the scheduled download date"
+  hour_label = parsed.strftime("%I").lstrip("0") or "12"
+  return f'{parsed.day} {parsed.strftime("%b %Y")}, {hour_label}:{parsed.strftime("%M %p")}'
+
+
+def _notify_reservers_for_download_ready(movie: dict, outbox: list[dict] | None = None) -> int:
+  delivery_start_at = str(movie.get("delivery_start_at") or "").strip()
+  if not delivery_start_at:
+    return 0
+
+  user_ids = sorted({
+    item["user_id"]
+    for item in MOVIE_RESERVATIONS
+    if item["movie_id"] == movie["id"] and item["status"] in {"blocked", "fulfilled"}
+  })
+  if not user_ids:
+    return 0
+
+  date_label = _format_delivery_date_label(delivery_start_at)
+  message = (
+    f'Download is confirmed for "{movie["title"]}". '
+    f"You can download this title from {date_label}."
+  )
+  already_notified = {
+    item["user_id"]
+    for item in MOVIE_NOTIFICATIONS
+    if item["movie_id"] == movie["id"]
+    and item["notification_type"] == "download_ready"
+    and item["message"] == message
+  }
+
+  count = 0
+  for user_id in user_ids:
+    if user_id in already_notified:
+      continue
+    MOVIE_NOTIFICATIONS.append(
+      {
+        "id": len(MOVIE_NOTIFICATIONS) + 1,
+        "user_id": user_id,
+        "movie_id": movie["id"],
+        "notification_type": "download_ready",
+        "title": movie["title"],
+        "message": message,
+        "is_read": False,
+        "read_at": None,
+        "created_at": datetime.utcnow().isoformat(timespec="minutes"),
+      }
+    )
+    if outbox is not None:
+      outbox.append(
+        {
+          "user_id": user_id,
+          "movie_id": movie["id"],
+          "notification_type": "download_ready",
+          "title": movie["title"],
+          "message": message,
+        }
+      )
     count += 1
   return count
 
@@ -632,6 +791,9 @@ def review_movie_approval(movie_id: str, action: str) -> dict | None:
         pending = _movie_payload(request["pending"])
         movie.update(pending)
       _update_movie_approval_status(movie, "approved")
+      push_outbox: list[dict] = []
+      _notify_reservers_for_download_ready(movie, push_outbox)
+      dispatch_push_for_notifications(push_outbox)
       return _decorate_movie(movie)
     _update_movie_approval_status(movie, "changes_requested")
     return _decorate_movie(movie)

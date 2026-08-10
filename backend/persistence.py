@@ -10,6 +10,11 @@ import secrets
 
 from sqlalchemy.orm import Session
 
+from backend.core.push import (
+  build_push_message,
+  normalize_push_token,
+  send_push_messages_async,
+)
 from backend.core.storage import list_media_keys, media_public_url, r2_enabled
 from backend.core.time_utils import is_app_time_reached, parse_app_datetime
 from backend.data.demo_store import ADMIN_STATE, MOVIES, PUBLISH_QUEUE, USERS
@@ -27,6 +32,7 @@ from backend.models import (
   MovieChangeRequestRecord,
   MovieWishRecord,
   PublishSubmissionRecord,
+  PushDeviceTokenRecord,
   QueueItemRecord,
   ReservationRecord,
   TitleAudioTrackRecord,
@@ -1142,6 +1148,158 @@ def _sync_live_release_entitlements(session: Session, movies: list[MovieRecord])
       commit_movie_reservations(session, movie.id)
 
 
+def register_push_device_token(
+  session: Session,
+  user_id: str,
+  push_token: str,
+  platform: str | None = None,
+  device_label: str | None = None,
+) -> bool:
+  """Store or re-activate an Expo push token for a signed-in viewer."""
+  normalized_token = normalize_push_token(push_token)
+  if not normalized_token or not user_id:
+    return False
+
+  normalized_platform = str(platform or "unknown").strip().lower()[:20] or "unknown"
+  normalized_label = str(device_label or "").strip()[:255] or None
+
+  existing = (
+    session.query(PushDeviceTokenRecord)
+    .filter(PushDeviceTokenRecord.push_token == normalized_token)
+    .first()
+  )
+  now = datetime.utcnow()
+  if existing is None:
+    session.add(
+      PushDeviceTokenRecord(
+        user_id=user_id,
+        push_token=normalized_token,
+        platform=normalized_platform,
+        device_label=normalized_label,
+        is_active=True,
+        created_at=now,
+        updated_at=now,
+      )
+    )
+  else:
+    # A shared device can be handed to another account, so always re-point the
+    # token at whoever registered it last.
+    existing.user_id = user_id
+    existing.platform = normalized_platform
+    if normalized_label:
+      existing.device_label = normalized_label
+    existing.is_active = True
+    existing.updated_at = now
+
+  session.commit()
+  return True
+
+
+def unregister_push_device_token(session: Session, user_id: str, push_token: str) -> bool:
+  normalized_token = normalize_push_token(push_token)
+  if not normalized_token:
+    return False
+
+  record = (
+    session.query(PushDeviceTokenRecord)
+    .filter(
+      PushDeviceTokenRecord.push_token == normalized_token,
+      PushDeviceTokenRecord.user_id == user_id,
+    )
+    .first()
+  )
+  if record is None:
+    return False
+
+  record.is_active = False
+  record.updated_at = datetime.utcnow()
+  session.commit()
+  return True
+
+
+def _list_active_push_tokens(session: Session, user_ids: list[str]) -> dict[str, list[str]]:
+  if not user_ids:
+    return {}
+  rows = (
+    session.query(PushDeviceTokenRecord.user_id, PushDeviceTokenRecord.push_token)
+    .filter(
+      PushDeviceTokenRecord.user_id.in_(user_ids),
+      PushDeviceTokenRecord.is_active.is_(True),
+    )
+    .all()
+  )
+  token_map: dict[str, list[str]] = {}
+  for user_id, token in rows:
+    normalized = normalize_push_token(token)
+    if normalized:
+      token_map.setdefault(user_id, []).append(normalized)
+  return token_map
+
+
+def _deactivate_push_tokens(tokens: list[str]) -> None:
+  """Retire tokens Expo reported as unusable (app uninstalled, etc.)."""
+  cleaned = [normalize_push_token(token) for token in tokens]
+  cleaned = [token for token in cleaned if token]
+  if not cleaned:
+    return
+
+  # This runs on the push dispatch thread, so it needs its own short-lived
+  # session instead of reusing the request-scoped one.
+  from backend.db import SessionLocal
+
+  session = SessionLocal()
+  try:
+    session.query(PushDeviceTokenRecord).filter(
+      PushDeviceTokenRecord.push_token.in_(cleaned)
+    ).update(
+      {PushDeviceTokenRecord.is_active: False, PushDeviceTokenRecord.updated_at: datetime.utcnow()},
+      synchronize_session=False,
+    )
+    session.commit()
+  except Exception:
+    session.rollback()
+  finally:
+    session.close()
+
+
+def dispatch_push_for_notifications(session: Session, outbox: list[dict]) -> int:
+  """Send OS-level pushes for freshly stored notifications.
+
+  ``outbox`` entries are produced by the notification helpers and carry the same
+  text as the stored rows, so a viewer whose app is closed still receives the
+  message on their lock screen while the in-app list stays in sync.
+  """
+  if not outbox:
+    return 0
+
+  user_ids = sorted({str(entry.get("user_id") or "") for entry in outbox if entry.get("user_id")})
+  token_map = _list_active_push_tokens(session, user_ids)
+  if not token_map:
+    return 0
+
+  messages: list[dict] = []
+  for entry in outbox:
+    tokens = token_map.get(str(entry.get("user_id") or ""), [])
+    for token in tokens:
+      messages.append(
+        build_push_message(
+          token,
+          str(entry.get("title") or "Cine Vault"),
+          str(entry.get("message") or ""),
+          {
+            "movie_id": entry.get("movie_id"),
+            "notification_type": entry.get("notification_type"),
+          },
+        )
+      )
+
+  if not messages:
+    return 0
+
+  send_push_messages_async(messages, on_dead_tokens=_deactivate_push_tokens)
+  return len(messages)
+
+
 def _notification_to_dict(notification: NotificationRecord) -> dict:
   return {
     "id": notification.id,
@@ -1191,6 +1349,86 @@ def _notify_wishers_for_reserve_start(session: Session, movie: MovieRecord) -> i
         created_at=datetime.utcnow(),
       )
     )
+    count += 1
+  return count
+
+
+def _format_delivery_date_label(value: str | None) -> str:
+  parsed = parse_app_datetime(value)
+  if parsed is None:
+    normalized = str(value or "").strip()
+    return normalized or "the scheduled download date"
+  hour_label = parsed.strftime("%I").lstrip("0") or "12"
+  return f'{parsed.day} {parsed.strftime("%b %Y")}, {hour_label}:{parsed.strftime("%M %p")}'
+
+
+def _notify_reservers_for_download_ready(
+  session: Session,
+  movie: MovieRecord,
+  outbox: list[dict] | None = None,
+) -> int:
+  delivery_start_at = str(movie.delivery_start_at or "").strip()
+  if not delivery_start_at:
+    return 0
+
+  linked_title = _get_linked_title_by_movie_id(session, movie.id)
+  if linked_title is None:
+    return 0
+
+  reserved_user_ids = [
+    row[0]
+    for row in session.query(ReservationRecord.user_id)
+    .filter(
+      ReservationRecord.title_id == linked_title.id,
+      ReservationRecord.status.in_(["blocked", "fulfilled"]),
+    )
+    .distinct()
+    .all()
+  ]
+  if not reserved_user_ids:
+    return 0
+
+  date_label = _format_delivery_date_label(delivery_start_at)
+  message = (
+    f'Download is confirmed for "{movie.title}". '
+    f"You can download this title from {date_label}."
+  )
+
+  already_notified = {
+    row[0]
+    for row in session.query(NotificationRecord.user_id)
+    .filter(
+      NotificationRecord.movie_id == movie.id,
+      NotificationRecord.notification_type == "download_ready",
+      NotificationRecord.message == message,
+    )
+    .all()
+  }
+
+  count = 0
+  for user_id in reserved_user_ids:
+    if user_id in already_notified:
+      continue
+    session.add(
+      NotificationRecord(
+        user_id=user_id,
+        movie_id=movie.id,
+        notification_type="download_ready",
+        title=movie.title,
+        message=message,
+        created_at=datetime.utcnow(),
+      )
+    )
+    if outbox is not None:
+      outbox.append(
+        {
+          "user_id": user_id,
+          "movie_id": movie.id,
+          "notification_type": "download_ready",
+          "title": movie.title,
+          "message": message,
+        }
+      )
     count += 1
   return count
 
@@ -2301,7 +2539,12 @@ def review_movie_approval(session: Session, movie_id: str, action: str) -> dict 
       _set_linked_title_cast_credits(session, movie.id, pending_snapshot.get("cast_credits", []))
       session.delete(change_request)
     approval_status = _set_movie_approval_status(session, movie, "approved")
+    push_outbox: list[dict] = []
+    _notify_reservers_for_download_ready(session, movie, push_outbox)
     session.commit()
+    # Push only after the rows are durable so a failed commit cannot send a
+    # download date that was never approved.
+    dispatch_push_for_notifications(session, push_outbox)
     session.refresh(movie)
     return _movie_to_dict_for_session(session, movie, approval_status)
 

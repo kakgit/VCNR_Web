@@ -218,6 +218,15 @@ def dispatch_push_for_notifications(outbox: list[dict]) -> int:
   return len(messages)
 
 
+def list_all_active_push_tokens() -> dict[str, list[str]]:
+  """Return all active push tokens grouped by user_id."""
+  token_map: dict[str, list[str]] = {}
+  for record in PUSH_DEVICE_TOKENS:
+    if record.get("is_active"):
+      token_map.setdefault(record["user_id"], []).append(record["push_token"])
+  return token_map
+
+
 def _get_viewer_notifications(user_id: str | None, limit: int = 10) -> list[dict]:
   if not user_id:
     return []

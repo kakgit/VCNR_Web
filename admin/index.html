@@ -474,6 +474,9 @@
               <span>Delivery Queue</span>
               <b id="adminDeliveryQueueCount">0</b>
             </button>
+            <button type="button" class="admin-nav-link" data-admin-panel-target="test-push" id="adminTestPushNavLink">
+              <span>Test Push</span>
+            </button>
             <button type="button" class="admin-nav-link admin-nav-sub-link" id="adminArchiveNavLink">
               <span>Archive</span>
               <b id="adminArchiveNavCount">0</b>
@@ -501,7 +504,7 @@
             </div>
           </header>
 
-          <p class="helper-text admin-helper-banner hidden" id="adminHelper"></p>
+          <p class="helper-text admin-helper-banner" id="adminHelper"></p>
 
           <section class="admin-panel" data-admin-panel-view="super-admin">
             <div class="admin-summary-grid">
@@ -768,6 +771,34 @@
               </div>
               <div id="adminDeliveryQueueSummary" class="admin-summary-grid"></div>
               <div id="adminDeliveryQueueList" class="queue-list"></div>
+            </article>
+          </section>
+
+          <section class="admin-panel" data-admin-panel-view="test-push">
+            <article class="workspace-panel admin-panel-card">
+              <div class="admin-list-header">
+                <div>
+                  <p class="section-kicker">Test Push Notifications</p>
+                  <h2>Broadcast a test alert to all registered devices</h2>
+                  <p class="helper-text">Use this to verify that OS-level push delivery (FCM/APNs) is working. Lock your phone or swipe the app away before testing — the alert should appear on the lock screen even when the app is closed.</p>
+                </div>
+              </div>
+              <form id="adminTestPushForm" class="admin-user-editor-form">
+                <div class="admin-user-editor-grid">
+                  <label class="field field-full">
+                    <span>Title (optional)</span>
+                    <input id="adminTestPushTitle" type="text" placeholder="Cine Vault Test" maxlength="100">
+                  </label>
+                  <label class="field field-full">
+                    <span>Message (optional)</span>
+                    <textarea id="adminTestPushMessage" placeholder="Push notifications are working!" maxlength="200" rows="3"></textarea>
+                  </label>
+                </div>
+                <div class="taxonomy-form-actions">
+                  <button type="submit" class="primary-btn" id="adminTestPushSubmit">Send Test Push to All Devices</button>
+                </div>
+                <p id="adminTestPushFeedback" class="helper-text" aria-live="polite"></p>
+              </form>
             </article>
           </section>
         </div>

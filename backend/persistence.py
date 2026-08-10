@@ -1236,6 +1236,21 @@ def _list_active_push_tokens(session: Session, user_ids: list[str]) -> dict[str,
   return token_map
 
 
+def _list_all_active_push_tokens(session: Session) -> dict[str, list[str]]:
+  """Return all active push tokens grouped by user_id."""
+  rows = (
+    session.query(PushDeviceTokenRecord.user_id, PushDeviceTokenRecord.push_token)
+    .filter(PushDeviceTokenRecord.is_active.is_(True))
+    .all()
+  )
+  token_map: dict[str, list[str]] = {}
+  for user_id, token in rows:
+    normalized = normalize_push_token(token)
+    if normalized:
+      token_map.setdefault(user_id, []).append(normalized)
+  return token_map
+
+
 def _deactivate_push_tokens(tokens: list[str]) -> None:
   """Retire tokens Expo reported as unusable (app uninstalled, etc.)."""
   cleaned = [normalize_push_token(token) for token in tokens]

@@ -24,6 +24,8 @@ let selectedMovieId = movies[0]?.id || "";
 let activeView = "viewer";
 let sessionToken = window.localStorage.getItem("cineproxima_session_token") || "";
 let viewerSessionProfile = null;
+let viewerNotificationTimerId = 0;
+const VIEWER_NOTIFICATION_POLL_MS = 60000;
 let activeAccountPanel = "profile";
 let activeAccountEntry = "account";
 let activeWishMovieId = "";
@@ -76,6 +78,7 @@ const accountWalletDiscs = document.getElementById("accountWalletDiscs");
 const accountWalletValue = document.getElementById("accountWalletValue");
 const accountMoviesList = document.getElementById("accountMoviesList");
 const accountReservationsList = document.getElementById("accountReservationsList");
+const accountNotificationsList = document.getElementById("accountNotificationsList");
 const accountSettingsRole = document.getElementById("accountSettingsRole");
 const accountSettingsStatus = document.getElementById("accountSettingsStatus");
 const accountSettingsEmail = document.getElementById("accountSettingsEmail");
@@ -1188,6 +1191,41 @@ function renderAccountList(container, items, emptyText) {
   `).join("");
 }
 
+function formatNotificationTimestamp(value) {
+  const normalized = String(value || "").trim();
+  if (!normalized) {
+    return "";
+  }
+  const parsed = new Date(normalized.endsWith("Z") ? normalized : `${normalized}Z`);
+  if (Number.isNaN(parsed.getTime())) {
+    return normalized;
+  }
+  return parsed.toLocaleString("en-IN", {
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
+function renderAccountNotifications(notifications) {
+  if (!accountNotificationsList) {
+    return;
+  }
+  if (!notifications.length) {
+    accountNotificationsList.innerHTML = `<p class="account-empty-copy">No notifications are available yet.</p>`;
+    return;
+  }
+  accountNotificationsList.innerHTML = notifications.map((notification) => `
+    <article class="account-list-item account-notification-item">
+      <strong>${escapeHtml(notification.title || "Notification")}</strong>
+      <span class="account-notification-message">${escapeHtml(notification.message || "")}</span>
+      <span class="account-notification-time">${escapeHtml(formatNotificationTimestamp(notification.created_at))}</span>
+    </article>
+  `).join("");
+}
+
 function renderAccountView() {
   const profile = viewerSessionProfile;
   const stars = Number(profile?.star_balance ?? 0);
@@ -1261,6 +1299,7 @@ function renderAccountView() {
     })),
     "No reserved titles are listed yet."
   );
+  renderAccountNotifications(Array.isArray(profile?.notifications) ? profile.notifications : []);
 }
 
 function setAccountPanel(panel) {
@@ -1286,6 +1325,7 @@ function handleViewerSignout() {
 
 function clearSessionToken() {
   saveSessionToken("");
+  stopViewerNotificationPolling();
   viewerSessionProfile = null;
   viewerMovieDetails.clear();
   movies = movies.map((movie) => ({ ...movie, viewerWishKind: "" }));
@@ -2016,6 +2056,7 @@ async function loadAdminTaxonomiesFromApi() {
 
 async function loadViewerSessionFromApi() {
   if (!sessionToken) {
+    stopViewerNotificationPolling();
     viewerSessionProfile = null;
     syncViewerHeader();
     renderAccountView();
@@ -2028,7 +2069,39 @@ async function loadViewerSessionFromApi() {
   await loadMoviesFromApi();
   syncViewerHeader();
   renderAccountView();
+  startViewerNotificationPolling();
   return profile;
+}
+
+async function refreshViewerNotifications() {
+  if (!sessionToken || !viewerSessionProfile) {
+    return;
+  }
+  try {
+    const profile = await apiRequest("/auth/me");
+    viewerSessionProfile = profile;
+    syncViewerHeader();
+    renderAccountView();
+  } catch (error) {
+    // Keep the last known session data when a background refresh fails.
+  }
+}
+
+function startViewerNotificationPolling() {
+  stopViewerNotificationPolling();
+  if (!sessionToken) {
+    return;
+  }
+  viewerNotificationTimerId = window.setInterval(() => {
+    void refreshViewerNotifications();
+  }, VIEWER_NOTIFICATION_POLL_MS);
+}
+
+function stopViewerNotificationPolling() {
+  if (viewerNotificationTimerId) {
+    window.clearInterval(viewerNotificationTimerId);
+    viewerNotificationTimerId = 0;
+  }
 }
 
 async function bootstrapAppData() {
@@ -8664,6 +8737,50 @@ if (adminTaxonomyList) {
       }
     } catch (error) {
       adminHelper.textContent = error.message;
+    }
+  });
+}
+
+const adminTestPushForm = document.getElementById("adminTestPushForm");
+const adminTestPushTitle = document.getElementById("adminTestPushTitle");
+const adminTestPushMessage = document.getElementById("adminTestPushMessage");
+const adminTestPushFeedback = document.getElementById("adminTestPushFeedback");
+const adminTestPushSubmit = document.getElementById("adminTestPushSubmit");
+
+if (adminTestPushForm) {
+  adminTestPushForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (adminTestPushSubmit) {
+      adminTestPushSubmit.disabled = true;
+      adminTestPushSubmit.textContent = "Sending...";
+    }
+    if (adminTestPushFeedback) {
+      adminTestPushFeedback.textContent = "";
+    }
+    try {
+      const payload = {};
+      if (adminTestPushTitle && adminTestPushTitle.value.trim()) {
+        payload.title = adminTestPushTitle.value.trim();
+      }
+      if (adminTestPushMessage && adminTestPushMessage.value.trim()) {
+        payload.message = adminTestPushMessage.value.trim();
+      }
+      const response = await apiRequest("/admin/push/test", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+      if (adminTestPushFeedback) {
+        adminTestPushFeedback.textContent = response.message;
+      }
+    } catch (error) {
+      if (adminTestPushFeedback) {
+        adminTestPushFeedback.textContent = error.message;
+      }
+    } finally {
+      if (adminTestPushSubmit) {
+        adminTestPushSubmit.disabled = false;
+        adminTestPushSubmit.textContent = "Send Test Push to All Devices";
+      }
     }
   });
 }

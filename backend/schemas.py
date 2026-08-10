@@ -780,6 +780,11 @@ class AdminActionResponse(BaseModel):
   summary: AdminSummaryResponse
 
 
+class AdminPushTestRequest(BaseModel):
+  title: str | None = None
+  message: str | None = None
+
+
 class StarPricingSettingsResponse(BaseModel):
   price_inr: float = 50
   price_usd: float = 0.0

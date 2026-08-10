@@ -32,7 +32,7 @@ from sqlalchemy.orm import Session
 
 from backend import auth as session_auth
 from backend.core.config import get_settings
-from backend.core.push import is_expo_push_token
+from backend.core.push import build_push_message, is_expo_push_token, send_push_messages_async
 from backend.core.storage import (
   chunk_exists,
   chunk_public_url,
@@ -60,6 +60,7 @@ from backend.db import get_db
 from backend.models import ContentDeliveryEnrollmentRecord, ReservationRecord, TitleRecord, UserRecord
 from backend.schemas import (
   AdminActionResponse,
+  AdminPushTestRequest,
   ApprovalUpdateRequest,
   ApprovalReviewResponse,
   AdminMovieCreateRequest,
@@ -5187,6 +5188,41 @@ def admin_reward_campaign_boost(
   summary = persistence.boost_reward_campaign(db) if db else demo_store.boost_reward_campaign()
   return AdminActionResponse(
     message="Reward campaign boost recorded.",
+    summary=AdminSummaryResponse(**summary),
+  )
+
+
+@router.post("/admin/push/test", response_model=AdminActionResponse)
+def admin_push_test(
+  payload: AdminPushTestRequest | None = None,
+  db: Session | None = Depends(get_db),
+  _: dict[str, str] = Depends(require_admin),
+) -> AdminActionResponse:
+  """Broadcast a test push to every registered device token."""
+  title = "Cine Vault Test"
+  body = "Push notifications are working!"
+  if payload:
+    title = (payload.title or title).strip()[:100] or title
+    body = (payload.message or body).strip()[:200] or body
+
+  if db:
+    tokens = _list_all_active_push_tokens(db)
+  else:
+    tokens = demo_store.list_all_active_push_tokens()
+
+  unique_tokens = sorted({token for token_list in tokens.values() for token in token_list})
+  if not unique_tokens:
+    summary = persistence.get_admin_summary(db) if db else demo_store.get_admin_summary()
+    return AdminActionResponse(
+      message="No registered devices found. Open the app and sign in first.",
+      summary=AdminSummaryResponse(**summary),
+    )
+
+  messages = [build_push_message(token, title, body, {"notification_type": "test_push"}) for token in unique_tokens]
+  send_push_messages_async(messages)
+  summary = persistence.get_admin_summary(db) if db else demo_store.get_admin_summary()
+  return AdminActionResponse(
+    message=f"Test push queued for {len(unique_tokens)} device(s).",
     summary=AdminSummaryResponse(**summary),
   )
 

@@ -2573,16 +2573,30 @@ def admin_release_movie_main_content(
   db: Session | None = Depends(get_db),
   _: dict[str, str] = Depends(require_admin),
 ) -> AdminMovieActionResponse:
-  release_date_time = payload.release_date_time.strip()
+  # If both fields are empty/None, clear the release schedule
+  if not payload.release_date_time and not payload.release_passcode:
+    movie = persistence.clear_movie_content_release_state(db, movie_id) if db else demo_store.clear_movie_content_release_state(movie_id)
+    if movie is None:
+      raise HTTPException(status_code=404, detail="Movie not found.")
+    return AdminMovieActionResponse(
+      item=_sanitize_movie_payload(movie),
+      message=f'Main content release schedule cleared for "{movie["title"]}".',
+    )
+
+  # Otherwise, schedule the release (both fields required)
+  release_date_time = (payload.release_date_time or "").strip()
+  release_passcode = (payload.release_passcode or "").strip()
   if not release_date_time:
     raise HTTPException(status_code=400, detail="Choose a future release date and time.")
+  if not release_passcode:
+    raise HTTPException(status_code=400, detail="Enter the release passcode.")
   parsed_release_date = parse_app_datetime(release_date_time)
   if parsed_release_date is None:
     raise HTTPException(status_code=400, detail="Choose a valid release date and time.")
   if parsed_release_date <= app_now():
     raise HTTPException(status_code=400, detail="Release date and time must be in the future.")
 
-  movie = persistence.release_movie_main_content(db, movie_id, release_date_time, payload.release_passcode) if db else demo_store.release_movie_main_content(movie_id, release_date_time, payload.release_passcode)
+  movie = persistence.release_movie_main_content(db, movie_id, release_date_time, release_passcode) if db else demo_store.release_movie_main_content(movie_id, release_date_time, release_passcode)
   if movie is None:
     raise HTTPException(status_code=404, detail="Movie not found.")
   return AdminMovieActionResponse(

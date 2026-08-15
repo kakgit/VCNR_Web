@@ -638,8 +638,10 @@ def start_movie_reserve(movie_id: str) -> dict | None:
       continue
     if not movie.get("reserve_enabled", False) and not _normalize_online_pricing_options(movie.get("online_pricing_options", [])):
       raise ValueError("Please add at least one online movie quality with pricing before starting Reserve Now.")
-    movie["reserve_enabled"] = not movie.get("reserve_enabled", False)
-    if movie["reserve_enabled"]:
+    if movie.get("reserve_enabled", False):
+      _refund_blocked_reservations_for_movie(movie)
+    else:
+      movie["reserve_enabled"] = True
       movie["reserve_star_price"] = int(movie.get("stars_required", 0) or 0)
       _notify_wishers_for_reserve_start(movie)
     return _decorate_movie(movie)

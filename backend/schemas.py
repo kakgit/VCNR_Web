@@ -259,8 +259,8 @@ class PublishMovieRequest(BaseModel):
 
 
 class ReleaseMainContentRequest(BaseModel):
-  release_date_time: str = Field(min_length=3)
-  release_passcode: str = Field(min_length=1, max_length=255)
+  release_date_time: str | None = Field(default=None, min_length=3)
+  release_passcode: str | None = Field(default=None, min_length=1, max_length=255)
 
 
 class DeliveryPreferenceRequest(BaseModel):

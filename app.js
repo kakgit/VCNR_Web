@@ -263,6 +263,7 @@ const adminReleaseMainContentCopy = document.getElementById("adminReleaseMainCon
 const adminReleaseMainContentDateTime = document.getElementById("adminReleaseMainContentDateTime");
 const adminReleaseMainContentPasscode = document.getElementById("adminReleaseMainContentPasscode");
 const adminReleaseMainContentCancelButton = document.getElementById("adminReleaseMainContentCancelButton");
+const adminReleaseMainContentClearButton = document.getElementById("adminReleaseMainContentClearButton");
 const adminApprovalModal = document.getElementById("adminApprovalModal");
 const adminApprovalMovieId = document.getElementById("adminApprovalMovieId");
 const adminApprovalCopy = document.getElementById("adminApprovalCopy");
@@ -5732,6 +5733,25 @@ async function updateAdminMovieReleaseMainContentRemote(movieId, payload) {
   adminHelper.textContent = response.message;
 }
 
+async function clearAdminMovieReleaseScheduleRemote(movieId) {
+  const response = await apiRequest(`/admin/movies/${movieId}/release-main-content`, {
+    method: "POST",
+    body: JSON.stringify({
+      release_date_time: null,
+      release_passcode: null,
+    }),
+  });
+
+  const updatedMovie = normalizeMovie(response.item);
+  updateMovieCollections(updatedMovie);
+  renderAdminMovieList();
+  renderAdminArchiveMovieList();
+  renderMovieGrid();
+  syncDetailPanel();
+  closeAdminReleaseMainContentModal();
+  adminHelper.textContent = response.message;
+}
+
 async function presignAndUploadMediaAsset(movieId, kind, file, orientation) {
   const presignForm = new FormData();
   presignForm.append("kind", kind);
@@ -7343,7 +7363,7 @@ function openAdminMovieReserveToggleDialog(movie) {
   };
   if (adminDeleteCopy) {
     adminDeleteCopy.textContent = stopping
-      ? `Stop Reserve Now for "${movie.title}"? New viewers will no longer be able to reserve this title, but existing blocked reservations will remain active.`
+      ? `Stop Reserve Now for "${movie.title}"? New viewers will no longer be able to reserve this title, all active blocked reservations will be refunded, and those titles will leave users' Reserved list.`
       : `Start Reserve Now for "${movie.title}"? Viewers with enough stars will be able to reserve this title and block the required stars until release or refund conditions.`;
   }
   if (adminDeleteKicker) {
@@ -7843,6 +7863,21 @@ if (adminReleaseMainContentCancelButton) {
   });
 }
 
+if (adminReleaseMainContentClearButton) {
+  adminReleaseMainContentClearButton.addEventListener("click", async () => {
+    const movieId = adminReleaseMainContentMovieId?.value.trim();
+    if (!movieId) {
+      adminHelper.textContent = "Choose a title before clearing the schedule.";
+      return;
+    }
+    try {
+      await clearAdminMovieReleaseScheduleRemote(movieId);
+    } catch (error) {
+      adminHelper.textContent = error.message;
+    }
+  });
+}
+
 if (adminApprovalCancelButton) {
   adminApprovalCancelButton.addEventListener("click", () => {
     closeAdminApprovalReviewModal();
@@ -8038,6 +8073,13 @@ if (adminReleaseMainContentForm) {
       if (!movieId) {
         throw new Error("Choose a title before saving release details.");
       }
+
+      // If both fields are empty, clear the release schedule
+      if (!releaseDateTime && !releasePasscode) {
+        await clearAdminMovieReleaseScheduleRemote(movieId);
+        return;
+      }
+
       const parsedDate = releaseDateTime ? new Date(releaseDateTime) : null;
       if (!releaseDateTime || !parsedDate || Number.isNaN(parsedDate.getTime())) {
         throw new Error("Choose a valid future release date and time.");

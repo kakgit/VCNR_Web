@@ -1693,13 +1693,15 @@ def start_movie_reserve(session: Session, movie_id: str) -> dict | None:
     raise ValueError("Reserve Now cannot be restarted after this title has moved into Buy Now.")
   if not movie.reserve_enabled and not _load_online_pricing_options(movie.online_pricing_options):
     raise ValueError("Please add at least one online movie quality with pricing before starting Reserve Now.")
-  movie.reserve_enabled = not movie.reserve_enabled
+
   if movie.reserve_enabled:
+    _refund_blocked_reservations_for_movie(session, movie, "stopped")
+  else:
+    movie.reserve_enabled = True
     movie.reserve_star_price = movie.stars_required
     movie.buy_now_enabled = False
-  linked_title = _ensure_linked_title(session, movie)
-  linked_title.reserve_enabled = movie.reserve_enabled
-  if movie.reserve_enabled:
+    linked_title = _ensure_linked_title(session, movie)
+    linked_title.reserve_enabled = True
     linked_title.reserve_star_price = movie.stars_required
     linked_title.buy_now_enabled = False
     _notify_wishers_for_reserve_start(session, movie)
@@ -1768,10 +1770,10 @@ def commit_movie_reservations(session: Session, movie_id: str) -> tuple[dict, in
   return _movie_to_dict_for_session(session, movie, approval_status), committed_count
 
 
-def _refund_blocked_reservations_for_movie(session: Session, movie: MovieRecord) -> None:
+def _refund_blocked_reservations_for_movie(session: Session, movie: MovieRecord, reason: str = "archived") -> int:
   linked_title = _get_linked_title_by_movie_id(session, movie.id)
   if linked_title is None:
-    return
+    linked_title = _ensure_linked_title(session, movie)
 
   blocked_reservations = (
     session.query(ReservationRecord)
@@ -1782,6 +1784,7 @@ def _refund_blocked_reservations_for_movie(session: Session, movie: MovieRecord)
     .all()
   )
 
+  refunded_count = 0
   for reservation in blocked_reservations:
     wallet = session.query(WalletRecord).filter(WalletRecord.user_id == reservation.user_id).first()
     if wallet is None:
@@ -1801,13 +1804,30 @@ def _refund_blocked_reservations_for_movie(session: Session, movie: MovieRecord)
         disks_delta=0,
         reference_type="movie",
         reference_id=movie.id,
-        note=f'Refunded blocked stars for archived title "{movie.title}"',
+        note=f'Refunded blocked stars for {reason} title "{movie.title}"',
         created_at=datetime.utcnow(),
       )
     )
+    if reservation.reservation_kind == "online" and reservation.quality_code:
+      enrollment = (
+        session.query(ContentDeliveryEnrollmentRecord)
+        .filter(
+          ContentDeliveryEnrollmentRecord.movie_id == movie.id,
+          ContentDeliveryEnrollmentRecord.user_id == reservation.user_id,
+          ContentDeliveryEnrollmentRecord.quality_code == str(reservation.quality_code or "").strip().lower(),
+          ContentDeliveryEnrollmentRecord.status.in_(["accepted", "queued"]),
+        )
+        .first()
+      )
+      if enrollment is not None:
+        enrollment.status = "cancelled"
+        enrollment.slot_token = None
+        enrollment.slot_expires_at = None
+        enrollment.updated_at = datetime.utcnow()
     reservation.status = "refunded"
     reservation.release_delivery_state = "cancelled"
     reservation.updated_at = datetime.utcnow()
+    refunded_count += 1
 
   movie.reserve_enabled = False
   movie.buy_now_enabled = False
@@ -1816,6 +1836,7 @@ def _refund_blocked_reservations_for_movie(session: Session, movie: MovieRecord)
   linked_title.reserve_enabled = False
   linked_title.buy_now_enabled = False
   linked_title.current_reserved_stars = 0
+  return refunded_count
 
 
 def get_platform_summary(session: Session) -> dict:

@@ -4947,6 +4947,41 @@ async function uploadAdminMovieConvertedContentPackageRemote(movieId, files) {
     throw new Error("The selected folder must contain manifest.json.");
   }
   const manifestJson = await manifestFile.text();
+  let manifest;
+  try {
+    manifest = JSON.parse(manifestJson);
+  } catch (error) {
+    throw new Error("The selected manifest.json is invalid.");
+  }
+  const configuredQualities = adminContentQualityState.items || [];
+  const configuredByCode = new Map(configuredQualities.map((item) => [String(item.qualityCode || "").toLowerCase(), item]));
+  const configuredByLabel = new Map(configuredQualities.map((item) => [String(item.qualityLabel || item.qualityCode || "").trim().toLowerCase(), item]));
+  const sourceQualityMap = new Map();
+  (manifest.qualities || []).forEach((quality) => {
+    const sourceCode = String(quality.quality_code || quality.qualityCode || "").trim().toLowerCase();
+    const sourceLabel = String(quality.quality_label || quality.qualityLabel || sourceCode).trim().toLowerCase();
+    const matched = configuredByCode.get(sourceCode) || configuredByLabel.get(sourceLabel);
+    if (sourceCode && matched) {
+      sourceQualityMap.set(sourceCode, matched.qualityCode);
+    }
+  });
+  const missingConfigured = configuredQualities.filter((item) => {
+    return !Array.from(sourceQualityMap.values()).some((value) => String(value || "").toLowerCase() === String(item.qualityCode || "").toLowerCase());
+  });
+  if (missingConfigured.length) {
+    const expected = configuredQualities.map((item) => `${item.qualityCode} (${item.qualityLabel})`).join(", ");
+    const received = (manifest.qualities || []).map((item) => `${item.quality_code || item.qualityCode || "?"} (${item.quality_label || item.qualityLabel || "No label"})`).join(", ") || "none";
+    throw new Error(`Converted package quality mismatch. Expected: ${expected}. Received: ${received}.`);
+  }
+  const chunkQualityByName = new Map();
+  (manifest.files || []).forEach((entry) => {
+    const name = String(entry.name || "").trim();
+    const sourceCode = String(entry.quality_code || entry.qualityCode || "").trim().toLowerCase();
+    const finalCode = sourceQualityMap.get(sourceCode);
+    if (name && finalCode) {
+      chunkQualityByName.set(name, finalCode);
+    }
+  });
   const uploadFiles = selectedFiles.filter((file) => {
     const name = file.name.toLowerCase();
     return name.endsWith(".vcnr") || name.endsWith(".torrent");
@@ -4961,6 +4996,17 @@ async function uploadAdminMovieConvertedContentPackageRemote(movieId, files) {
     adminHelper.textContent = `Uploading ${index + 1} of ${uploadFiles.length}: ${file.name}`;
     const presignForm = new FormData();
     presignForm.append("relative_path", relativePath);
+    const pathParts = relativePath.replace(/\\/g, "/").split("/").filter(Boolean);
+    const sourceFolder = pathParts.includes("content")
+      ? pathParts[pathParts.indexOf("content") + 1]
+      : pathParts.length > 1 ? pathParts[pathParts.length - 2] : "";
+    const finalQualityCode = file.name.toLowerCase().endsWith(".vcnr")
+      ? chunkQualityByName.get(file.name)
+      : sourceQualityMap.get(String(sourceFolder || "").toLowerCase());
+    if (!finalQualityCode) {
+      throw new Error(`Could not match ${file.name} to a configured title quality.`);
+    }
+    presignForm.append("final_quality_code", finalQualityCode);
     const presign = await apiUploadRequest(`/admin/movies/${movieId}/assets/content-package/presign`, presignForm);
     const putResponse = await fetch(presign.upload_url, {
       method: "PUT",

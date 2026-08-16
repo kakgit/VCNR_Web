@@ -2127,7 +2127,7 @@ async def _store_converted_content_package(
   return manifest, total_chunks
 
 
-def _converted_content_destination(movie_id: str, relative_path: str) -> tuple[str, str, str]:
+def _converted_content_destination(movie_id: str, relative_path: str, final_quality_code: str | None = None) -> tuple[str, str, str]:
   normalized_path = _normalize_upload_relative_path(relative_path)
   path = Path(normalized_path)
   filename = path.name
@@ -2135,7 +2135,7 @@ def _converted_content_destination(movie_id: str, relative_path: str) -> tuple[s
     raise HTTPException(status_code=400, detail="Invalid converted content file path.")
   suffix = path.suffix.lower()
   parts = normalized_path.split("/")
-  quality_code = _normalize_quality_code(parts[0] if len(parts) > 1 else path.stem)
+  quality_code = _normalize_quality_code(final_quality_code or (parts[0] if len(parts) > 1 else path.stem))
   if suffix == ".vcnr":
     if len(parts) < 2:
       raise HTTPException(status_code=400, detail="Encrypted chunk files must be inside a quality folder.")
@@ -2148,20 +2148,61 @@ def _converted_content_destination(movie_id: str, relative_path: str) -> tuple[s
   raise HTTPException(status_code=400, detail="Only .vcnr chunks and .torrent files are uploaded directly.")
 
 
-def _build_registered_converted_manifest(movie: dict, source_manifest: dict) -> tuple[dict, int]:
+def _converted_quality_label_key(value: str) -> str:
+  return _normalize_quality_code(str(value or ""))
+
+
+def _map_converted_qualities_to_configured(movie: dict, source_manifest: dict) -> tuple[dict[str, dict], dict[str, str]]:
   configured_qualities = {
     _normalize_quality_code(item["quality_code"]): item
     for item in _movie_content_qualities(movie)
   }
+  configured_by_label = {
+    _converted_quality_label_key(item.get("quality_label") or item.get("quality_code")): code
+    for code, item in configured_qualities.items()
+  }
   source_quality_lookup = _content_quality_lookup(source_manifest)
+  source_to_configured: dict[str, str] = {}
+  used_configured: set[str] = set()
+  unknown_sources: list[str] = []
+
+  for source_code, source_entry in source_quality_lookup.items():
+    matched_code = source_code if source_code in configured_qualities else ""
+    if not matched_code:
+      label_key = _converted_quality_label_key(source_entry.get("quality_label") or source_code)
+      matched_code = configured_by_label.get(label_key, "")
+    if not matched_code:
+      unknown_sources.append(source_code)
+      continue
+    if matched_code in used_configured:
+      raise HTTPException(status_code=400, detail=f"Multiple converted qualities map to {matched_code}. Please fix the converter quality codes.")
+    source_to_configured[source_code] = matched_code
+    used_configured.add(matched_code)
+
   required_codes = set(configured_qualities.keys())
-  source_codes = set(source_quality_lookup.keys())
-  missing_codes = sorted(required_codes - source_codes)
-  unknown_codes = sorted(source_codes - required_codes)
+  missing_codes = sorted(required_codes - used_configured)
   if missing_codes:
-    raise HTTPException(status_code=400, detail=f"Converted package is missing title qualities: {', '.join(missing_codes)}.")
-  if unknown_codes:
-    raise HTTPException(status_code=400, detail=f"Converted package has unknown title qualities: {', '.join(unknown_codes)}.")
+    expected = ", ".join(
+      f'{item["quality_code"]} ({item["quality_label"]})'
+      for item in _movie_content_qualities(movie)
+    )
+    received = ", ".join(
+      f'{code} ({source_quality_lookup[code].get("quality_label") or code})'
+      for code in sorted(source_quality_lookup.keys())
+    ) or "none"
+    raise HTTPException(
+      status_code=400,
+      detail=f"Converted package quality mismatch. Expected: {expected}. Received: {received}.",
+    )
+  if unknown_sources:
+    raise HTTPException(status_code=400, detail=f"Converted package has unknown title qualities: {', '.join(sorted(unknown_sources))}.")
+
+  return configured_qualities, source_to_configured
+
+
+def _build_registered_converted_manifest(movie: dict, source_manifest: dict) -> tuple[dict, int]:
+  configured_qualities, source_to_configured = _map_converted_qualities_to_configured(movie, source_manifest)
+  source_quality_lookup = _content_quality_lookup(source_manifest)
 
   manifest = _default_content_manifest(movie)
   manifest["movie_id"] = movie["id"]
@@ -2182,13 +2223,13 @@ def _build_registered_converted_manifest(movie: dict, source_manifest: dict) -> 
   manifest["torrent_packages"] = {}
 
   total_chunks = 0
-  for quality_code in sorted(required_codes, key=lambda code: (configured_qualities[code]["sort_order"], configured_qualities[code]["quality_label"])):
-    source_entry = source_quality_lookup[quality_code]
+  for source_code, quality_code in sorted(source_to_configured.items(), key=lambda item: (configured_qualities[item[1]]["sort_order"], configured_qualities[item[1]]["quality_label"])):
+    source_entry = source_quality_lookup[source_code]
     configured_entry = configured_qualities[quality_code]
     source_files = [
       dict(item)
       for item in source_entry.get("files", [])
-      if _normalize_quality_code(str(item.get("quality_code") or "")) == quality_code
+      if _normalize_quality_code(str(item.get("quality_code") or "")) == source_code
     ]
     if not source_files:
       raise HTTPException(status_code=400, detail=f"{configured_entry['quality_label']} has no chunk records in manifest.json.")
@@ -2212,7 +2253,7 @@ def _build_registered_converted_manifest(movie: dict, source_manifest: dict) -> 
       raise HTTPException(status_code=404, detail=f"Uploaded torrent was not found in R2: {torrent_file_name}.")
 
     torrent_metadata = (
-      source_manifest.get("torrent_packages", {}).get(quality_code)
+      source_manifest.get("torrent_packages", {}).get(source_code)
       or source_entry.get("torrent")
       or {}
     )
@@ -3262,11 +3303,12 @@ async def admin_upload_movie_converted_content_package(
 def admin_presign_movie_converted_content_file(
   movie_id: str,
   relative_path: str = Form(...),
+  final_quality_code: str | None = Form(default=None),
   db: Session | None = Depends(get_db),
   _: dict[str, str] = Depends(require_admin),
 ) -> dict:
   _get_movie_or_404(db, movie_id)
-  quality_code, filename, key = _converted_content_destination(movie_id, relative_path)
+  quality_code, filename, key = _converted_content_destination(movie_id, relative_path, final_quality_code)
   upload_url = presign_media_upload(key)
   if upload_url is None:
     raise HTTPException(status_code=503, detail="Unable to create a direct upload URL right now.")

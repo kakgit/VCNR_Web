@@ -1705,24 +1705,14 @@ def _write_content_manifest(movie_id: str, manifest: dict) -> None:
   for quality in manifest.get("qualities", []):
     quality_code = _normalize_quality_code(str(quality.get("quality_code") or ""))
     if quality_code:
-      _write_quality_content_manifest(movie_id, manifest, quality_code)
+      _delete_quality_content_manifest(movie_id, quality_code)
 
 
-def _write_quality_content_manifest(movie_id: str, manifest: dict, quality_code: str) -> None:
+def _delete_quality_content_manifest(movie_id: str, quality_code: str) -> None:
   normalized_quality_code = _normalize_quality_code(quality_code)
-  payload = json.dumps(
-    _viewer_content_manifest_payload(manifest, normalized_quality_code),
-    indent=2,
-    ensure_ascii=True,
-  ).encode("utf-8")
   manifest_path = _quality_content_manifest_path(movie_id, normalized_quality_code)
-  manifest_path.parent.mkdir(parents=True, exist_ok=True)
-  manifest_path.write_bytes(payload)
-  upload_media_object(
-    media_object_key(movie_id, "content", f"{normalized_quality_code}/manifest.json"),
-    payload,
-    "application/json",
-  )
+  manifest_path.unlink(missing_ok=True)
+  delete_media_object(media_object_key(movie_id, "content", f"{normalized_quality_code}/manifest.json"))
 
 
 def _normalize_upload_torrent_webseed_base(

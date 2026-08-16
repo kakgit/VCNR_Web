@@ -50,7 +50,6 @@ from backend.core.storage import (
   presign_media_download,
   presign_media_upload,
   r2_enabled,
-  upload_chunk,
   upload_media_object,
 )
 from backend.core.time_utils import app_now, is_app_time_reached, parse_app_datetime
@@ -709,6 +708,14 @@ def _content_folder_path(movie_id: str) -> Path:
 
 def _quality_file_root(movie_id: str, quality_code: str) -> Path:
   return _content_folder_path(movie_id) / _normalize_quality_code(quality_code)
+
+
+def _content_package_name(movie_id: str, quality_code: str) -> str:
+  return f"{movie_id}-{_normalize_quality_code(quality_code)}.vcnr-pkg"
+
+
+def _quality_package_root(movie_id: str, quality_code: str) -> Path:
+  return _quality_file_root(movie_id, quality_code) / _content_package_name(movie_id, quality_code)
 
 
 def _quality_content_manifest_path(movie_id: str, quality_code: str) -> Path:
@@ -1622,10 +1629,9 @@ async def _encrypt_upload_file_into_chunks(
   chunk_records: list[dict] = []
   chunk_index = 0
   source_name = upload.filename or f"source-{source_index}"
-  # BEP19 package folder for the torrent ``name``; chunks are also mirrored as
-  # ``{movie_id}/content/{package_name}/{chunk_name}`` so multi-file web seed
-  # clients can resolve ``url-list base + name + path`` against the CDN.
-  package_name = f"{movie_id}-{_normalize_quality_code(quality_code)}.vcnr-pkg"
+  normalized_quality_code = _normalize_quality_code(quality_code)
+  package_name = _content_package_name(movie_id, normalized_quality_code)
+  package_root = content_root / package_name
 
   while True:
     plaintext = await upload.read(CONTENT_PLAINTEXT_CHUNK_SIZE)
@@ -1634,7 +1640,7 @@ async def _encrypt_upload_file_into_chunks(
 
     chunk_index += 1
     chunk_name = _build_content_chunk_filename(movie_id, quality_code, source_index, chunk_index)
-    target_path = content_root / chunk_name
+    target_path = package_root / chunk_name
     salt = secrets.token_bytes(CONTENT_SALT_SIZE)
     nonce = secrets.token_bytes(CONTENT_NONCE_SIZE)
     aad = f"{aad_prefix}:{quality_code}:{source_index}:{chunk_index}:{source_name}:{target_path.name}".encode("utf-8")
@@ -1649,9 +1655,8 @@ async def _encrypt_upload_file_into_chunks(
       output.write(encryptor.tag)
 
     encrypted_bytes = target_path.read_bytes()
-    upload_chunk(movie_id, target_path.name, encrypted_bytes, package_name=package_name)
     upload_media_object(
-      media_object_key(movie_id, "content", f"{_normalize_quality_code(quality_code)}/{target_path.name}"),
+      media_object_key(movie_id, "content", f"{normalized_quality_code}/{package_name}/{target_path.name}"),
       encrypted_bytes,
       "application/octet-stream",
     )
@@ -1759,13 +1764,23 @@ def _normalize_upload_torrent_webseed_base(
       return f"{base}/api/movies/{movie_id}/delivery/public-chunks/{normalized}/"
   # No usable public app origin: fall back to the direct R2 public bucket folder.
   if movie_id:
-    r2_base = chunk_webseed_base(movie_id)
+    r2_base = _quality_chunk_webseed_base(movie_id, quality_code)
     if r2_base and r2_base.startswith(("http://", "https://")):
       return r2_base.rstrip("/") + "/"
   return ""
 
 
-def _r2_chunk_download_url(movie_id: str, chunk_name: str) -> str | None:
+def _quality_chunk_webseed_base(movie_id: str, quality_code: str) -> str | None:
+  r2_base = chunk_webseed_base(movie_id)
+  if not r2_base:
+    return None
+  normalized_quality_code = _normalize_quality_code(quality_code)
+  if not normalized_quality_code:
+    return r2_base.rstrip("/") + "/"
+  return r2_base.rstrip("/") + f"/{normalized_quality_code}/"
+
+
+def _r2_chunk_download_url(movie_id: str, quality_code: str, chunk_name: str) -> str | None:
   """Return a short-lived presigned R2 GET URL for a chunk, or None.
 
   Chunk delivery goes through the app's API, which signs an R2 GET on demand and
@@ -1775,7 +1790,9 @@ def _r2_chunk_download_url(movie_id: str, chunk_name: str) -> str | None:
   """
   if not r2_enabled():
     return None
-  key = media_object_key(movie_id, "content", chunk_name)
+  normalized_quality_code = _normalize_quality_code(quality_code)
+  package_name = _content_package_name(movie_id, normalized_quality_code)
+  key = media_object_key(movie_id, "content", f"{normalized_quality_code}/{package_name}/{chunk_name}")
   return presign_media_download(key, expires_seconds=3600)
 
 
@@ -1865,7 +1882,7 @@ def _delete_quality_files(movie_id: str, manifest: dict, quality_code: str) -> i
   # BEP19 package folder for the torrent ``name``. Delete the nested webseed
   # copies together with the flat chunks so re-upload/deletion does not leave
   # orphaned ``{movie_id}/content/{package_name}/{chunk}`` objects in R2.
-  package_name = f"{movie_id}-{_normalize_quality_code(quality_code)}.vcnr-pkg"
+  package_name = _content_package_name(movie_id, quality_key)
   for chunk_record in quality_entry.get("files", []):
     chunk_name = str(chunk_record.get("name") or "").strip()
     if chunk_name:
@@ -3356,10 +3373,14 @@ def download_movie_delivery_chunk(
   }
   if safe_name not in allowed_chunk_names:
     raise HTTPException(status_code=403, detail="This chunk does not belong to the reserved title quality.")
-  content_root = _content_folder_path(movie_id)
-  target_path = next((file_path for file_path in content_root.rglob(safe_name) if file_path.is_file()), None) if content_root.exists() else None
+  normalized_quality_code = _normalize_quality_code(enrollment.quality_code)
+  package_root = _quality_package_root(movie_id, normalized_quality_code)
+  target_path = package_root / safe_name if package_root.is_dir() else None
   if target_path is None or not target_path.is_file():
-    r2_url = _r2_chunk_download_url(movie_id, safe_name)
+    content_root = _content_folder_path(movie_id)
+    target_path = next((file_path for file_path in content_root.rglob(safe_name) if file_path.is_file()), None) if content_root.exists() else None
+  if target_path is None or not target_path.is_file():
+    r2_url = _r2_chunk_download_url(movie_id, normalized_quality_code, safe_name)
     if r2_url:
       return RedirectResponse(r2_url)
     raise HTTPException(status_code=404, detail="Encrypted chunk not found.")
@@ -3457,7 +3478,7 @@ def _torrent_webseed_urls(movie_id: str, quality_code: str) -> list[str]:
   api_base = _normalize_upload_torrent_webseed_base(movie_id, quality_code)
   if api_base:
     webseed_urls.append(api_base.rstrip("/") + "/")
-  r2_folder = chunk_webseed_base(movie_id) if r2_enabled() else None
+  r2_folder = _quality_chunk_webseed_base(movie_id, quality_code) if r2_enabled() else None
   if r2_folder and r2_folder.startswith(("http://", "https://")):
     norm_r2 = r2_folder.rstrip("/") + "/"
     if norm_r2 not in webseed_urls:
@@ -3512,7 +3533,7 @@ def _build_torrent_for_quality(
   chunk_lookup = _chunk_manifest_lookup(manifest, normalized)
   if not chunk_lookup:
     raise HTTPException(status_code=404, detail="No encrypted chunks available for this quality.")
-  content_root = _quality_file_root(movie_id, normalized)
+  content_root = _quality_package_root(movie_id, normalized)
   if not content_root.is_dir():
     raise HTTPException(status_code=404, detail="Quality content folder missing on the server.")
   ordered = sorted(chunk_lookup.items(), key=lambda kv: (int(kv[1].get("chunk_index") or 0), kv[0]))
@@ -3600,7 +3621,7 @@ def _build_torrent_for_quality(
   # is enabled (no app proxy hop). Delivery via the app API remains the primary
   # webseed because it works even when public access is disabled.
   if r2_enabled() and movie_id:
-    r2_folder = chunk_webseed_base(movie_id)
+    r2_folder = _quality_chunk_webseed_base(movie_id, normalized)
     if r2_folder and r2_folder.startswith(("http://", "https://")):
       normalized_r2 = r2_folder.rstrip("/") + "/"
       if normalized_r2 not in webseed_urls:
@@ -3651,21 +3672,16 @@ def _save_quality_torrent_package(
     normalized_quality_code,
     _normalize_upload_torrent_webseed_base(movie_id, normalized_quality_code),
   )
-  torrent_path = _content_torrent_path(movie_id, normalized_quality_code)
-  quality_torrent_path = _quality_content_torrent_path(movie_id, normalized_quality_code)
+  torrent_path = _quality_content_torrent_path(movie_id, normalized_quality_code)
+  legacy_torrent_path = _content_torrent_path(movie_id, normalized_quality_code)
+  legacy_torrent_path.unlink(missing_ok=True)
   torrent_path.parent.mkdir(parents=True, exist_ok=True)
   torrent_path.write_bytes(torrent_bytes)
-  quality_torrent_path.parent.mkdir(parents=True, exist_ok=True)
-  quality_torrent_path.write_bytes(torrent_bytes)
   # Mirror the torrent package to R2 when configured.
   if r2_enabled():
+    delete_media_object(media_object_key(movie_id, "content", legacy_torrent_path.name))
     upload_media_object(
-      media_object_key(movie_id, "content", torrent_path.name),
-      torrent_bytes,
-      "application/x-bittorrent",
-    )
-    upload_media_object(
-      media_object_key(movie_id, "content", f"{normalized_quality_code}/{quality_torrent_path.name}"),
+      media_object_key(movie_id, "content", f"{normalized_quality_code}/{torrent_path.name}"),
       torrent_bytes,
       "application/x-bittorrent",
     )
@@ -3676,7 +3692,7 @@ def _save_quality_torrent_package(
     if key != "torrent_base64"
   }
   torrent_metadata["torrent_file_name"] = torrent_path.name
-  torrent_metadata["quality_torrent_file_name"] = quality_torrent_path.name
+  torrent_metadata["quality_torrent_file_name"] = torrent_path.name
   torrent_metadata["saved_at"] = saved_at
   manifest.setdefault("torrent_packages", {})
   manifest["torrent_packages"][normalized_quality_code] = torrent_metadata
@@ -3706,7 +3722,8 @@ def get_movie_delivery_torrent(
   if manifest is None:
     raise HTTPException(status_code=404, detail="Content package not found.")
 
-  torrent_path = _content_torrent_path(movie_id, normalized)
+  torrent_path = _quality_content_torrent_path(movie_id, normalized)
+  legacy_torrent_path = _content_torrent_path(movie_id, normalized)
   quality_lookup = _content_quality_lookup(manifest)
   quality_entry = quality_lookup.get(normalized) or {}
   saved_metadata = (
@@ -3715,13 +3732,14 @@ def get_movie_delivery_torrent(
     or {}
   )
 
-  if torrent_path.is_file() and isinstance(saved_metadata, dict) and saved_metadata.get("info_hash_sha1"):
+  readable_torrent_path = torrent_path if torrent_path.is_file() else legacy_torrent_path
+  if readable_torrent_path.is_file() and isinstance(saved_metadata, dict) and saved_metadata.get("info_hash_sha1"):
     payload = {
       key: value
       for key, value in saved_metadata.items()
       if key not in {"torrent_file_name", "quality_torrent_file_name", "saved_at"}
     }
-    payload["torrent_base64"] = b64encode(torrent_path.read_bytes()).decode("ascii")
+    payload["torrent_base64"] = b64encode(readable_torrent_path.read_bytes()).decode("ascii")
     return DeliveryTorrentResponse(
       movie_id=movie_id,
       quality_code=normalized,
@@ -3735,10 +3753,14 @@ def get_movie_delivery_torrent(
   webseed_urls = _torrent_webseed_urls(movie_id, normalized)
   trackers = [tracker for tracker in get_settings().public_torrent_trackers if tracker]
   if r2_enabled():
-    try:
-      stored_bytes = download_media_object(media_object_key(movie_id, "content", torrent_path.name))
-    except Exception:
-      stored_bytes = None
+    stored_bytes = None
+    for object_name in (f"{normalized}/{torrent_path.name}", legacy_torrent_path.name):
+      try:
+        stored_bytes = download_media_object(media_object_key(movie_id, "content", object_name))
+      except Exception:
+        stored_bytes = None
+      if stored_bytes:
+        break
     if stored_bytes:
       try:
         recovered_torrent = _torrent_with_webseeds(stored_bytes, webseed_urls, trackers)
@@ -3749,16 +3771,10 @@ def get_movie_delivery_torrent(
         try:
           torrent_path.parent.mkdir(parents=True, exist_ok=True)
           torrent_path.write_bytes(recovered_torrent)
-          quality_torrent_path = _quality_content_torrent_path(movie_id, normalized)
-          quality_torrent_path.parent.mkdir(parents=True, exist_ok=True)
-          quality_torrent_path.write_bytes(recovered_torrent)
+          legacy_torrent_path.unlink(missing_ok=True)
+          delete_media_object(media_object_key(movie_id, "content", legacy_torrent_path.name))
           upload_media_object(
-            media_object_key(movie_id, "content", torrent_path.name),
-            recovered_torrent,
-            "application/x-bittorrent",
-          )
-          upload_media_object(
-            media_object_key(movie_id, "content", f"{normalized}/{quality_torrent_path.name}"),
+            media_object_key(movie_id, "content", f"{normalized}/{torrent_path.name}"),
             recovered_torrent,
             "application/x-bittorrent",
           )
@@ -3788,7 +3804,7 @@ def get_movie_delivery_torrent(
             "use_lsd": True,
             "use_pex": True,
             "torrent_file_name": torrent_path.name,
-            "quality_torrent_file_name": quality_torrent_path.name,
+            "quality_torrent_file_name": torrent_path.name,
             "saved_at": saved_at,
           }
           manifest.setdefault("torrent_packages", {})
@@ -3828,17 +3844,11 @@ def get_movie_delivery_torrent(
   try:
     torrent_path.parent.mkdir(parents=True, exist_ok=True)
     torrent_path.write_bytes(torrent_bytes)
-    quality_torrent_path = _quality_content_torrent_path(movie_id, normalized)
-    quality_torrent_path.parent.mkdir(parents=True, exist_ok=True)
-    quality_torrent_path.write_bytes(torrent_bytes)
+    legacy_torrent_path.unlink(missing_ok=True)
     if r2_enabled():
+      delete_media_object(media_object_key(movie_id, "content", legacy_torrent_path.name))
       upload_media_object(
-        media_object_key(movie_id, "content", torrent_path.name),
-        torrent_bytes,
-        "application/x-bittorrent",
-      )
-      upload_media_object(
-        media_object_key(movie_id, "content", f"{normalized}/{quality_torrent_path.name}"),
+        media_object_key(movie_id, "content", f"{normalized}/{torrent_path.name}"),
         torrent_bytes,
         "application/x-bittorrent",
       )
@@ -3849,7 +3859,7 @@ def get_movie_delivery_torrent(
       if key != "torrent_base64"
     }
     torrent_metadata["torrent_file_name"] = torrent_path.name
-    torrent_metadata["quality_torrent_file_name"] = quality_torrent_path.name
+    torrent_metadata["quality_torrent_file_name"] = torrent_path.name
     torrent_metadata["saved_at"] = saved_at
     manifest.setdefault("torrent_packages", {})
     manifest["torrent_packages"][normalized] = torrent_metadata
@@ -3890,13 +3900,13 @@ def _download_movie_public_delivery_chunk_impl(
   }
   if safe_name not in allowed_chunk_names:
     raise HTTPException(status_code=403, detail="Chunk does not belong to this title/quality.")
-  content_root = _quality_file_root(movie_id, normalized)
-  target_path = content_root / safe_name if content_root.is_dir() else None
+  package_root = _quality_package_root(movie_id, normalized)
+  target_path = package_root / safe_name if package_root.is_dir() else None
   if target_path is None or not target_path.is_file():
     content_root2 = _content_folder_path(movie_id)
     target_path = next((p for p in content_root2.rglob(safe_name) if p.is_file()), None) if content_root2.exists() else None
   if target_path is None or not target_path.is_file():
-    r2_url = _r2_chunk_download_url(movie_id, safe_name)
+    r2_url = _r2_chunk_download_url(movie_id, normalized, safe_name)
     if r2_url:
       return RedirectResponse(r2_url)
     raise HTTPException(status_code=404, detail="Encrypted chunk not found.")
@@ -4658,10 +4668,13 @@ def download_movie_swarm_chunk(
     raise HTTPException(status_code=400, detail="Invalid chunk name.")
   if safe_name not in chunk_lookup:
     raise HTTPException(status_code=403, detail="This chunk does not belong to the swarm title quality.")
-  content_root = _content_folder_path(movie_id)
-  target_path = next((file_path for file_path in content_root.rglob(safe_name) if file_path.is_file()), None) if content_root.exists() else None
+  package_root = _quality_package_root(movie_id, normalized_quality_code)
+  target_path = package_root / safe_name if package_root.is_dir() else None
   if target_path is None or not target_path.is_file():
-    r2_url = _r2_chunk_download_url(movie_id, safe_name)
+    content_root = _content_folder_path(movie_id)
+    target_path = next((file_path for file_path in content_root.rglob(safe_name) if file_path.is_file()), None) if content_root.exists() else None
+  if target_path is None or not target_path.is_file():
+    r2_url = _r2_chunk_download_url(movie_id, normalized_quality_code, safe_name)
     if r2_url:
       session["expires_at"] = _swarm_session_expiry().isoformat()
       session["updated_at"] = datetime.utcnow().isoformat()

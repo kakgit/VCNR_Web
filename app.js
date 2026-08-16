@@ -4690,6 +4690,10 @@ function setAdminContentUploadSummary(message, tone = "neutral") {
   adminContentUploadPreview.textContent = message;
 }
 
+function setAdminContentModalMessage(message, tone = "neutral") {
+  setAdminContentUploadSummary(message, tone);
+}
+
 function setAdminLibraryUploadStartAtDisplay(movieTitle, uploadStartAt) {
   if (!adminLibraryUploadStartAtDisplay) {
     return;
@@ -5046,7 +5050,7 @@ async function uploadAdminMovieConvertedContentPackageRemote(movieId, files) {
     const entry = uploadFiles[index];
     const file = entry.file;
     const relativePath = entry.relativePath || file.name;
-    adminHelper.textContent = `Uploading ${index + 1} of ${uploadFiles.length}: ${file.name}`;
+    setAdminContentModalMessage(`Uploading ${index + 1} of ${uploadFiles.length}: ${file.name}`, "neutral");
     const presignForm = new FormData();
     presignForm.append("relative_path", relativePath);
     const pathParts = relativePath.replace(/\\/g, "/").split("/").filter(Boolean);
@@ -5081,7 +5085,7 @@ async function uploadAdminMovieConvertedContentPackageRemote(movieId, files) {
     }
   }
 
-  adminHelper.textContent = "Finalizing converted content package...";
+  setAdminContentModalMessage("Finalizing converted content package...", "neutral");
   const registerForm = new FormData();
   registerForm.append("manifest_json", manifestJson);
   let response;
@@ -5103,7 +5107,7 @@ async function uploadAdminMovieConvertedContentPackageRemote(movieId, files) {
     adminContentUploadStartAtDisplay.textContent = "Not set";
   }
   await loadAdminContentQualityAssets(movieId);
-  adminHelper.textContent = response.message;
+  setAdminContentModalMessage(response.message, "success");
 }
 
 async function scheduleAdminMovieContentRemote(movieId, uploadStartAt) {
@@ -8665,7 +8669,7 @@ if (adminContentAssetList) {
         await chooseAdminConvertedContentFolder();
       } catch (error) {
         if (error?.name !== "AbortError") {
-          adminHelper.textContent = error.message || "Could not select the converted folder.";
+          setAdminContentModalMessage(error.message || "Could not select the converted folder.", "danger");
         }
       }
       return;
@@ -8683,9 +8687,16 @@ if (adminContentAssetList) {
           throw new Error("Please choose a title first.");
         }
         if (!files.length) {
-          throw new Error("Please select the converted content folder created by VCNR Converter.");
+          setAdminContentModalMessage("Please choose the converted content folder.", "warning");
+          await chooseAdminConvertedContentFolder();
+          if (!adminContentSelectedPackageFiles.length) {
+            throw new Error("Please select the converted content folder created by VCNR Converter.");
+          }
         }
-        const hasManifest = Array.from(files).some((entry) => {
+        const selectedFiles = adminContentSelectedPackageFiles.length
+          ? adminContentSelectedPackageFiles
+          : files;
+        const hasManifest = Array.from(selectedFiles).some((entry) => {
           const file = entry.file || entry;
           const path = entry.relativePath || file.webkitRelativePath || file.name;
           return path.replace(/\\/g, "/").split("/").pop() === "manifest.json";
@@ -8695,9 +8706,11 @@ if (adminContentAssetList) {
         }
         packageUploadButton.disabled = true;
         packageUploadButton.textContent = "Uploading...";
-        await uploadAdminMovieConvertedContentPackageRemote(movieId, files);
+        await uploadAdminMovieConvertedContentPackageRemote(movieId, selectedFiles);
       } catch (error) {
-        adminHelper.textContent = error.message;
+        if (error?.name !== "AbortError") {
+          setAdminContentModalMessage(error.message, "danger");
+        }
       } finally {
         packageUploadButton.disabled = false;
         packageUploadButton.textContent = "Upload Converted Folder";

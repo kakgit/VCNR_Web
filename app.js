@@ -5008,19 +5008,35 @@ async function uploadAdminMovieConvertedContentPackageRemote(movieId, files) {
     }
     presignForm.append("final_quality_code", finalQualityCode);
     const presign = await apiUploadRequest(`/admin/movies/${movieId}/assets/content-package/presign`, presignForm);
-    const putResponse = await fetch(presign.upload_url, {
-      method: "PUT",
-      body: file,
-    });
+    let putResponse;
+    try {
+      putResponse = await fetch(presign.upload_url, {
+        method: "PUT",
+        body: file,
+      });
+    } catch (error) {
+      throw new Error(`Direct R2 upload could not start for ${file.name}. Please check R2 CORS/network and retry. ${error.message || ""}`.trim());
+    }
     if (!putResponse.ok) {
-      throw new Error(`Direct upload failed for ${file.name} with HTTP ${putResponse.status}.`);
+      let putError = "";
+      try {
+        putError = await putResponse.text();
+      } catch {
+        putError = "";
+      }
+      throw new Error(`Direct R2 upload failed for ${file.name} with HTTP ${putResponse.status}.${putError ? ` ${putError.slice(0, 160)}` : ""}`);
     }
   }
 
   adminHelper.textContent = "Finalizing converted content package...";
   const registerForm = new FormData();
   registerForm.append("manifest_json", manifestJson);
-  const response = await apiUploadRequest(`/admin/movies/${movieId}/assets/content-package/register`, registerForm);
+  let response;
+  try {
+    response = await apiUploadRequest(`/admin/movies/${movieId}/assets/content-package/register`, registerForm);
+  } catch (error) {
+    throw new Error(`Files uploaded to R2, but finalizing manifest failed: ${error.message}`);
+  }
   const updatedMovie = normalizeMovie(response.item);
   updateMovieCollections(updatedMovie);
   renderAdminMovieList();

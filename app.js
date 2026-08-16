@@ -5907,6 +5907,10 @@ async function deleteAdminContentFolderRemote(movieId) {
     adminContentUploadStartAt.value = "";
     adminContentUploadStartAt.disabled = true;
   }
+  if (adminContentUploadStartAtDisplay) {
+    adminContentUploadStartAtDisplay.textContent = "Not set";
+  }
+  setAdminLibraryUploadStartAtDisplay("", "");
   renderMovieGrid();
   syncDetailPanel();
   renderAdminMovieList();

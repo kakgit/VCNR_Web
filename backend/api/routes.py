@@ -707,6 +707,19 @@ def _content_folder_path(movie_id: str) -> Path:
   return LIBRARY_MEDIA_ROOT / movie_id / "content"
 
 
+def _quality_file_root(movie_id: str, quality_code: str) -> Path:
+  return _content_folder_path(movie_id) / _normalize_quality_code(quality_code)
+
+
+def _quality_content_manifest_path(movie_id: str, quality_code: str) -> Path:
+  return _quality_file_root(movie_id, quality_code) / "manifest.json"
+
+
+def _quality_content_torrent_path(movie_id: str, quality_code: str) -> Path:
+  normalized_quality_code = _normalize_quality_code(quality_code)
+  return _quality_file_root(movie_id, normalized_quality_code) / f"{normalized_quality_code}.torrent"
+
+
 def _viewer_content_manifest_payload(manifest: dict, quality_code: str | None = None) -> dict:
   normalized_quality_code = _normalize_quality_code(quality_code) if quality_code else ""
   qualities = manifest.get("qualities", [])
@@ -1637,6 +1650,11 @@ async def _encrypt_upload_file_into_chunks(
 
     encrypted_bytes = target_path.read_bytes()
     upload_chunk(movie_id, target_path.name, encrypted_bytes, package_name=package_name)
+    upload_media_object(
+      media_object_key(movie_id, "content", f"{_normalize_quality_code(quality_code)}/{target_path.name}"),
+      encrypted_bytes,
+      "application/octet-stream",
+    )
     chunk_records.append({
       "name": target_path.name,
       "quality_code": quality_code,
@@ -1679,6 +1697,27 @@ def _write_content_manifest(movie_id: str, manifest: dict) -> None:
   manifest_path = _content_manifest_path(movie_id)
   manifest_path.parent.mkdir(parents=True, exist_ok=True)
   manifest_path.write_bytes(payload)
+  for quality in manifest.get("qualities", []):
+    quality_code = _normalize_quality_code(str(quality.get("quality_code") or ""))
+    if quality_code:
+      _write_quality_content_manifest(movie_id, manifest, quality_code)
+
+
+def _write_quality_content_manifest(movie_id: str, manifest: dict, quality_code: str) -> None:
+  normalized_quality_code = _normalize_quality_code(quality_code)
+  payload = json.dumps(
+    _viewer_content_manifest_payload(manifest, normalized_quality_code),
+    indent=2,
+    ensure_ascii=True,
+  ).encode("utf-8")
+  manifest_path = _quality_content_manifest_path(movie_id, normalized_quality_code)
+  manifest_path.parent.mkdir(parents=True, exist_ok=True)
+  manifest_path.write_bytes(payload)
+  upload_media_object(
+    media_object_key(movie_id, "content", f"{normalized_quality_code}/manifest.json"),
+    payload,
+    "application/json",
+  )
 
 
 def _normalize_upload_torrent_webseed_base(
@@ -1811,10 +1850,6 @@ def _content_is_complete(movie: dict, manifest: dict) -> bool:
   return bool(required_codes) and required_codes.issubset(available_codes)
 
 
-def _quality_file_root(movie_id: str, quality_code: str) -> Path:
-  return _content_folder_path(movie_id) / _normalize_quality_code(quality_code)
-
-
 def _delete_quality_files(movie_id: str, manifest: dict, quality_code: str) -> int:
   quality_key = _normalize_quality_code(quality_code)
   quality_entry = _content_quality_lookup(manifest).get(quality_key)
@@ -1826,6 +1861,7 @@ def _delete_quality_files(movie_id: str, manifest: dict, quality_code: str) -> i
   if target_root.exists():
     removed = sum(1 for file_path in target_root.rglob("*") if file_path.is_file())
     shutil.rmtree(target_root)
+  delete_media_prefix(f"{movie_id}/content/{quality_key}/")
   # BEP19 package folder for the torrent ``name``. Delete the nested webseed
   # copies together with the flat chunks so re-upload/deletion does not leave
   # orphaned ``{movie_id}/content/{package_name}/{chunk}`` objects in R2.
@@ -1846,6 +1882,7 @@ def _delete_quality_files(movie_id: str, manifest: dict, quality_code: str) -> i
   if isinstance(torrent_packages, dict):
     torrent_packages.pop(quality_key, None)
   _content_torrent_path(movie_id, quality_key).unlink(missing_ok=True)
+  delete_media_object(media_object_key(movie_id, "content", f"{quality_key}.torrent"))
   manifest["chunk_count"] = len(manifest.get("files", []))
   manifest["updated_at"] = datetime.utcnow().isoformat(timespec="seconds") + "Z"
   if manifest["qualities"]:
@@ -3615,12 +3652,20 @@ def _save_quality_torrent_package(
     _normalize_upload_torrent_webseed_base(movie_id, normalized_quality_code),
   )
   torrent_path = _content_torrent_path(movie_id, normalized_quality_code)
+  quality_torrent_path = _quality_content_torrent_path(movie_id, normalized_quality_code)
   torrent_path.parent.mkdir(parents=True, exist_ok=True)
   torrent_path.write_bytes(torrent_bytes)
+  quality_torrent_path.parent.mkdir(parents=True, exist_ok=True)
+  quality_torrent_path.write_bytes(torrent_bytes)
   # Mirror the torrent package to R2 when configured.
   if r2_enabled():
     upload_media_object(
       media_object_key(movie_id, "content", torrent_path.name),
+      torrent_bytes,
+      "application/x-bittorrent",
+    )
+    upload_media_object(
+      media_object_key(movie_id, "content", f"{normalized_quality_code}/{quality_torrent_path.name}"),
       torrent_bytes,
       "application/x-bittorrent",
     )
@@ -3631,6 +3676,7 @@ def _save_quality_torrent_package(
     if key != "torrent_base64"
   }
   torrent_metadata["torrent_file_name"] = torrent_path.name
+  torrent_metadata["quality_torrent_file_name"] = quality_torrent_path.name
   torrent_metadata["saved_at"] = saved_at
   manifest.setdefault("torrent_packages", {})
   manifest["torrent_packages"][normalized_quality_code] = torrent_metadata
@@ -3673,7 +3719,7 @@ def get_movie_delivery_torrent(
     payload = {
       key: value
       for key, value in saved_metadata.items()
-      if key not in {"torrent_file_name", "saved_at"}
+      if key not in {"torrent_file_name", "quality_torrent_file_name", "saved_at"}
     }
     payload["torrent_base64"] = b64encode(torrent_path.read_bytes()).decode("ascii")
     return DeliveryTorrentResponse(
@@ -3703,8 +3749,16 @@ def get_movie_delivery_torrent(
         try:
           torrent_path.parent.mkdir(parents=True, exist_ok=True)
           torrent_path.write_bytes(recovered_torrent)
+          quality_torrent_path = _quality_content_torrent_path(movie_id, normalized)
+          quality_torrent_path.parent.mkdir(parents=True, exist_ok=True)
+          quality_torrent_path.write_bytes(recovered_torrent)
           upload_media_object(
             media_object_key(movie_id, "content", torrent_path.name),
+            recovered_torrent,
+            "application/x-bittorrent",
+          )
+          upload_media_object(
+            media_object_key(movie_id, "content", f"{normalized}/{quality_torrent_path.name}"),
             recovered_torrent,
             "application/x-bittorrent",
           )
@@ -3734,6 +3788,7 @@ def get_movie_delivery_torrent(
             "use_lsd": True,
             "use_pex": True,
             "torrent_file_name": torrent_path.name,
+            "quality_torrent_file_name": quality_torrent_path.name,
             "saved_at": saved_at,
           }
           manifest.setdefault("torrent_packages", {})
@@ -3751,7 +3806,7 @@ def get_movie_delivery_torrent(
           payload = {
             key: value
             for key, value in torrent_metadata.items()
-            if key not in {"torrent_file_name", "saved_at"}
+            if key not in {"torrent_file_name", "quality_torrent_file_name", "saved_at"}
           }
           payload["torrent_base64"] = b64encode(recovered_torrent).decode("ascii")
           return DeliveryTorrentResponse(
@@ -3773,9 +3828,17 @@ def get_movie_delivery_torrent(
   try:
     torrent_path.parent.mkdir(parents=True, exist_ok=True)
     torrent_path.write_bytes(torrent_bytes)
+    quality_torrent_path = _quality_content_torrent_path(movie_id, normalized)
+    quality_torrent_path.parent.mkdir(parents=True, exist_ok=True)
+    quality_torrent_path.write_bytes(torrent_bytes)
     if r2_enabled():
       upload_media_object(
         media_object_key(movie_id, "content", torrent_path.name),
+        torrent_bytes,
+        "application/x-bittorrent",
+      )
+      upload_media_object(
+        media_object_key(movie_id, "content", f"{normalized}/{quality_torrent_path.name}"),
         torrent_bytes,
         "application/x-bittorrent",
       )
@@ -3786,6 +3849,7 @@ def get_movie_delivery_torrent(
       if key != "torrent_base64"
     }
     torrent_metadata["torrent_file_name"] = torrent_path.name
+    torrent_metadata["quality_torrent_file_name"] = quality_torrent_path.name
     torrent_metadata["saved_at"] = saved_at
     manifest.setdefault("torrent_packages", {})
     manifest["torrent_packages"][normalized] = torrent_metadata
@@ -5041,7 +5105,6 @@ def admin_delete_movie_content_folder(
 ) -> dict:
   movie = _get_movie_or_404(db, movie_id)
   _delete_movie_content_folder(movie_id)
-  delete_movie_prefix(movie_id)
   if db:
     persistence.clear_movie_content_release_state(db, movie_id)
   else:

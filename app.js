@@ -4894,8 +4894,12 @@ function renderAdminContentQualityAssets(container, items, isComplete) {
       ? `Uploaded${item.chunkCount ? ` · ${item.chunkCount} chunk${item.chunkCount === 1 ? "" : "s"}` : ""}`
       : "Missing";
     const statusClass = item.uploaded ? "is-uploaded" : "is-missing";
+    const sourceName = String(item.sourceName || item.qualityLabel || "").trim();
+    const sourceExtension = String(item.sourceExtension || "").trim();
     const existingFileLabel = item.uploaded
-      ? `${escapeHtml(item.sourceName || item.qualityLabel)}${item.sourceExtension ? ` ${escapeHtml(item.sourceExtension)}` : ""}`
+      ? sourceExtension && sourceName && !sourceName.toLowerCase().endsWith(sourceExtension.toLowerCase())
+        ? `${sourceName} ${sourceExtension}`
+        : sourceName || sourceExtension || item.qualityLabel
       : "No file uploaded yet";
     return `
       <article class="admin-content-quality-card ${statusClass}" data-admin-content-quality-card="${escapeHtml(item.qualityCode)}">

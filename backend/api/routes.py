@@ -12,7 +12,7 @@ import site
 import sys
 import time
 from datetime import datetime, timedelta
-from tempfile import NamedTemporaryFile
+from tempfile import NamedTemporaryFile, TemporaryDirectory
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -1937,6 +1937,196 @@ def _replace_content_quality_entry(manifest: dict, quality_code: str, quality_en
   manifest["updated_at"] = datetime.utcnow().isoformat(timespec="seconds") + "Z"
 
 
+def _normalize_upload_relative_path(value: str) -> str:
+  cleaned = str(value or "").replace("\\", "/").strip().lstrip("/")
+  parts = [part for part in cleaned.split("/") if part and part not in {".", ".."}]
+  if "content" in parts:
+    parts = parts[parts.index("content") + 1:]
+  return "/".join(parts)
+
+
+def _converted_package_file_lookup(files: list[UploadFile], relative_paths: list[str]) -> dict[str, UploadFile]:
+  lookup: dict[str, UploadFile] = {}
+  for index, upload in enumerate(files):
+    supplied_path = relative_paths[index] if index < len(relative_paths) else ""
+    candidates = [
+      _normalize_upload_relative_path(supplied_path),
+      _normalize_upload_relative_path(upload.filename or ""),
+      Path(upload.filename or "").name,
+    ]
+    for candidate in candidates:
+      if candidate:
+        lookup[candidate] = upload
+  return lookup
+
+
+async def _read_converted_package_manifest(files: list[UploadFile], relative_paths: list[str]) -> dict:
+  for index, upload in enumerate(files):
+    supplied_path = relative_paths[index] if index < len(relative_paths) else ""
+    normalized_path = _normalize_upload_relative_path(supplied_path or upload.filename or "")
+    if normalized_path == "manifest.json" or Path(upload.filename or "").name == "manifest.json":
+      raw = await upload.read()
+      await upload.seek(0)
+      try:
+        manifest = json.loads(raw.decode("utf-8"))
+      except Exception:
+        raise HTTPException(status_code=400, detail="The selected content folder has an invalid manifest.json.")
+      if not isinstance(manifest, dict):
+        raise HTTPException(status_code=400, detail="The selected content folder manifest is not valid.")
+      return manifest
+  raise HTTPException(status_code=400, detail="Please select the converted content folder that contains manifest.json.")
+
+
+async def _stage_converted_content_package(
+  movie: dict,
+  source_manifest: dict,
+  uploaded_lookup: dict[str, UploadFile],
+  staging_root: Path,
+) -> tuple[dict, int]:
+  configured_qualities = {
+    _normalize_quality_code(item["quality_code"]): item
+    for item in _movie_content_qualities(movie)
+  }
+  if not configured_qualities:
+    raise HTTPException(status_code=400, detail="No title qualities are configured for this title.")
+
+  source_quality_lookup = _content_quality_lookup(source_manifest)
+  source_codes = set(source_quality_lookup.keys())
+  required_codes = set(configured_qualities.keys())
+  missing_codes = sorted(required_codes - source_codes)
+  unknown_codes = sorted(source_codes - required_codes)
+  if missing_codes:
+    raise HTTPException(status_code=400, detail=f"Converted package is missing title qualities: {', '.join(missing_codes)}.")
+  if unknown_codes:
+    raise HTTPException(status_code=400, detail=f"Converted package has unknown title qualities: {', '.join(unknown_codes)}.")
+
+  manifest = _default_content_manifest(movie)
+  manifest["movie_id"] = movie["id"]
+  manifest["movie_title"] = movie["title"]
+  manifest["delivery_start_at"] = None
+  manifest["upload_start_at"] = None
+  manifest["password_publish_at"] = movie.get("password_publish_at")
+  manifest["encryption"] = source_manifest.get("encryption") or {
+    "algorithm": "AES-256-GCM",
+    "kdf": "PBKDF2-HMAC-SHA256",
+    "iterations": CONTENT_KDF_ITERATIONS,
+    "salt_bytes": CONTENT_SALT_SIZE,
+    "nonce_bytes": CONTENT_NONCE_SIZE,
+    "tag_bytes": CONTENT_TAG_SIZE,
+  }
+  manifest["qualities"] = []
+  manifest["files"] = []
+  manifest["torrent_packages"] = {}
+
+  total_chunks = 0
+  for quality_code in sorted(required_codes, key=lambda code: (configured_qualities[code]["sort_order"], configured_qualities[code]["quality_label"])):
+    source_entry = source_quality_lookup[quality_code]
+    configured_entry = configured_qualities[quality_code]
+    source_files = [
+      dict(item)
+      for item in source_entry.get("files", [])
+      if _normalize_quality_code(str(item.get("quality_code") or "")) == quality_code
+    ]
+    if not source_files:
+      raise HTTPException(status_code=400, detail=f"{configured_entry['quality_label']} has no chunk records in manifest.json.")
+
+    package = _content_package_name(movie["id"], quality_code)
+    staged_package_root = staging_root / quality_code / package
+    staged_package_root.mkdir(parents=True, exist_ok=True)
+    saved_files: list[dict] = []
+
+    for record in sorted(source_files, key=lambda item: (int(item.get("chunk_index") or 0), str(item.get("name") or ""))):
+      chunk_name = Path(str(record.get("name") or "")).name
+      if not chunk_name or not chunk_name.endswith(".vcnr"):
+        raise HTTPException(status_code=400, detail=f"{configured_entry['quality_label']} has an invalid chunk name in manifest.json.")
+      candidate_paths = [
+        f"{quality_code}/{package}/{chunk_name}",
+        f"{quality_code}/{chunk_name}",
+        chunk_name,
+      ]
+      upload = next((uploaded_lookup.get(path) for path in candidate_paths if uploaded_lookup.get(path)), None)
+      if upload is None:
+        upload = next((
+          candidate
+          for path, candidate in uploaded_lookup.items()
+          if path.endswith(f"/{chunk_name}") or path == chunk_name
+        ), None)
+      if upload is None:
+        raise HTTPException(status_code=400, detail=f"Missing chunk file for {configured_entry['quality_label']}: {chunk_name}.")
+
+      raw = await upload.read()
+      await upload.seek(0)
+      expected_size = int(record.get("encrypted_size") or 0)
+      if expected_size > 0 and len(raw) != expected_size:
+        raise HTTPException(status_code=400, detail=f"Chunk size mismatch for {chunk_name}.")
+      expected_sha256 = str(record.get("encrypted_sha256") or "").strip().lower()
+      actual_sha256 = hashlib.sha256(raw).hexdigest()
+      if expected_sha256 and actual_sha256.lower() != expected_sha256:
+        raise HTTPException(status_code=400, detail=f"Chunk checksum mismatch for {chunk_name}.")
+
+      (staged_package_root / chunk_name).write_bytes(raw)
+      saved_record = dict(record)
+      saved_record["name"] = chunk_name
+      saved_record["quality_code"] = quality_code
+      saved_record["quality_label"] = configured_entry["quality_label"]
+      saved_record["encrypted_size"] = len(raw)
+      saved_record["encrypted_sha256"] = actual_sha256
+      saved_record["encrypted_md5"] = hashlib.md5(raw).hexdigest()
+      saved_files.append(saved_record)
+
+    quality_entry = {
+      "quality_code": quality_code,
+      "quality_label": configured_entry["quality_label"],
+      "stars_required": configured_entry["stars_required"],
+      "sort_order": configured_entry["sort_order"],
+      "source_name": source_entry.get("source_name") or configured_entry["quality_label"],
+      "source_extension": source_entry.get("source_extension"),
+      "password_sha256": source_entry.get("password_sha256"),
+      "uploaded_at": source_entry.get("uploaded_at") or datetime.utcnow().isoformat(timespec="seconds") + "Z",
+      "chunk_count": len(saved_files),
+      "files": saved_files,
+    }
+    _replace_content_quality_entry(manifest, quality_code, quality_entry)
+    total_chunks += len(saved_files)
+
+  return manifest, total_chunks
+
+
+async def _store_converted_content_package(
+  movie: dict,
+  files: list[UploadFile],
+  relative_paths: list[str],
+) -> tuple[dict, int]:
+  if not files:
+    raise HTTPException(status_code=400, detail="Please select the converted content folder.")
+  source_manifest = await _read_converted_package_manifest(files, relative_paths)
+  uploaded_lookup = _converted_package_file_lookup(files, relative_paths)
+
+  with TemporaryDirectory(prefix="vcnr-converted-") as tmp_dir:
+    staged_root = Path(tmp_dir) / "content"
+    manifest, total_chunks = await _stage_converted_content_package(movie, source_manifest, uploaded_lookup, staged_root)
+
+    for quality_entry in manifest.get("qualities", []):
+      quality_code = _normalize_quality_code(str(quality_entry.get("quality_code") or ""))
+      package = _content_package_name(movie["id"], quality_code)
+      staged_package_root = staged_root / quality_code / package
+      final_package_root = _quality_package_root(movie["id"], quality_code)
+      final_package_root.mkdir(parents=True, exist_ok=True)
+      shutil.copytree(staged_package_root, final_package_root, dirs_exist_ok=True)
+      for chunk_path in final_package_root.glob("*.vcnr"):
+        if chunk_path.name not in {str(item.get("name") or "") for item in quality_entry.get("files", [])}:
+          continue
+        upload_media_object(
+          media_object_key(movie["id"], "content", f"{quality_code}/{package}/{chunk_path.name}"),
+          chunk_path.read_bytes(),
+          "application/octet-stream",
+        )
+      _save_quality_torrent_package(manifest, movie["id"], quality_code)
+
+    _write_content_manifest(movie["id"], manifest)
+  return manifest, total_chunks
+
+
 async def _store_content_quality_upload(
   movie: dict,
   quality_code: str,
@@ -2909,6 +3099,38 @@ async def admin_upload_movie_content_quality(
     item=_sanitize_movie_payload(matched),
     message=(
       f'{quality_option["quality_label"]} content uploaded for "{matched["title"]}" '
+      f'with {chunk_count} encrypted chunk file{"s" if chunk_count != 1 else ""}. '
+      "Upload future start time was reset."
+    ),
+  )
+
+
+@router.post("/admin/movies/{movie_id}/assets/content-package", response_model=AdminMovieActionResponse)
+async def admin_upload_movie_converted_content_package(
+  movie_id: str,
+  files: list[UploadFile] = File(...),
+  relative_paths: list[str] = Form(default=[]),
+  db: Session | None = Depends(get_db),
+  _: dict[str, str] = Depends(require_admin),
+) -> AdminMovieActionResponse:
+  movie = _get_movie_or_404(db, movie_id)
+  _manifest, chunk_count = await _store_converted_content_package(movie, files, relative_paths)
+
+  if db:
+    schedule_movie = persistence.update_movie_content_delivery_start(db, movie_id, None)
+  else:
+    schedule_movie = demo_store.update_movie_content_delivery_start(movie_id, None)
+  if schedule_movie is None:
+    raise HTTPException(status_code=404, detail="Movie not found.")
+
+  matched = persistence.register_movie_asset_change(db, movie_id, "content") if db else demo_store.register_movie_asset_change(movie_id, "content")
+  if matched is None:
+    raise HTTPException(status_code=404, detail="Movie not found.")
+
+  return AdminMovieActionResponse(
+    item=_sanitize_movie_payload(matched),
+    message=(
+      f'Converted content package uploaded for "{matched["title"]}" '
       f'with {chunk_count} encrypted chunk file{"s" if chunk_count != 1 else ""}. '
       "Upload future start time was reset."
     ),

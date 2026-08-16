@@ -4814,7 +4814,32 @@ function renderAdminContentQualityAssets(container, items, isComplete) {
     : `${uploadedCount} of ${totalCount} title qualities uploaded. Finish the remaining cards before setting a future start time.`;
   setAdminContentUploadSummary(summaryMessage, adminContentQualityState.isComplete ? "success" : "warning");
 
-  container.innerHTML = adminContentQualityState.items.map((item) => {
+  const packageUploadHtml = `
+    <article class="admin-content-quality-card is-uploaded admin-content-package-upload">
+      <div class="admin-content-quality-card-header">
+        <div>
+          <h3>Upload Converted Content Folder</h3>
+          <p>Select the <strong>content</strong> folder created by the VCNR Converter.</p>
+        </div>
+      </div>
+      <label class="field admin-content-quality-field">
+        <span>Converted content folder</span>
+        <input
+          type="file"
+          multiple
+          webkitdirectory
+          directory
+          data-admin-content-package-input
+        >
+      </label>
+      <p class="admin-content-quality-file" data-admin-content-package-selection>No folder selected yet.</p>
+      <div class="admin-content-quality-actions">
+        <button type="button" class="primary-btn" data-admin-content-package-upload-button>Upload Converted Folder</button>
+      </div>
+    </article>
+  `;
+
+  const qualityCardsHtml = adminContentQualityState.items.map((item) => {
     const statusLabel = item.uploaded
       ? `Uploaded${item.chunkCount ? ` · ${item.chunkCount} chunk${item.chunkCount === 1 ? "" : "s"}` : ""}`
       : "Missing";
@@ -4830,32 +4855,14 @@ function renderAdminContentQualityAssets(container, items, isComplete) {
           </div>
         </div>
         <p class="admin-content-quality-file">${escapeHtml(existingFileLabel)}</p>
-        <label class="field admin-content-quality-field">
-          <span>Select file for ${escapeHtml(item.qualityLabel)}</span>
-          <input
-            type="file"
-            accept=".mp4,.m4v,.webm,video/mp4,video/webm"
-            data-admin-content-file-input
-            data-admin-content-quality-code="${escapeHtml(item.qualityCode)}"
-          >
-        </label>
-        <div class="admin-content-preview hidden" data-admin-content-file-preview>
-          <div class="admin-content-preview-placeholder">Choose a file to preview it here.</div>
-        </div>
-        <label class="field admin-content-quality-field">
-          <span>Passcode for encryption</span>
-          <div class="admin-content-password-row">
-            <input type="text" placeholder="Enter passcode" data-admin-content-password>
-            <button type="button" class="ghost-btn" data-admin-content-generate-password>Generate Strong Password</button>
-          </div>
-        </label>
+        <p class="admin-content-quality-file">${escapeHtml(statusLabel)}</p>
         <div class="admin-content-quality-actions">
-          <button type="button" class="primary-btn" data-admin-content-upload-button data-admin-content-quality-code="${escapeHtml(item.qualityCode)}">Upload ${escapeHtml(item.qualityLabel)}</button>
           <button type="button" class="icon-btn danger" data-admin-content-delete-button data-admin-content-quality-code="${escapeHtml(item.qualityCode)}" ${item.uploaded ? "" : "disabled"} aria-label="Delete ${escapeHtml(item.qualityLabel)}" title="Delete ${escapeHtml(item.qualityLabel)}">&#128465;</button>
         </div>
       </article>
     `;
   }).join("");
+  container.innerHTML = packageUploadHtml + qualityCardsHtml;
 }
 
 async function loadAdminContentQualityAssets(movieId) {
@@ -4925,6 +4932,29 @@ async function uploadAdminMovieContentQualityRemote(movieId, qualityCode, file, 
   syncDetailPanel();
   if (adminContentUploadStartAt) {
     adminContentUploadStartAt.value = "";
+  }
+  await loadAdminContentQualityAssets(movieId);
+  adminHelper.textContent = response.message;
+}
+
+async function uploadAdminMovieConvertedContentPackageRemote(movieId, files) {
+  const formData = new FormData();
+  Array.from(files || []).forEach((file) => {
+    formData.append("files", file, file.name);
+    formData.append("relative_paths", file.webkitRelativePath || file.name);
+  });
+  const response = await apiUploadRequest(`/admin/movies/${movieId}/assets/content-package`, formData);
+  const updatedMovie = normalizeMovie(response.item);
+  updateMovieCollections(updatedMovie);
+  renderAdminMovieList();
+  renderAdminArchiveMovieList();
+  renderMovieGrid();
+  syncDetailPanel();
+  if (adminContentUploadStartAt) {
+    adminContentUploadStartAt.value = "";
+  }
+  if (adminContentUploadStartAtDisplay) {
+    adminContentUploadStartAtDisplay.textContent = "Not set";
   }
   await loadAdminContentQualityAssets(movieId);
   adminHelper.textContent = response.message;
@@ -8441,6 +8471,24 @@ if (adminContentUploadForm) {
 
 if (adminContentAssetList) {
   adminContentAssetList.addEventListener("change", (event) => {
+    const packageInput = event.target.closest("[data-admin-content-package-input]");
+    if (packageInput) {
+      const selection = adminContentAssetList.querySelector("[data-admin-content-package-selection]");
+      const files = Array.from(packageInput.files || []);
+      const hasManifest = files.some((file) => {
+        const path = file.webkitRelativePath || file.name;
+        return path.replace(/\\/g, "/").split("/").pop() === "manifest.json";
+      });
+      const chunkCount = files.filter((file) => file.name.endsWith(".vcnr")).length;
+      const torrentCount = files.filter((file) => file.name.endsWith(".torrent")).length;
+      if (selection) {
+        selection.textContent = files.length
+          ? `${files.length} files selected · ${chunkCount} chunks · ${torrentCount} torrent file${torrentCount === 1 ? "" : "s"}${hasManifest ? "" : " · manifest.json missing"}`
+          : "No folder selected yet.";
+      }
+      return;
+    }
+
     const fileInput = event.target.closest("[data-admin-content-file-input]");
     if (!fileInput) {
       return;
@@ -8472,6 +8520,37 @@ if (adminContentAssetList) {
         }
       } catch (error) {
         adminHelper.textContent = error.message;
+      }
+      return;
+    }
+
+    const packageUploadButton = event.target.closest("[data-admin-content-package-upload-button]");
+    if (packageUploadButton) {
+      const movieId = adminContentMovieId?.value.trim();
+      const packageInput = adminContentAssetList.querySelector("[data-admin-content-package-input]");
+      const files = packageInput?.files || [];
+      try {
+        if (!movieId) {
+          throw new Error("Please choose a title first.");
+        }
+        if (!files.length) {
+          throw new Error("Please select the converted content folder created by VCNR Converter.");
+        }
+        const hasManifest = Array.from(files).some((file) => {
+          const path = file.webkitRelativePath || file.name;
+          return path.replace(/\\/g, "/").split("/").pop() === "manifest.json";
+        });
+        if (!hasManifest) {
+          throw new Error("The selected folder must contain manifest.json.");
+        }
+        packageUploadButton.disabled = true;
+        packageUploadButton.textContent = "Uploading...";
+        await uploadAdminMovieConvertedContentPackageRemote(movieId, files);
+      } catch (error) {
+        adminHelper.textContent = error.message;
+      } finally {
+        packageUploadButton.disabled = false;
+        packageUploadButton.textContent = "Upload Converted Folder";
       }
       return;
     }

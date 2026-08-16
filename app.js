@@ -315,6 +315,7 @@ const adminContentUploadStartAtDisplay = document.getElementById("adminContentUp
 const adminLibraryUploadStartAtDisplay = document.getElementById("adminLibraryUploadStartAtDisplay");
 
 let adminContentPreviewUrls = new Map();
+let adminContentSelectedPackageFiles = [];
 let adminContentQualityState = {
   movieId: "",
   items: [],
@@ -4787,12 +4788,56 @@ function renderAdminContentQualityPreview(card) {
   }
 }
 
+function summarizeAdminContentPackageSelection(files) {
+  const selectedFiles = Array.from(files || []);
+  const selection = adminContentAssetList?.querySelector("[data-admin-content-package-selection]");
+  if (!selection) {
+    return;
+  }
+  const hasManifest = selectedFiles.some((entry) => {
+    const file = entry.file || entry;
+    const path = entry.relativePath || file.webkitRelativePath || file.name;
+    return path.replace(/\\/g, "/").split("/").pop() === "manifest.json";
+  });
+  const chunkCount = selectedFiles.filter((entry) => (entry.file || entry).name.endsWith(".vcnr")).length;
+  const torrentCount = selectedFiles.filter((entry) => (entry.file || entry).name.endsWith(".torrent")).length;
+  selection.textContent = selectedFiles.length
+    ? `${selectedFiles.length} files selected · ${chunkCount} chunks · ${torrentCount} torrent file${torrentCount === 1 ? "" : "s"}${hasManifest ? "" : " · manifest.json missing"}`
+    : "No folder selected yet.";
+}
+
+async function collectAdminContentDirectoryFiles(directoryHandle, prefix = "") {
+  const files = [];
+  for await (const [name, handle] of directoryHandle.entries()) {
+    const relativePath = prefix ? `${prefix}/${name}` : name;
+    if (handle.kind === "file") {
+      const file = await handle.getFile();
+      files.push({ file, relativePath });
+    } else if (handle.kind === "directory") {
+      files.push(...await collectAdminContentDirectoryFiles(handle, relativePath));
+    }
+  }
+  return files;
+}
+
+async function chooseAdminConvertedContentFolder() {
+  if (!window.showDirectoryPicker) {
+    const packageInput = adminContentAssetList?.querySelector("[data-admin-content-package-input]");
+    packageInput?.click();
+    return;
+  }
+  const directoryHandle = await window.showDirectoryPicker({ mode: "read" });
+  adminContentSelectedPackageFiles = await collectAdminContentDirectoryFiles(directoryHandle, directoryHandle.name || "");
+  summarizeAdminContentPackageSelection(adminContentSelectedPackageFiles);
+}
+
 function renderAdminContentQualityAssets(container, items, isComplete) {
   if (!container) {
     return;
   }
 
   clearAdminContentPreviewUrls();
+  adminContentSelectedPackageFiles = [];
   const normalizedItems = Array.isArray(items) ? items.map(normalizeAdminContentQualityItem) : [];
   adminContentQualityState = {
     movieId: adminContentMovieId?.value.trim() || "",
@@ -4834,6 +4879,7 @@ function renderAdminContentQualityAssets(container, items, isComplete) {
       </label>
       <p class="admin-content-quality-file" data-admin-content-package-selection>No folder selected yet.</p>
       <div class="admin-content-quality-actions">
+        <button type="button" class="secondary-btn" data-admin-content-package-choose-button>Choose Converted Folder</button>
         <button type="button" class="primary-btn" data-admin-content-package-upload-button>Upload Converted Folder</button>
       </div>
     </article>
@@ -4938,15 +4984,21 @@ async function uploadAdminMovieContentQualityRemote(movieId, qualityCode, file, 
 }
 
 async function uploadAdminMovieConvertedContentPackageRemote(movieId, files) {
-  const selectedFiles = Array.from(files || []);
-  const manifestFile = selectedFiles.find((file) => {
-    const path = file.webkitRelativePath || file.name;
+  const selectedEntries = Array.from(files || []).map((entry) => {
+    const file = entry.file || entry;
+    return {
+      file,
+      relativePath: entry.relativePath || file.webkitRelativePath || file.name,
+    };
+  });
+  const manifestEntry = selectedEntries.find((entry) => {
+    const path = entry.relativePath || entry.file.name;
     return path.replace(/\\/g, "/").split("/").pop() === "manifest.json";
   });
-  if (!manifestFile) {
+  if (!manifestEntry) {
     throw new Error("The selected folder must contain manifest.json.");
   }
-  const manifestJson = await manifestFile.text();
+  const manifestJson = await manifestEntry.file.text();
   let manifest;
   try {
     manifest = JSON.parse(manifestJson);
@@ -4982,8 +5034,8 @@ async function uploadAdminMovieConvertedContentPackageRemote(movieId, files) {
       chunkQualityByName.set(name, finalCode);
     }
   });
-  const uploadFiles = selectedFiles.filter((file) => {
-    const name = file.name.toLowerCase();
+  const uploadFiles = selectedEntries.filter((entry) => {
+    const name = entry.file.name.toLowerCase();
     return name.endsWith(".vcnr") || name.endsWith(".torrent");
   });
   if (!uploadFiles.length) {
@@ -4991,8 +5043,9 @@ async function uploadAdminMovieConvertedContentPackageRemote(movieId, files) {
   }
 
   for (let index = 0; index < uploadFiles.length; index += 1) {
-    const file = uploadFiles[index];
-    const relativePath = file.webkitRelativePath || file.name;
+    const entry = uploadFiles[index];
+    const file = entry.file;
+    const relativePath = entry.relativePath || file.name;
     adminHelper.textContent = `Uploading ${index + 1} of ${uploadFiles.length}: ${file.name}`;
     const presignForm = new FormData();
     presignForm.append("relative_path", relativePath);
@@ -8566,19 +8619,8 @@ if (adminContentAssetList) {
   adminContentAssetList.addEventListener("change", (event) => {
     const packageInput = event.target.closest("[data-admin-content-package-input]");
     if (packageInput) {
-      const selection = adminContentAssetList.querySelector("[data-admin-content-package-selection]");
-      const files = Array.from(packageInput.files || []);
-      const hasManifest = files.some((file) => {
-        const path = file.webkitRelativePath || file.name;
-        return path.replace(/\\/g, "/").split("/").pop() === "manifest.json";
-      });
-      const chunkCount = files.filter((file) => file.name.endsWith(".vcnr")).length;
-      const torrentCount = files.filter((file) => file.name.endsWith(".torrent")).length;
-      if (selection) {
-        selection.textContent = files.length
-          ? `${files.length} files selected · ${chunkCount} chunks · ${torrentCount} torrent file${torrentCount === 1 ? "" : "s"}${hasManifest ? "" : " · manifest.json missing"}`
-          : "No folder selected yet.";
-      }
+      adminContentSelectedPackageFiles = Array.from(packageInput.files || []);
+      summarizeAdminContentPackageSelection(adminContentSelectedPackageFiles);
       return;
     }
 
@@ -8617,11 +8659,25 @@ if (adminContentAssetList) {
       return;
     }
 
+    const packageChooseButton = event.target.closest("[data-admin-content-package-choose-button]");
+    if (packageChooseButton) {
+      try {
+        await chooseAdminConvertedContentFolder();
+      } catch (error) {
+        if (error?.name !== "AbortError") {
+          adminHelper.textContent = error.message || "Could not select the converted folder.";
+        }
+      }
+      return;
+    }
+
     const packageUploadButton = event.target.closest("[data-admin-content-package-upload-button]");
     if (packageUploadButton) {
       const movieId = adminContentMovieId?.value.trim();
       const packageInput = adminContentAssetList.querySelector("[data-admin-content-package-input]");
-      const files = packageInput?.files || [];
+      const files = adminContentSelectedPackageFiles.length
+        ? adminContentSelectedPackageFiles
+        : Array.from(packageInput?.files || []);
       try {
         if (!movieId) {
           throw new Error("Please choose a title first.");
@@ -8629,8 +8685,9 @@ if (adminContentAssetList) {
         if (!files.length) {
           throw new Error("Please select the converted content folder created by VCNR Converter.");
         }
-        const hasManifest = Array.from(files).some((file) => {
-          const path = file.webkitRelativePath || file.name;
+        const hasManifest = Array.from(files).some((entry) => {
+          const file = entry.file || entry;
+          const path = entry.relativePath || file.webkitRelativePath || file.name;
           return path.replace(/\\/g, "/").split("/").pop() === "manifest.json";
         });
         if (!hasManifest) {

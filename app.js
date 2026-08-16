@@ -4938,12 +4938,43 @@ async function uploadAdminMovieContentQualityRemote(movieId, qualityCode, file, 
 }
 
 async function uploadAdminMovieConvertedContentPackageRemote(movieId, files) {
-  const formData = new FormData();
-  Array.from(files || []).forEach((file) => {
-    formData.append("files", file, file.name);
-    formData.append("relative_paths", file.webkitRelativePath || file.name);
+  const selectedFiles = Array.from(files || []);
+  const manifestFile = selectedFiles.find((file) => {
+    const path = file.webkitRelativePath || file.name;
+    return path.replace(/\\/g, "/").split("/").pop() === "manifest.json";
   });
-  const response = await apiUploadRequest(`/admin/movies/${movieId}/assets/content-package`, formData);
+  if (!manifestFile) {
+    throw new Error("The selected folder must contain manifest.json.");
+  }
+  const manifestJson = await manifestFile.text();
+  const uploadFiles = selectedFiles.filter((file) => {
+    const name = file.name.toLowerCase();
+    return name.endsWith(".vcnr") || name.endsWith(".torrent");
+  });
+  if (!uploadFiles.length) {
+    throw new Error("The selected folder does not contain any .vcnr or .torrent files.");
+  }
+
+  for (let index = 0; index < uploadFiles.length; index += 1) {
+    const file = uploadFiles[index];
+    const relativePath = file.webkitRelativePath || file.name;
+    adminHelper.textContent = `Uploading ${index + 1} of ${uploadFiles.length}: ${file.name}`;
+    const presignForm = new FormData();
+    presignForm.append("relative_path", relativePath);
+    const presign = await apiUploadRequest(`/admin/movies/${movieId}/assets/content-package/presign`, presignForm);
+    const putResponse = await fetch(presign.upload_url, {
+      method: "PUT",
+      body: file,
+    });
+    if (!putResponse.ok) {
+      throw new Error(`Direct upload failed for ${file.name} with HTTP ${putResponse.status}.`);
+    }
+  }
+
+  adminHelper.textContent = "Finalizing converted content package...";
+  const registerForm = new FormData();
+  registerForm.append("manifest_json", manifestJson);
+  const response = await apiUploadRequest(`/admin/movies/${movieId}/assets/content-package/register`, registerForm);
   const updatedMovie = normalizeMovie(response.item);
   updateMovieCollections(updatedMovie);
   renderAdminMovieList();

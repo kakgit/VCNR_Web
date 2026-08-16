@@ -2127,6 +2127,127 @@ async def _store_converted_content_package(
   return manifest, total_chunks
 
 
+def _converted_content_destination(movie_id: str, relative_path: str) -> tuple[str, str, str]:
+  normalized_path = _normalize_upload_relative_path(relative_path)
+  path = Path(normalized_path)
+  filename = path.name
+  if not filename:
+    raise HTTPException(status_code=400, detail="Invalid converted content file path.")
+  suffix = path.suffix.lower()
+  parts = normalized_path.split("/")
+  quality_code = _normalize_quality_code(parts[0] if len(parts) > 1 else path.stem)
+  if suffix == ".vcnr":
+    if len(parts) < 2:
+      raise HTTPException(status_code=400, detail="Encrypted chunk files must be inside a quality folder.")
+    package = _content_package_name(movie_id, quality_code)
+    return quality_code, filename, media_object_key(movie_id, "content", f"{quality_code}/{package}/{filename}")
+  if suffix == ".torrent":
+    if len(parts) < 2:
+      raise HTTPException(status_code=400, detail="Torrent files must be inside a quality folder.")
+    return quality_code, filename, media_object_key(movie_id, "content", f"{quality_code}/{quality_code}.torrent")
+  raise HTTPException(status_code=400, detail="Only .vcnr chunks and .torrent files are uploaded directly.")
+
+
+def _build_registered_converted_manifest(movie: dict, source_manifest: dict) -> tuple[dict, int]:
+  configured_qualities = {
+    _normalize_quality_code(item["quality_code"]): item
+    for item in _movie_content_qualities(movie)
+  }
+  source_quality_lookup = _content_quality_lookup(source_manifest)
+  required_codes = set(configured_qualities.keys())
+  source_codes = set(source_quality_lookup.keys())
+  missing_codes = sorted(required_codes - source_codes)
+  unknown_codes = sorted(source_codes - required_codes)
+  if missing_codes:
+    raise HTTPException(status_code=400, detail=f"Converted package is missing title qualities: {', '.join(missing_codes)}.")
+  if unknown_codes:
+    raise HTTPException(status_code=400, detail=f"Converted package has unknown title qualities: {', '.join(unknown_codes)}.")
+
+  manifest = _default_content_manifest(movie)
+  manifest["movie_id"] = movie["id"]
+  manifest["movie_title"] = movie["title"]
+  manifest["delivery_start_at"] = None
+  manifest["upload_start_at"] = None
+  manifest["password_publish_at"] = movie.get("password_publish_at")
+  manifest["encryption"] = source_manifest.get("encryption") or {
+    "algorithm": "AES-256-GCM",
+    "kdf": "PBKDF2-HMAC-SHA256",
+    "iterations": CONTENT_KDF_ITERATIONS,
+    "salt_bytes": CONTENT_SALT_SIZE,
+    "nonce_bytes": CONTENT_NONCE_SIZE,
+    "tag_bytes": CONTENT_TAG_SIZE,
+  }
+  manifest["qualities"] = []
+  manifest["files"] = []
+  manifest["torrent_packages"] = {}
+
+  total_chunks = 0
+  for quality_code in sorted(required_codes, key=lambda code: (configured_qualities[code]["sort_order"], configured_qualities[code]["quality_label"])):
+    source_entry = source_quality_lookup[quality_code]
+    configured_entry = configured_qualities[quality_code]
+    source_files = [
+      dict(item)
+      for item in source_entry.get("files", [])
+      if _normalize_quality_code(str(item.get("quality_code") or "")) == quality_code
+    ]
+    if not source_files:
+      raise HTTPException(status_code=400, detail=f"{configured_entry['quality_label']} has no chunk records in manifest.json.")
+
+    saved_files: list[dict] = []
+    for record in sorted(source_files, key=lambda item: (int(item.get("chunk_index") or 0), str(item.get("name") or ""))):
+      chunk_name = Path(str(record.get("name") or "")).name
+      if not chunk_name.endswith(".vcnr"):
+        raise HTTPException(status_code=400, detail=f"{configured_entry['quality_label']} has an invalid chunk name in manifest.json.")
+      package = _content_package_name(movie["id"], quality_code)
+      if not media_object_exists(media_object_key(movie["id"], "content", f"{quality_code}/{package}/{chunk_name}")):
+        raise HTTPException(status_code=404, detail=f"Uploaded chunk was not found in R2: {chunk_name}.")
+      saved_record = dict(record)
+      saved_record["name"] = chunk_name
+      saved_record["quality_code"] = quality_code
+      saved_record["quality_label"] = configured_entry["quality_label"]
+      saved_files.append(saved_record)
+
+    torrent_file_name = f"{quality_code}.torrent"
+    if not media_object_exists(media_object_key(movie["id"], "content", f"{quality_code}/{torrent_file_name}")):
+      raise HTTPException(status_code=404, detail=f"Uploaded torrent was not found in R2: {torrent_file_name}.")
+
+    torrent_metadata = (
+      source_manifest.get("torrent_packages", {}).get(quality_code)
+      or source_entry.get("torrent")
+      or {}
+    )
+    if isinstance(torrent_metadata, dict):
+      torrent_metadata = dict(torrent_metadata)
+      torrent_metadata["torrent_file_name"] = torrent_file_name
+      torrent_metadata["quality_torrent_file_name"] = torrent_file_name
+      torrent_metadata["saved_at"] = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+    else:
+      torrent_metadata = {
+        "torrent_file_name": torrent_file_name,
+        "quality_torrent_file_name": torrent_file_name,
+        "saved_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+      }
+
+    quality_entry = {
+      "quality_code": quality_code,
+      "quality_label": configured_entry["quality_label"],
+      "stars_required": configured_entry["stars_required"],
+      "sort_order": configured_entry["sort_order"],
+      "source_name": source_entry.get("source_name") or configured_entry["quality_label"],
+      "source_extension": source_entry.get("source_extension"),
+      "password_sha256": source_entry.get("password_sha256"),
+      "uploaded_at": source_entry.get("uploaded_at") or datetime.utcnow().isoformat(timespec="seconds") + "Z",
+      "chunk_count": len(saved_files),
+      "files": saved_files,
+      "torrent": torrent_metadata,
+    }
+    _replace_content_quality_entry(manifest, quality_code, quality_entry)
+    manifest["torrent_packages"][quality_code] = torrent_metadata
+    total_chunks += len(saved_files)
+
+  return manifest, total_chunks
+
+
 async def _store_content_quality_upload(
   movie: dict,
   quality_code: str,
@@ -3115,6 +3236,66 @@ async def admin_upload_movie_converted_content_package(
 ) -> AdminMovieActionResponse:
   movie = _get_movie_or_404(db, movie_id)
   _manifest, chunk_count = await _store_converted_content_package(movie, files, relative_paths)
+
+  if db:
+    schedule_movie = persistence.update_movie_content_delivery_start(db, movie_id, None)
+  else:
+    schedule_movie = demo_store.update_movie_content_delivery_start(movie_id, None)
+  if schedule_movie is None:
+    raise HTTPException(status_code=404, detail="Movie not found.")
+
+  matched = persistence.register_movie_asset_change(db, movie_id, "content") if db else demo_store.register_movie_asset_change(movie_id, "content")
+  if matched is None:
+    raise HTTPException(status_code=404, detail="Movie not found.")
+
+  return AdminMovieActionResponse(
+    item=_sanitize_movie_payload(matched),
+    message=(
+      f'Converted content package uploaded for "{matched["title"]}" '
+      f'with {chunk_count} encrypted chunk file{"s" if chunk_count != 1 else ""}. '
+      "Upload future start time was reset."
+    ),
+  )
+
+
+@router.post("/admin/movies/{movie_id}/assets/content-package/presign")
+def admin_presign_movie_converted_content_file(
+  movie_id: str,
+  relative_path: str = Form(...),
+  db: Session | None = Depends(get_db),
+  _: dict[str, str] = Depends(require_admin),
+) -> dict:
+  _get_movie_or_404(db, movie_id)
+  quality_code, filename, key = _converted_content_destination(movie_id, relative_path)
+  upload_url = presign_media_upload(key)
+  if upload_url is None:
+    raise HTTPException(status_code=503, detail="Unable to create a direct upload URL right now.")
+  return {
+    "movie_id": movie_id,
+    "quality_code": quality_code,
+    "filename": filename,
+    "key": key,
+    "upload_url": upload_url,
+  }
+
+
+@router.post("/admin/movies/{movie_id}/assets/content-package/register", response_model=AdminMovieActionResponse)
+def admin_register_movie_converted_content_package(
+  movie_id: str,
+  manifest_json: str = Form(...),
+  db: Session | None = Depends(get_db),
+  _: dict[str, str] = Depends(require_admin),
+) -> AdminMovieActionResponse:
+  movie = _get_movie_or_404(db, movie_id)
+  try:
+    source_manifest = json.loads(manifest_json)
+  except Exception:
+    raise HTTPException(status_code=400, detail="The converted manifest.json is invalid.")
+  if not isinstance(source_manifest, dict):
+    raise HTTPException(status_code=400, detail="The converted manifest.json is invalid.")
+
+  manifest, chunk_count = _build_registered_converted_manifest(movie, source_manifest)
+  _write_content_manifest(movie_id, manifest)
 
   if db:
     schedule_movie = persistence.update_movie_content_delivery_start(db, movie_id, None)

@@ -4564,7 +4564,7 @@ def _download_movie_public_delivery_chunk_impl(
   )
 
 
-@router.api_route("/movies/{movie_id}/delivery/public-chunks/{quality_code}/{chunk_name}", methods=["GET", "HEAD"])
+@router.api_route("/movies/{movie_id}/delivery/public-chunks/{quality_code}/{chunk_name}", methods=["GET", "HEAD"], response_model=None)
 def download_movie_public_delivery_chunk(
   movie_id: str,
   quality_code: str,
@@ -4583,7 +4583,7 @@ def download_movie_public_delivery_chunk(
   )
 
 
-@router.api_route("/movies/{movie_id}/delivery/public-chunks/{quality_code}/{package_name}/{chunk_name}", methods=["GET", "HEAD"])
+@router.api_route("/movies/{movie_id}/delivery/public-chunks/{quality_code}/{package_name}/{chunk_name}", methods=["GET", "HEAD"], response_model=None)
 def download_movie_public_delivery_chunk_with_package(
   movie_id: str,
   quality_code: str,
@@ -4618,7 +4618,7 @@ def download_movie_public_delivery_chunk_with_package(
   )
 
 
-@router.api_route("/movies/{movie_id}/delivery/public-chunks/{quality_code}/{package_path:path}", methods=["GET", "HEAD"])
+@router.api_route("/movies/{movie_id}/delivery/public-chunks/{quality_code}/{package_path:path}", methods=["GET", "HEAD"], response_model=None)
 def download_movie_public_delivery_chunk_with_nested_package_path(
   movie_id: str,
   quality_code: str,

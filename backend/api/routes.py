@@ -18,8 +18,8 @@ import urllib.parse
 import urllib.request
 import zipfile
 
-from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, UploadFile
-from fastapi.responses import FileResponse, RedirectResponse
+from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from starlette.background import BackgroundTask
 user_site_packages = site.getusersitepackages()
 if user_site_packages and user_site_packages not in sys.path:
@@ -1722,8 +1722,8 @@ def _normalize_upload_torrent_webseed_base(
   """Return the full webseed folder URL for a movie's delivery torrent.
 
   The returned value is a BitTorrent HTTP webseed base.  BitComet / libtorrent
-  append each torrent file path (a single chunk filename) to this base to build
-  the chunk download URL.
+  append the torrent ``info.name`` folder and each file path to this base
+  (BEP19 multi-file layout) to build the chunk download URL.
 
   Webseed layouts:
 
@@ -1777,12 +1777,22 @@ def _r2_chunk_download_url(movie_id: str, quality_code: str, chunk_name: str) ->
   redirects the torrent client / mobile app to it. This works even when the R2
   bucket's public read access is NOT enabled (the ``pub-...r2.dev`` URL would
   otherwise return Cloudflare's "Is this your bucket?" 404 page).
+
+  Returns None when the object is missing so callers can fail fast (404) instead
+  of redirecting peers to a dead R2 URL. That lets mobile clients fall back to
+  DHT/LAN seeders when server packages were deleted.
   """
   if not r2_enabled():
     return None
   normalized_quality_code = _normalize_quality_code(quality_code)
   package_name = _content_package_name(movie_id, normalized_quality_code)
   key = media_object_key(movie_id, "content", f"{normalized_quality_code}/{package_name}/{chunk_name}")
+  if not media_object_exists(key):
+    # Legacy flat layout used by older uploads.
+    legacy_key = media_object_key(movie_id, "content", f"{normalized_quality_code}/{chunk_name}")
+    if media_object_exists(legacy_key):
+      return presign_media_download(legacy_key, expires_seconds=3600)
+    return None
   return presign_media_download(key, expires_seconds=3600)
 
 
@@ -2249,7 +2259,8 @@ def _build_registered_converted_manifest(movie: dict, source_manifest: dict) -> 
       saved_files.append(saved_record)
 
     torrent_file_name = f"{quality_code}.torrent"
-    if not media_object_exists(media_object_key(movie["id"], "content", f"{quality_code}/{torrent_file_name}")):
+    torrent_object_key = media_object_key(movie["id"], "content", f"{quality_code}/{torrent_file_name}")
+    if not media_object_exists(torrent_object_key):
       raise HTTPException(status_code=404, detail=f"Uploaded torrent was not found in R2: {torrent_file_name}.")
 
     torrent_metadata = (
@@ -2257,17 +2268,26 @@ def _build_registered_converted_manifest(movie: dict, source_manifest: dict) -> 
       or source_entry.get("torrent")
       or {}
     )
-    if isinstance(torrent_metadata, dict):
-      torrent_metadata = dict(torrent_metadata)
-      torrent_metadata["torrent_file_name"] = torrent_file_name
-      torrent_metadata["quality_torrent_file_name"] = torrent_file_name
-      torrent_metadata["saved_at"] = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+    if not isinstance(torrent_metadata, dict):
+      torrent_metadata = {}
     else:
-      torrent_metadata = {
-        "torrent_file_name": torrent_file_name,
-        "quality_torrent_file_name": torrent_file_name,
-        "saved_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
-      }
+      torrent_metadata = dict(torrent_metadata)
+
+    # Converter torrents are often saved with an empty url-list. Inject the
+    # current App-API (+ optional R2) webseeds before the package goes live.
+    try:
+      stored_torrent = download_media_object(torrent_object_key)
+    except Exception:
+      stored_torrent = None
+    if not stored_torrent:
+      raise HTTPException(status_code=404, detail=f"Uploaded torrent was not found in R2: {torrent_file_name}.")
+    _refreshed_torrent, torrent_metadata = _refresh_quality_torrent_bytes(
+      movie["id"],
+      quality_code,
+      stored_torrent,
+      persist=True,
+      existing_metadata=torrent_metadata,
+    )
 
     quality_entry = {
       "quality_code": quality_code,
@@ -3907,11 +3927,27 @@ def _torrent_with_webseeds(
   return _bencode_value(root)
 
 
-def _torrent_webseed_urls(movie_id: str, quality_code: str) -> list[str]:
-  """Build the current webseed list (App-API primary + direct R2 secondary)."""
+def _torrent_webseed_urls(
+  movie_id: str,
+  quality_code: str,
+  torrent_info_name: str | None = None,
+) -> list[str]:
+  """Build the current webseed list (App-API primary + direct R2 secondary).
+
+  When ``torrent_info_name`` is provided and differs from the server package
+  folder (common for VCNR Converter packages renamed on upload), the App-API
+  webseed base is extended with the *server* package segment. BitComet then
+  requests ``{base}/{server_pkg}/{info.name}/{chunk}``, which the catch-all
+  public-chunks route resolves by chunk filename. That keeps webseeds working
+  on deployments that still require ``package_name == {movie_id}-{quality}.vcnr-pkg``.
+  """
   webseed_urls: list[str] = []
   api_base = _normalize_upload_torrent_webseed_base(movie_id, quality_code)
   if api_base:
+    normalized = _normalize_quality_code(quality_code)
+    expected_package = _content_package_name(movie_id, normalized) if normalized else ""
+    if torrent_info_name and expected_package and torrent_info_name != expected_package:
+      api_base = api_base.rstrip("/") + f"/{expected_package}/"
     webseed_urls.append(api_base.rstrip("/") + "/")
   r2_folder = _quality_chunk_webseed_base(movie_id, quality_code) if r2_enabled() else None
   if r2_folder and r2_folder.startswith(("http://", "https://")):
@@ -3919,6 +3955,105 @@ def _torrent_webseed_urls(movie_id: str, quality_code: str) -> list[str]:
     if norm_r2 not in webseed_urls:
       webseed_urls.append(norm_r2)
   return webseed_urls
+
+
+def _torrent_tracker_list() -> list[str]:
+  return [tracker for tracker in get_settings().public_torrent_trackers if tracker]
+
+
+def _torrent_display_name(torrent_bytes: bytes, fallback: str) -> str:
+  try:
+    root = _bdecode(torrent_bytes)
+    info = root.get(b"info") if isinstance(root, dict) else None
+    if isinstance(info, dict):
+      raw_name = info.get(b"name")
+      if isinstance(raw_name, (bytes, bytearray)):
+        name = bytes(raw_name).decode("utf-8", "replace").strip()
+        if name:
+          return name
+  except Exception:
+    pass
+  return fallback
+
+
+def _magnet_uri_for_delivery(
+  info_hash: str,
+  display_name: str,
+  webseed_urls: list[str],
+  trackers: list[str],
+) -> str:
+  magnet_parts = [f"xt=urn:btih:{info_hash}", f"dn={display_name}"]
+  for ws in webseed_urls:
+    magnet_parts.append(f"ws={ws}")
+  for tracker in trackers:
+    magnet_parts.append(f"tr={tracker}")
+  return "magnet:?" + "&".join(magnet_parts)
+
+
+def _refresh_quality_torrent_bytes(
+  movie_id: str,
+  quality_code: str,
+  torrent_bytes: bytes,
+  *,
+  persist: bool = False,
+  existing_metadata: dict | None = None,
+) -> tuple[bytes, dict]:
+  """Re-apply current webseed/tracker lists to a stored torrent (infohash unchanged).
+
+  Converter-uploaded torrents often ship with an empty ``url-list``. Refreshing
+  here is what makes BitComet / libtorrent able to HTTP-webseed from the App API
+  (and optional public R2 folder) without rebuilding piece hashes.
+  """
+  normalized = _normalize_quality_code(quality_code)
+  torrent_info_name = _torrent_display_name(torrent_bytes, "")
+  webseed_urls = _torrent_webseed_urls(
+    movie_id,
+    normalized,
+    torrent_info_name=torrent_info_name or None,
+  )
+  trackers = _torrent_tracker_list()
+  refreshed = _torrent_with_webseeds(torrent_bytes, webseed_urls, trackers)
+  info_hash = _info_hash_from_torrent_bytes(refreshed) or str((existing_metadata or {}).get("info_hash_sha1") or "")
+  torrent_name = torrent_info_name or _torrent_display_name(
+    refreshed,
+    str((existing_metadata or {}).get("torrent_name") or f"{movie_id}-{normalized}.vcnr-pkg"),
+  )
+  torrent_path = _quality_content_torrent_path(movie_id, normalized)
+  legacy_torrent_path = _content_torrent_path(movie_id, normalized)
+  saved_at = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+  metadata = {
+    key: value
+    for key, value in (existing_metadata or {}).items()
+    if key not in {"torrent_file_name", "quality_torrent_file_name", "saved_at"}
+  }
+  metadata.update(
+    {
+      "info_hash_sha1": info_hash,
+      "torrent_name": torrent_name,
+      "trackers": list(trackers),
+      "webseed_urls": list(webseed_urls),
+      "magnet_uri": _magnet_uri_for_delivery(info_hash, torrent_name, webseed_urls, trackers) if info_hash else "",
+      "bootstrap_nodes": list(metadata.get("bootstrap_nodes") or TORRENT_BOOTSTRAP_DHT_NODES),
+      "use_dht": True,
+      "use_lsd": True,
+      "use_pex": True,
+      "torrent_file_name": torrent_path.name,
+      "quality_torrent_file_name": torrent_path.name,
+      "saved_at": saved_at,
+    }
+  )
+  if persist:
+    torrent_path.parent.mkdir(parents=True, exist_ok=True)
+    torrent_path.write_bytes(refreshed)
+    legacy_torrent_path.unlink(missing_ok=True)
+    if r2_enabled():
+      delete_media_object(media_object_key(movie_id, "content", legacy_torrent_path.name))
+      upload_media_object(
+        media_object_key(movie_id, "content", f"{normalized}/{torrent_path.name}"),
+        refreshed,
+        "application/x-bittorrent",
+      )
+  return refreshed, metadata
 
 
 def _info_hash_from_torrent_bytes(torrent_bytes: bytes) -> str:
@@ -4168,25 +4303,43 @@ def get_movie_delivery_torrent(
   )
 
   readable_torrent_path = torrent_path if torrent_path.is_file() else legacy_torrent_path
-  if readable_torrent_path.is_file() and isinstance(saved_metadata, dict) and saved_metadata.get("info_hash_sha1"):
-    payload = {
-      key: value
-      for key, value in saved_metadata.items()
-      if key not in {"torrent_file_name", "quality_torrent_file_name", "saved_at"}
-    }
-    payload["torrent_base64"] = b64encode(readable_torrent_path.read_bytes()).decode("ascii")
-    return DeliveryTorrentResponse(
-      movie_id=movie_id,
-      quality_code=normalized,
-      **payload,
-    )
+  if readable_torrent_path.is_file():
+    try:
+      refreshed_torrent, torrent_metadata = _refresh_quality_torrent_bytes(
+        movie_id,
+        normalized,
+        readable_torrent_path.read_bytes(),
+        persist=True,
+        existing_metadata=saved_metadata if isinstance(saved_metadata, dict) else {},
+      )
+      manifest.setdefault("torrent_packages", {})
+      manifest["torrent_packages"][normalized] = torrent_metadata
+      quality_lookup = _content_quality_lookup(manifest)
+      quality_entry = quality_lookup.get(normalized)
+      if quality_entry is not None:
+        quality_entry["torrent"] = torrent_metadata
+      manifest["updated_at"] = str(torrent_metadata.get("saved_at") or "")
+      _write_content_manifest(movie_id, manifest)
+    except Exception:
+      refreshed_torrent = readable_torrent_path.read_bytes()
+      torrent_metadata = saved_metadata if isinstance(saved_metadata, dict) else {}
+    if refreshed_torrent:
+      payload = {
+        key: value
+        for key, value in torrent_metadata.items()
+        if key not in {"torrent_file_name", "quality_torrent_file_name", "saved_at"}
+      }
+      payload["torrent_base64"] = b64encode(refreshed_torrent).decode("ascii")
+      return DeliveryTorrentResponse(
+        movie_id=movie_id,
+        quality_code=normalized,
+        **payload,
+      )
 
   # Local torrent file missing (e.g. fresh ephemeral disk after a redeploy).
   # Recover the previously generated torrent package from R2 and re-apply the
   # CURRENT webseed/tracker lists so clients get the working App-API webseed
   # without re-uploading the content.
-  webseed_urls = _torrent_webseed_urls(movie_id, normalized)
-  trackers = [tracker for tracker in get_settings().public_torrent_trackers if tracker]
   if r2_enabled():
     stored_bytes = None
     for object_name in (f"{normalized}/{torrent_path.name}", legacy_torrent_path.name):
@@ -4198,73 +4351,36 @@ def get_movie_delivery_torrent(
         break
     if stored_bytes:
       try:
-        recovered_torrent = _torrent_with_webseeds(stored_bytes, webseed_urls, trackers)
+        recovered_torrent, torrent_metadata = _refresh_quality_torrent_bytes(
+          movie_id,
+          normalized,
+          stored_bytes,
+          persist=True,
+          existing_metadata=saved_metadata if isinstance(saved_metadata, dict) else {},
+        )
+        manifest.setdefault("torrent_packages", {})
+        manifest["torrent_packages"][normalized] = torrent_metadata
+        quality_lookup = _content_quality_lookup(manifest)
+        quality_entry = quality_lookup.get(normalized)
+        if quality_entry is not None:
+          quality_entry["torrent"] = torrent_metadata
+        manifest["updated_at"] = str(torrent_metadata.get("saved_at") or "")
+        _write_content_manifest(movie_id, manifest)
       except Exception:
         recovered_torrent = None
-      if recovered_torrent:
         torrent_metadata = None
-        try:
-          torrent_path.parent.mkdir(parents=True, exist_ok=True)
-          torrent_path.write_bytes(recovered_torrent)
-          legacy_torrent_path.unlink(missing_ok=True)
-          delete_media_object(media_object_key(movie_id, "content", legacy_torrent_path.name))
-          upload_media_object(
-            media_object_key(movie_id, "content", f"{normalized}/{torrent_path.name}"),
-            recovered_torrent,
-            "application/x-bittorrent",
-          )
-          info_hash = _info_hash_from_torrent_bytes(recovered_torrent) or str(saved_metadata.get("info_hash_sha1") or "")
-          torrent_name = str(saved_metadata.get("torrent_name") or f"{movie_id}-{normalized}.vcnr-pkg")
-          magnet_parts = [f"xt=urn:btih:{info_hash}", f"dn={torrent_name}"]
-          for ws in webseed_urls:
-            magnet_parts.append(f"ws={ws}")
-          for tracker in trackers:
-            magnet_parts.append(f"tr={tracker}")
-          saved_at = datetime.utcnow().isoformat(timespec="seconds") + "Z"
-          torrent_metadata = {
-            "info_hash_sha1": info_hash,
-            "torrent_name": torrent_name,
-            "total_bytes": int(saved_metadata.get("total_bytes") or 0),
-            "piece_length": int(saved_metadata.get("piece_length") or 0),
-            "piece_count": int(saved_metadata.get("piece_count") or 0),
-            "file_count": int(saved_metadata.get("file_count") or 0),
-            "comment": str(saved_metadata.get("comment") or ""),
-            "created_by": str(saved_metadata.get("created_by") or ""),
-            "created_at": int(saved_metadata.get("created_at") or 0),
-            "trackers": list(trackers),
-            "webseed_urls": list(webseed_urls),
-            "magnet_uri": "magnet:?" + "&".join(magnet_parts),
-            "bootstrap_nodes": list(saved_metadata.get("bootstrap_nodes") or TORRENT_BOOTSTRAP_DHT_NODES),
-            "use_dht": True,
-            "use_lsd": True,
-            "use_pex": True,
-            "torrent_file_name": torrent_path.name,
-            "quality_torrent_file_name": torrent_path.name,
-            "saved_at": saved_at,
-          }
-          manifest.setdefault("torrent_packages", {})
-          manifest["torrent_packages"][normalized] = torrent_metadata
-          quality_lookup = _content_quality_lookup(manifest)
-          quality_entry = quality_lookup.get(normalized)
-          if quality_entry is not None:
-            quality_entry["torrent"] = torrent_metadata
-          manifest["updated_at"] = saved_at
-          _write_content_manifest(movie_id, manifest)
-        except Exception:
-          # Best-effort: still hand out the recovered torrent even if persisting it failed.
-          pass
-        if torrent_metadata is not None:
-          payload = {
-            key: value
-            for key, value in torrent_metadata.items()
-            if key not in {"torrent_file_name", "quality_torrent_file_name", "saved_at"}
-          }
-          payload["torrent_base64"] = b64encode(recovered_torrent).decode("ascii")
-          return DeliveryTorrentResponse(
-            movie_id=movie_id,
-            quality_code=normalized,
-            **payload,
-          )
+      if recovered_torrent and torrent_metadata is not None:
+        payload = {
+          key: value
+          for key, value in torrent_metadata.items()
+          if key not in {"torrent_file_name", "quality_torrent_file_name", "saved_at"}
+        }
+        payload["torrent_base64"] = b64encode(recovered_torrent).decode("ascii")
+        return DeliveryTorrentResponse(
+          movie_id=movie_id,
+          quality_code=normalized,
+          **payload,
+        )
 
   # No recoverable torrent package: build a fresh torrent from local chunk files
   # (used at upload time and when R2 is unavailable).
@@ -4315,12 +4431,88 @@ def get_movie_delivery_torrent(
   return DeliveryTorrentResponse(**payload_out)
 
 
+def _proxy_presigned_r2_chunk(
+  r2_url: str,
+  *,
+  range_header: str | None = None,
+  method: str = "GET",
+) -> StreamingResponse:
+  """Stream a presigned R2 object through the app (HTTP 200/206, no redirect).
+
+  BitComet and some other torrent clients fail to follow ``307`` redirects to
+  signed R2 URLs for BEP19 webseeds. Proxying keeps the webseed URL stable and
+  returns a direct body they can consume.
+  """
+  request_headers: dict[str, str] = {}
+  if range_header:
+    request_headers["Range"] = range_header
+  upstream_method = "HEAD" if method.upper() == "HEAD" else "GET"
+  upstream_request = urllib.request.Request(
+    r2_url,
+    headers=request_headers,
+    method=upstream_method,
+  )
+  try:
+    upstream = urllib.request.urlopen(upstream_request, timeout=60)
+  except urllib.error.HTTPError as exc:
+    if exc.code in {401, 403, 404}:
+      raise HTTPException(status_code=404, detail="Encrypted chunk not found in object storage.") from exc
+    raise HTTPException(status_code=502, detail="Upstream chunk fetch failed.") from exc
+  except Exception as exc:
+    raise HTTPException(status_code=502, detail="Upstream chunk fetch failed.") from exc
+
+  response_headers = {
+    "Accept-Ranges": "bytes",
+    "Cache-Control": "public, max-age=300",
+    "Content-Type": "application/octet-stream",
+  }
+  content_length = upstream.headers.get("Content-Length")
+  if content_length:
+    response_headers["Content-Length"] = content_length
+  content_range = upstream.headers.get("Content-Range")
+  if content_range:
+    response_headers["Content-Range"] = content_range
+
+  if upstream_method == "HEAD":
+    upstream.close()
+
+    def _empty():
+      if False:
+        yield b""
+
+    return StreamingResponse(
+      _empty(),
+      status_code=int(getattr(upstream, "status", 200) or 200),
+      headers=response_headers,
+      media_type="application/octet-stream",
+    )
+
+  def _iter_bytes():
+    try:
+      while True:
+        chunk = upstream.read(64 * 1024)
+        if not chunk:
+          break
+        yield chunk
+    finally:
+      upstream.close()
+
+  return StreamingResponse(
+    _iter_bytes(),
+    status_code=int(getattr(upstream, "status", 200) or 200),
+    headers=response_headers,
+    media_type="application/octet-stream",
+  )
+
+
 def _download_movie_public_delivery_chunk_impl(
   movie_id: str,
   quality_code: str,
   chunk_name: str,
   db: Session | None = Depends(get_db),
-) -> FileResponse:
+  range_header: str | None = None,
+  request_method: str = "GET",
+) -> FileResponse | StreamingResponse:
   normalized = _normalize_quality_code(quality_code)
   safe_name = Path(chunk_name).name
   if safe_name != chunk_name:
@@ -4343,7 +4535,12 @@ def _download_movie_public_delivery_chunk_impl(
   if target_path is None or not target_path.is_file():
     r2_url = _r2_chunk_download_url(movie_id, normalized, safe_name)
     if r2_url:
-      return RedirectResponse(r2_url)
+      # Prefer proxy streaming over RedirectResponse so BitComet webseeds work.
+      return _proxy_presigned_r2_chunk(
+        r2_url,
+        range_header=range_header,
+        method=request_method,
+      )
     raise HTTPException(status_code=404, detail="Encrypted chunk not found.")
   expected_size = None
   for item in quality_files:
@@ -4372,9 +4569,18 @@ def download_movie_public_delivery_chunk(
   movie_id: str,
   quality_code: str,
   chunk_name: str,
+  request: Request,
   db: Session | None = Depends(get_db),
-) -> FileResponse:
-  return _download_movie_public_delivery_chunk_impl(movie_id, quality_code, chunk_name, db)
+  range_header: str | None = Header(default=None, alias="Range"),
+) -> FileResponse | StreamingResponse:
+  return _download_movie_public_delivery_chunk_impl(
+    movie_id,
+    quality_code,
+    chunk_name,
+    db,
+    range_header=range_header,
+    request_method=request.method,
+  )
 
 
 @router.api_route("/movies/{movie_id}/delivery/public-chunks/{quality_code}/{package_name}/{chunk_name}", methods=["GET", "HEAD"])
@@ -4383,14 +4589,33 @@ def download_movie_public_delivery_chunk_with_package(
   quality_code: str,
   package_name: str,
   chunk_name: str,
+  request: Request,
   db: Session | None = Depends(get_db),
-) -> FileResponse:
-  normalized = _normalize_quality_code(quality_code)
-  expected_package_name = f"{movie_id}-{normalized}.vcnr-pkg"
+  range_header: str | None = Header(default=None, alias="Range"),
+) -> FileResponse | StreamingResponse:
+  """Serve BEP19 nested webseed paths: ``{base}/{torrent_name}/{chunk}``.
+
+  ``torrent_name`` (info.name) may differ from ``{movie_id}-{quality}.vcnr-pkg``
+  when the package was created under an older movie id/title. Chunk membership
+  is still enforced inside the shared impl — only reject unsafe path segments.
+  """
   safe_package_name = Path(package_name).name
-  if safe_package_name != package_name or package_name != expected_package_name:
+  if (
+    safe_package_name != package_name
+    or not package_name
+    or ".." in package_name
+    or "/" in package_name
+    or "\\" in package_name
+  ):
     raise HTTPException(status_code=404, detail="Torrent package path not found.")
-  return _download_movie_public_delivery_chunk_impl(movie_id, quality_code, chunk_name, db)
+  return _download_movie_public_delivery_chunk_impl(
+    movie_id,
+    quality_code,
+    chunk_name,
+    db,
+    range_header=range_header,
+    request_method=request.method,
+  )
 
 
 @router.api_route("/movies/{movie_id}/delivery/public-chunks/{quality_code}/{package_path:path}", methods=["GET", "HEAD"])
@@ -4398,13 +4623,22 @@ def download_movie_public_delivery_chunk_with_nested_package_path(
   movie_id: str,
   quality_code: str,
   package_path: str,
+  request: Request,
   db: Session | None = Depends(get_db),
-) -> FileResponse:
+  range_header: str | None = Header(default=None, alias="Range"),
+) -> FileResponse | StreamingResponse:
   safe_path = str(package_path).strip("/")
   if not safe_path:
     raise HTTPException(status_code=400, detail="Invalid chunk path.")
   safe_name = Path(safe_path).name
-  return _download_movie_public_delivery_chunk_impl(movie_id, quality_code, safe_name, db)
+  return _download_movie_public_delivery_chunk_impl(
+    movie_id,
+    quality_code,
+    safe_name,
+    db,
+    range_header=range_header,
+    request_method=request.method,
+  )
 
 
 @router.post("/movies/{movie_id}/delivery/complete", response_model=DeliveryStatusResponse)

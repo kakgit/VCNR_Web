@@ -3927,6 +3927,40 @@ def _torrent_with_webseeds(
   return _bencode_value(root)
 
 
+def _quality_webseed_objects_available(movie_id: str, quality_code: str) -> bool:
+  """Return True when at least one encrypted chunk still exists for HTTP webseed.
+
+  If the R2 package folder was deleted, advertising dead url-list entries makes
+  libtorrent / BitComet retry 404s instead of using DHT/LSD peer seeders.
+  """
+  if not r2_enabled():
+    return True
+  normalized = _normalize_quality_code(quality_code)
+  manifest = _read_content_manifest(movie_id) or {}
+  files = [
+    item
+    for item in (manifest.get("files") or [])
+    if _normalize_quality_code(str(item.get("quality_code") or "")) == normalized
+  ]
+  if not files:
+    entry = _content_quality_lookup(manifest).get(normalized) or {}
+    files = list(entry.get("files") or [])
+  chunk_name = ""
+  for record in files:
+    name = Path(str(record.get("name") or "")).name
+    if name.endswith(".vcnr"):
+      chunk_name = name
+      break
+  if not chunk_name:
+    return True
+  package_name = _content_package_name(movie_id, normalized)
+  nested_key = media_object_key(movie_id, "content", f"{normalized}/{package_name}/{chunk_name}")
+  if media_object_exists(nested_key):
+    return True
+  legacy_key = media_object_key(movie_id, "content", f"{normalized}/{chunk_name}")
+  return media_object_exists(legacy_key)
+
+
 def _torrent_webseed_urls(
   movie_id: str,
   quality_code: str,
@@ -3941,6 +3975,8 @@ def _torrent_webseed_urls(
   public-chunks route resolves by chunk filename. That keeps webseeds working
   on deployments that still require ``package_name == {movie_id}-{quality}.vcnr-pkg``.
   """
+  if r2_enabled() and not _quality_webseed_objects_available(movie_id, quality_code):
+    return []
   webseed_urls: list[str] = []
   api_base = _normalize_upload_torrent_webseed_base(movie_id, quality_code)
   if api_base:

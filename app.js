@@ -382,6 +382,7 @@ let adminTaxonomySortValue = "kind-asc";
 let adminTaxonomyPage = 1;
 const ADMIN_TAXONOMY_PER_PAGE = 6;
 let adminCreators = [];
+let creatorAssignmentUsersPromise = null;
 let adminLibrarySearchTerm = "";
 let adminLibraryStageFilter = "all";
 let adminLibrarySortValue = "title-asc";

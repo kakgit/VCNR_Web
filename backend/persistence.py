@@ -30,6 +30,7 @@ from backend.models import (
   NotificationRecord,
   MovieRecord,
   MovieChangeRequestRecord,
+  MovieCreatorRecord,
   MovieWishRecord,
   PublishSubmissionRecord,
   PushDeviceTokenRecord,

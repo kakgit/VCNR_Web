@@ -124,6 +124,8 @@ from backend.schemas import (
   AdminMovieUpdateRequest,
   AdminMovieActionResponse,
   AdminMovieListResponse,
+  AdminCreatorAssignRequest,
+  AdminCreatorListResponse,
   CastImageLookupRequest,
   ContentQualityListResponse,
   ContentQualityResponse,
@@ -2447,6 +2449,21 @@ def require_admin(current_user: dict[str, str] = Depends(get_current_user)) -> d
   return current_user
 
 
+def require_admin_or_creator(current_user: dict[str, str] = Depends(get_current_user)) -> dict[str, str]:
+  # Creators manage the titles assigned to them inside the admin panel.
+  if current_user["role"] not in {"admin", "super_admin", "creator"}:
+    raise HTTPException(status_code=403, detail="Admin or creator access is required.")
+  return current_user
+
+
+def _ensure_creator_owns_movie(current_user: dict[str, str], movie_id: str, db: Session | None) -> None:
+  if current_user["role"] != "creator":
+    return
+  creator_id = persistence.get_movie_creator_id(db, movie_id) if db else demo_store.get_movie_creator_id(movie_id)
+  if creator_id != current_user["id"]:
+    raise HTTPException(status_code=403, detail="This title is not assigned to you.")
+
+
 def get_optional_current_user(authorization: str | None = Header(default=None)) -> dict[str, str] | None:
   if not authorization:
     return None
@@ -3106,7 +3123,7 @@ def admin_update_star_pricing(
 def admin_list_taxonomy(
   kind: str,
   db: Session | None = Depends(get_db),
-  _: dict[str, str] = Depends(require_admin),
+  _: dict[str, str] = Depends(require_admin_or_creator),
 ) -> TaxonomyListResponse:
   kind = validate_taxonomy_kind(kind)
   if db is None:
@@ -3222,9 +3239,12 @@ def admin_cast_image_lookup(
 @router.get("/admin/movies", response_model=AdminMovieListResponse)
 def admin_movies(
   db: Session | None = Depends(get_db),
-  _: dict[str, str] = Depends(require_admin),
+  current_user: dict[str, str] = Depends(require_admin_or_creator),
 ) -> AdminMovieListResponse:
   items = persistence.list_movies(db, include_archived=True, prefer_pending=True) if db else demo_store.list_movies(include_archived=True, prefer_pending=True)
+  # Creators only see the titles assigned to them.
+  if current_user["role"] == "creator":
+    items = [item for item in items if item.get("creator_id") == current_user["id"]]
   return AdminMovieListResponse(items=_sanitize_movie_payloads(items))
 
 
@@ -3267,6 +3287,44 @@ def admin_create_movie(
     item=_sanitize_movie_payload(movie),
     message=f'"{movie["title"]}" created in {movie["stage_label"]} and sent for Super Admin approval.',
   )
+
+
+@router.get("/admin/creators", response_model=AdminCreatorListResponse)
+def admin_list_creators(
+  db: Session | None = Depends(get_db),
+  _: dict[str, str] = Depends(require_admin_or_creator),
+) -> AdminCreatorListResponse:
+  items = persistence.list_creators(db) if db else demo_store.list_creators()
+  return AdminCreatorListResponse(items=items)
+
+
+@router.post("/admin/movies/{movie_id}/creator", response_model=AdminMovieActionResponse)
+def admin_set_movie_creators(
+  movie_id: str,
+  payload: AdminCreatorAssignRequest,
+  db: Session | None = Depends(get_db),
+  _: dict[str, str] = Depends(require_admin),
+) -> AdminMovieActionResponse:
+  creator_options = persistence.list_creators(db) if db else demo_store.list_creators()
+  valid_ids = {option["id"] for option in creator_options}
+  unknown = [cid for cid in payload.creator_ids if cid not in valid_ids]
+  if unknown:
+    raise HTTPException(status_code=400, detail="One or more selected creator accounts were not found.")
+  try:
+    if db:
+      movie = persistence.set_movie_creators(db, movie_id, payload.creator_ids)
+    else:
+      movie = demo_store.set_movie_creators(movie_id, payload.creator_ids)
+  except LookupError as error:
+    raise HTTPException(status_code=404, detail=str(error)) from error
+  except ValueError as error:
+    raise HTTPException(status_code=400, detail=str(error)) from error
+
+  if payload.creator_ids:
+    message = f'{len(payload.creator_ids)} creator(s) assigned to "{movie["title"]}".'
+  else:
+    message = f'Creator assignment removed from "{movie["title"]}".'
+  return AdminMovieActionResponse(item=_sanitize_movie_payload(movie), message=message)
 
 
 @router.post("/admin/movies/{movie_id}/publish", response_model=AdminMovieActionResponse)
@@ -6352,8 +6410,9 @@ def admin_update_movie_stage(
   movie_id: str,
   payload: StageUpdateRequest,
   db: Session | None = Depends(get_db),
-  _: dict[str, str] = Depends(require_admin),
+  current_user: dict[str, str] = Depends(require_admin_or_creator),
 ) -> AdminMovieActionResponse:
+  _ensure_creator_owns_movie(current_user, movie_id, db)
   movie = persistence.update_movie_stage(db, movie_id, payload.stage) if db else demo_store.update_movie_stage(movie_id, payload.stage)
   if movie is None:
     raise HTTPException(status_code=404, detail="Movie not found.")
@@ -6369,9 +6428,14 @@ def admin_update_movie_details(
   movie_id: str,
   payload: AdminMovieUpdateRequest,
   db: Session | None = Depends(get_db),
-  _: dict[str, str] = Depends(require_admin),
+  current_user: dict[str, str] = Depends(require_admin_or_creator),
 ) -> AdminMovieActionResponse:
-  movie = persistence.update_movie_details(db, movie_id, payload.model_dump()) if db else demo_store.update_movie_details(movie_id, payload.model_dump())
+  _ensure_creator_owns_movie(current_user, movie_id, db)
+  payload_dict = payload.model_dump()
+  # Creators edit their assigned titles but never reassign the creator.
+  if current_user["role"] == "creator":
+    payload_dict.pop("creator_ids", None)
+  movie = persistence.update_movie_details(db, movie_id, payload_dict) if db else demo_store.update_movie_details(movie_id, payload_dict)
   if movie is None:
     raise HTTPException(status_code=404, detail="Movie not found.")
 

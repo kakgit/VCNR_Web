@@ -1004,6 +1004,28 @@
     </div>
   </div>
 
+  <div id="adminCreatorAssignmentModal" class="admin-modal hidden" aria-hidden="true">
+    <div class="admin-modal-backdrop" data-admin-creator-assignment-close></div>
+    <div class="admin-modal-card" role="dialog" aria-modal="true" aria-labelledby="adminCreatorAssignmentTitle">
+      <div class="admin-modal-header">
+        <div>
+          <p class="section-kicker">Manage Title</p>
+          <h2 id="adminCreatorAssignmentTitle">Assign Creators</h2>
+        </div>
+        <button type="button" class="icon-btn" data-admin-creator-assignment-close aria-label="Close dialog">x</button>
+      </div>
+      <form id="adminCreatorAssignmentForm" class="admin-user-editor-form">
+        <input id="adminCreatorAssignmentMovieId" type="hidden">
+        <p class="helper-text">Choose one or more creators for this title. Assigned creators can view and edit this title in their workspace.</p>
+        <div id="adminCreatorAssignmentList" class="admin-creator-assignment-list"></div>
+        <div class="taxonomy-form-actions">
+          <button type="submit" class="primary-btn" id="adminCreatorAssignmentSaveButton">Save Assignment</button>
+          <button type="button" class="ghost-btn" data-admin-creator-assignment-close>Close</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
   <div id="adminPricingTargetsModal" class="admin-modal hidden" aria-hidden="true">
     <div class="admin-modal-backdrop" data-admin-pricing-close></div>
     <div class="admin-modal-card" role="dialog" aria-modal="true" aria-labelledby="adminPricingTargetsTitle">

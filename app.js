@@ -235,6 +235,12 @@ const adminLibraryEditor = document.getElementById("adminLibraryEditor");
 const adminLibraryEditId = document.getElementById("adminLibraryEditId");
 const adminLibraryModalTitle = document.getElementById("adminLibraryModalTitle");
 const adminLibraryModalCopy = document.getElementById("adminLibraryModalCopy");
+const adminLibraryCreator = document.getElementById("adminLibraryCreator");
+const adminCreatorAssignmentModal = document.getElementById("adminCreatorAssignmentModal");
+const adminCreatorAssignmentForm = document.getElementById("adminCreatorAssignmentForm");
+const adminCreatorAssignmentMovieId = document.getElementById("adminCreatorAssignmentMovieId");
+const adminCreatorAssignmentList = document.getElementById("adminCreatorAssignmentList");
+const adminCreatorAssignmentSaveButton = document.getElementById("adminCreatorAssignmentSaveButton");
 const adminLibraryCategory = document.getElementById("adminLibraryCategory");
 const adminLibraryTitle = document.getElementById("adminLibraryTitle");
 const adminLibraryCaption = document.getElementById("adminLibraryCaption");
@@ -375,6 +381,7 @@ let adminTaxonomyKindFilter = "all";
 let adminTaxonomySortValue = "kind-asc";
 let adminTaxonomyPage = 1;
 const ADMIN_TAXONOMY_PER_PAGE = 6;
+let adminCreators = [];
 let adminLibrarySearchTerm = "";
 let adminLibraryStageFilter = "all";
 let adminLibrarySortValue = "title-asc";
@@ -1343,6 +1350,8 @@ function normalizeMovie(movie) {
     id: movie.id,
     archived: Boolean(movie.archived),
     stage: movie.stage,
+    creatorIds: Array.isArray(movie.creator_ids) ? movie.creator_ids : (movie.creator_id ? [movie.creator_id] : []),
+    creatorNames: Array.isArray(movie.creator_names) ? movie.creator_names : (movie.creator_name ? [movie.creator_name] : []),
     approvalStatus: movie.approval_status || (movie.archived ? "archived" : "published"),
     approvalStatusLabel: movie.approval_status_label || (movie.archived ? "Archived" : "Published"),
     requiresSuperAdminApproval: Boolean(movie.requires_super_admin_approval),
@@ -2037,6 +2046,28 @@ async function loadAdminMoviesFromApi() {
   adminMovies = (response.items || []).map(normalizeMovie);
 }
 
+async function loadAdminCreatorsFromApi() {
+  try {
+    const response = await apiRequest("/admin/creators");
+    adminCreators = response.items || [];
+  } catch (error) {
+    adminCreators = [];
+  }
+}
+
+function renderAdminCreatorOptions() {
+  if (!adminLibraryCreator) {
+    return;
+  }
+  adminLibraryCreator.innerHTML = '<option value="">Not assigned</option>';
+  for (const creator of adminCreators) {
+    const option = document.createElement("option");
+    option.value = creator.id;
+    option.textContent = `${creator.name} (${creator.email})`;
+    adminLibraryCreator.appendChild(option);
+  }
+}
+
 async function loadAdminUsersFromApi() {
   const response = await apiRequest("/admin/users");
   adminUsers = response.items || [];
@@ -2115,13 +2146,17 @@ async function bootstrapAppData() {
       if (profile && ["admin", "super_admin"].includes(profile.role)) {
         setAdminSession(profile.role, profile.email);
         await loadAdminSummaryFromApi();
-        await Promise.all([loadAdminStarPricingFromApi(), loadAdminMoviesFromApi(), loadAdminUsersFromApi(), loadAdminTaxonomiesFromApi()]);
+        await Promise.all([loadAdminStarPricingFromApi(), loadAdminMoviesFromApi(), loadAdminUsersFromApi(), loadAdminTaxonomiesFromApi(), loadAdminCreatorsFromApi()]);
       }
       if (entryMode === "admin" && profile && ["admin", "super_admin"].includes(profile.role)) {
         setView("admin");
         setAdminPanel(profile.role === "super_admin" ? "super-admin" : "users");
       } else if (entryMode === "creator" && profile && ["producer", "creator"].includes(profile.role)) {
-        setView("viewer");
+        setAdminSession(profile.role, profile.email);
+        setAdminPanel("library");
+        setView("admin");
+        await Promise.all([loadAdminMoviesFromApi(), loadAdminTaxonomiesFromApi(), loadAdminCreatorsFromApi()]);
+        renderAdminMovieList();
       }
     } else {
       syncViewerHeader();
@@ -4057,6 +4092,7 @@ function renderAdminMovieList() {
             <button type="button" class="icon-btn admin-movie-action-trailer" data-admin-movie-action="trailer" title="Upload teasers" aria-label="Upload teasers" ${movie.archived ? "disabled" : ""}>&#127909;</button>
             <button type="button" class="icon-btn admin-movie-action-gallery" data-admin-movie-action="gallery" title="Upload gallery" aria-label="Upload gallery" ${movie.archived ? "disabled" : ""}>&#127748;</button>
             <button type="button" class="icon-btn admin-movie-action-music" data-admin-movie-action="music" title="Upload music" aria-label="Upload music" ${movie.archived ? "disabled" : ""}>&#9835;</button>
+            <button type="button" class="icon-btn" data-admin-movie-action="creator" title="Assign creators" aria-label="Assign creators">&#128100;</button>
             <button type="button" class="icon-btn" data-admin-movie-action="delivery-queue" title="Open delivery queue" aria-label="Open delivery queue">&#9201;</button>
             <button type="button" class="icon-btn danger" data-admin-movie-action="archive" title="Archive title" aria-label="Archive title" ${movie.archived ? "disabled" : ""}>&#128465;</button>
           </div>
@@ -4132,6 +4168,124 @@ function renderAdminArchiveMovieList() {
     `).join("")}
   `;
   renderAdminSummaryMetrics();
+}
+
+// Keeps the creator dropdown in sync with the Manage Users data. The movie
+// row chips resolve names from the same source once it is loaded.
+function ensureAdminCreatorsLoaded() {
+  if (creatorAssignmentUsersPromise || adminCreators.length) {
+    return creatorAssignmentUsersPromise;
+  }
+  creatorAssignmentUsersPromise = loadAdminCreatorsFromApi()
+    .catch(() => {
+      adminCreators = [];
+    })
+    .finally(() => {
+      creatorAssignmentUsersPromise = null;
+    });
+  return creatorAssignmentUsersPromise;
+}
+
+async function updateAdminMovieCreatorRemote(movieId, creatorId) {
+  const response = await apiRequest(`/admin/movies/${movieId}/creator`, {
+    method: "POST",
+    body: JSON.stringify({ creator_id: creatorId || null }),
+  });
+  const updatedMovie = normalizeMovie(response.item);
+  updateMovieCollections(updatedMovie);
+  renderAdminMovieList();
+  renderAdminArchiveMovieList();
+  return response;
+}
+
+function creatorAssignmentName(movie) {
+  if (Array.isArray(movie.creatorNames) && movie.creatorNames.length) {
+    return movie.creatorNames.join(", ");
+  }
+  if (!Array.isArray(movie.creatorIds) || !movie.creatorIds.length) {
+    return "";
+  }
+  return movie.creatorIds
+    .map((id) => {
+      const creator = adminCreators.find((item) => item.id === id);
+      return creator ? creator.name : null;
+    })
+    .filter(Boolean)
+    .join(", ");
+}
+
+function openCreatorAssignmentModal(movieId) {
+  const movie = getMovieById(movieId);
+  if (!movie || !adminCreatorAssignmentModal || !adminCreatorAssignmentForm) {
+    return;
+  }
+  ensureAdminCreatorsLoaded().then(() => {
+    adminCreatorAssignmentMovieId.value = movieId;
+    renderCreatorAssignmentList(movie);
+    adminCreatorAssignmentModal.classList.remove("hidden");
+    adminCreatorAssignmentModal.setAttribute("aria-hidden", "false");
+  });
+}
+
+function closeCreatorAssignmentModal() {
+  if (!adminCreatorAssignmentModal) {
+    return;
+  }
+  adminCreatorAssignmentModal.classList.add("hidden");
+  adminCreatorAssignmentModal.setAttribute("aria-hidden", "true");
+  if (adminCreatorAssignmentForm) {
+    adminCreatorAssignmentForm.reset();
+  }
+}
+
+function renderCreatorAssignmentList(movie) {
+  if (!adminCreatorAssignmentList) {
+    return;
+  }
+  const selectedIds = new Set(movie.creatorIds || []);
+  if (!adminCreators.length) {
+    adminCreatorAssignmentList.innerHTML = `<p class="helper-text">No creator accounts found. Create a user with the Creator role first.</p>`;
+    return;
+  }
+  adminCreatorAssignmentList.innerHTML = adminCreators
+    .map((creator) => {
+      const checked = selectedIds.has(creator.id) ? "checked" : "";
+      return `
+        <label class="admin-creator-assignment-item">
+          <input type="checkbox" name="creatorAssignment" value="${escapeHtml(creator.id)}" ${checked}>
+          <span>
+            <strong>${escapeHtml(creator.name)}</strong>
+            <small>${escapeHtml(creator.email)}</small>
+          </span>
+        </label>`;
+    })
+    .join("");
+}
+
+async function saveCreatorAssignment(event) {
+  event.preventDefault();
+  if (!adminCreatorAssignmentMovieId) {
+    return;
+  }
+  const movieId = adminCreatorAssignmentMovieId.value.trim();
+  if (!movieId) {
+    return;
+  }
+  const checked = Array.from(document.querySelectorAll('[name="creatorAssignment"]:checked')).map((input) => input.value);
+  try {
+    const response = await apiRequest(`/admin/movies/${movieId}/creators`, {
+      method: "POST",
+      body: JSON.stringify({ creator_ids: checked }),
+    });
+    const updatedMovie = normalizeMovie(response.item);
+    updateMovieCollections(updatedMovie);
+    renderAdminMovieList();
+    renderAdminArchiveMovieList();
+    closeCreatorAssignmentModal();
+    adminHelper.textContent = response.message;
+  } catch (error) {
+    adminHelper.textContent = error.message;
+  }
 }
 
 function renderAdminLibraryOptions() {
@@ -5527,10 +5681,17 @@ function openAdminLibraryEditor(movie = null) {
 
   const isEditing = Boolean(movie);
   renderAdminLibraryOptions();
+  renderAdminCreatorOptions();
+  if (!adminCreators.length) {
+    loadAdminCreatorsFromApi().then(renderAdminCreatorOptions);
+  }
   adminLibraryModal.classList.remove("hidden");
   adminLibraryModal.setAttribute("aria-hidden", "false");
   adminLibraryEditId.value = movie?.id || "";
   adminLibraryCategory.value = movie?.titleCategory || "";
+  if (adminLibraryCreator) {
+    adminLibraryCreator.value = movie?.creatorId || "";
+  }
   adminLibraryTitle.value = movie?.title || "";
   adminLibraryCaption.value = movie?.titleCaption || "";
   setMultiSelectValues(adminLibraryGenre, String(movie?.genre || "").split(","));
@@ -5538,9 +5699,14 @@ function openAdminLibraryEditor(movie = null) {
   adminLibraryExpectedDate.value = formatAdminDateForInput(movie?.releaseDate);
   renderAdminCastCreditRows(movie?.castCredits || []);
   adminLibraryDescription.value = movie?.description || "";
+  // Creators work on their assigned titles only; assignment stays with the admin.
+  const isCreatorSession = adminSessionProfile.role === "creator";
+  if (adminLibraryCreator) {
+    adminLibraryCreator.disabled = isCreatorSession;
+  }
   adminLibraryModalTitle.textContent = isEditing ? "Edit Title" : "Add New Title";
   adminLibraryModalCopy.textContent = isEditing
-    ? "Update title details, release placement, and forecast information."
+    ? "Update title details, creator assignment, and release placement."
     : "Create a title record for the app library and place it in the correct section.";
   adminLibraryTitle.focus();
 }
@@ -5554,6 +5720,9 @@ function closeAdminLibraryEditor() {
   adminLibraryModal.setAttribute("aria-hidden", "true");
   adminLibraryEditId.value = "";
   adminLibraryCategory.value = "";
+  if (adminLibraryCreator) {
+    adminLibraryCreator.value = "";
+  }
   adminLibraryTitle.value = "";
   adminLibraryCaption.value = "";
   setMultiSelectValues(adminLibraryGenre, []);
@@ -5742,6 +5911,7 @@ async function updateAdminMovieDetailsRemote(movieId, payload) {
       cast_credits: payload.castCredits,
       story_line: payload.storyLine,
       release_date: payload.expectedDate || null,
+      creator_id: payload.creatorId || null,
     }),
   });
 
@@ -5790,6 +5960,7 @@ async function createAdminMovieRemote(payload) {
       cast_credits: payload.castCredits,
       story_line: payload.storyLine,
       release_date: payload.expectedDate || null,
+      creator_id: payload.creatorId || null,
       stage: payload.stage,
     }),
   });
@@ -6727,6 +6898,17 @@ if (authForm) {
         setAuthMessage("This portal is only for creator accounts.", true);
         return;
       }
+      if (entryMode === "creator" && response.next_view === "producer") {
+        // Creators land in the admin panel scoped to "Manage Library" with only
+        // the titles assigned to them.
+        setAdminSession(response.role, authEmail.value.trim());
+        setAdminPanel("library");
+        setView("admin");
+        await Promise.all([loadAdminMoviesFromApi(), loadAdminTaxonomiesFromApi(), loadAdminCreatorsFromApi()]);
+        renderAdminMovieList();
+        setAuthMessage(response.message);
+        return;
+      }
       setView(response.next_view === "producer" ? "viewer" : response.next_view);
       if (response.next_view === "admin") {
         setAdminSession(response.role, authEmail.value.trim());
@@ -6737,6 +6919,7 @@ if (authForm) {
           loadAdminMoviesFromApi(),
           loadAdminUsersFromApi(),
           loadAdminTaxonomiesFromApi(),
+          loadAdminCreatorsFromApi(),
         ]);
         renderAdminMovieList();
         renderAdminArchiveMovieList();
@@ -8129,6 +8312,7 @@ if (adminLibraryEditor) {
     const storyLine = adminLibraryDescription.value.trim();
     const expectedDate = formatAdminDateForApi(adminLibraryExpectedDate.value);
     const stage = adminLibraryMovieStage.value;
+    const creatorId = adminLibraryCreator.value;
     const editId = adminLibraryEditId.value.trim();
 
     try {
@@ -8155,6 +8339,7 @@ if (adminLibraryEditor) {
           castCredits,
           storyLine,
           expectedDate,
+          creatorId,
         });
         if (existingMovie && existingMovie.stage !== stage) {
           await updateAdminMovieStageRemote(editId, stage);
@@ -8169,6 +8354,7 @@ if (adminLibraryEditor) {
           castCredits,
           storyLine,
           expectedDate,
+          creatorId,
           stage,
         });
       }
@@ -8866,6 +9052,8 @@ if (adminMovieList) {
         openAdminGalleryUploadModal(selectedMovie);
       } else if (actionButton.dataset.adminMovieAction === "music" && !selectedMovie.archived) {
         openAdminMusicUploadModal(selectedMovie);
+      } else if (actionButton.dataset.adminMovieAction === "creator") {
+        openCreatorAssignmentModal(movieId);
       } else if (actionButton.dataset.adminMovieAction === "delivery-queue") {
         openAdminDeliveryQueueForMovie(movieId);
       } else if (actionButton.dataset.adminMovieAction === "archive" && !selectedMovie.archived) {
@@ -8873,6 +9061,18 @@ if (adminMovieList) {
       }
     } catch (error) {
       adminHelper.textContent = error.message;
+    }
+  });
+}
+
+if (adminCreatorAssignmentForm) {
+  adminCreatorAssignmentForm.addEventListener("submit", saveCreatorAssignment);
+}
+
+if (adminCreatorAssignmentModal) {
+  adminCreatorAssignmentModal.addEventListener("click", (event) => {
+    if (event.target.closest("[data-admin-creator-assignment-close]")) {
+      closeCreatorAssignmentModal();
     }
   });
 }

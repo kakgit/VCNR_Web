@@ -730,10 +730,45 @@ def update_movie_details(movie_id: str, payload: dict) -> dict | None:
     request["pending"]["expected_revenue"] = f'{request["pending"]["expected_stars"]} stars'
     if payload.get("release_date"):
       request["pending"]["release_date"] = payload["release_date"]
+    # Creator assignment: only when the caller explicitly sent the field.
+    if "creator_id" in payload:
+      request["pending"]["creator_id"] = payload.get("creator_id") or None
     if not movie.get("archived"):
       _update_movie_approval_status(movie, "pending_super_admin_approval")
     return _pending_or_live(movie, prefer_pending=True)
   return None
+
+
+def list_creators() -> list[dict]:
+  return [
+    {"id": user["id"], "name": user["name"], "email": user["email"]}
+    for user in USERS
+    if user.get("role") == "creator"
+  ]
+
+
+def list_movies_for_creator(user_id: str) -> list[dict]:
+  return [_decorate_movie(movie, viewer_wish_kind=None) for movie in MOVIES if movie.get("creator_id") == user_id]
+
+
+def get_movie_creator_id(movie_id: str) -> str | None:
+  for movie in MOVIES:
+    if movie["id"] == movie_id:
+      return movie.get("creator_id")
+  return None
+
+
+def set_movie_creator(movie_id: str, creator_id: str | None) -> dict:
+  for movie in MOVIES:
+    if movie["id"] != movie_id:
+      continue
+    if creator_id:
+      creator = next((user for user in USERS if user["id"] == creator_id), None)
+      if creator is None or creator.get("role") != "creator":
+        raise ValueError("The selected creator account was not found.")
+    movie["creator_id"] = creator_id or None
+    return _decorate_movie(movie)
+  raise LookupError("Movie not found.")
 
 
 def update_movie_pricing_config(movie_id: str, payload: dict) -> dict | None:

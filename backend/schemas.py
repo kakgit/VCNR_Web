@@ -140,6 +140,8 @@ class MovieResponse(BaseModel):
   id: str
   archived: bool = False
   stage: str
+  creator_id: str | None = None
+  creator_name: str | None = None
   approval_status: str = "published"
   approval_status_label: str = "Published"
   requires_super_admin_approval: bool = False
@@ -756,6 +758,9 @@ class AdminMovieUpdateRequest(BaseModel):
   genre: str
   cast_credits: list[CastCreditEntry] = []
   story_line: str
+  # Creators assigned to this title. Omitted on edit -> preserve current set;
+  # an empty list clears the assignment; a non-empty list (re)assigns the title.
+  creator_ids: list[str] = []
   # Star/pricing fields are optional here because the "Edit Title" form does not
   # manage them; when omitted the existing values are preserved (see
   # update_movie_details in persistence.py / demo_store.py).
@@ -772,11 +777,26 @@ class AdminMovieCreateRequest(BaseModel):
   genre: str
   cast_credits: list[CastCreditEntry] = []
   story_line: str
+  creator_ids: list[str] = []
   stars_required: int = Field(default=1, ge=1, le=10)
   stars_required_theatre: int = Field(default=3, ge=1, le=10)
   expected_stars: int = Field(default=0, ge=0)
   release_date: str | None = None
   stage: str = Field(pattern="^(upcoming|released|library)$")
+
+
+class AdminCreatorAssignRequest(BaseModel):
+  creator_ids: list[str] = []
+
+
+class AdminCreatorResponse(BaseModel):
+  id: str
+  name: str
+  email: str
+
+
+class AdminCreatorListResponse(BaseModel):
+  items: list[AdminCreatorResponse]
 
 
 class OnlinePricingOptionRequest(BaseModel):

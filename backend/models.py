@@ -51,6 +51,12 @@ class MovieRecord(Base):
   music: Mapped[str] = mapped_column(String(120), nullable=False)
   reward_bonus: Mapped[str] = mapped_column(String(80), nullable=False)
 
+  creators: Mapped[list["UserRecord"]] = relationship(
+    secondary="movie_creators",
+    lazy="select",
+    backref="movies",
+  )
+
 
 class MovieWishRecord(Base):
   __tablename__ = "movie_wishes"
@@ -60,6 +66,16 @@ class MovieWishRecord(Base):
   movie_id: Mapped[str] = mapped_column(ForeignKey("movies.id"), nullable=False, index=True)
   user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), nullable=False, index=True)
   wish_kind: Mapped[str] = mapped_column(String(20), nullable=False, default="online")
+  created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class MovieCreatorRecord(Base):
+  __tablename__ = "movie_creators"
+  __table_args__ = (UniqueConstraint("movie_id", "user_id", name="uq_movie_creators_movie_user"),)
+
+  id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+  movie_id: Mapped[str] = mapped_column(ForeignKey("movies.id"), nullable=False, index=True)
+  user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), nullable=False, index=True)
   created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
 
 

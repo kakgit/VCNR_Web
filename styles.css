@@ -283,8 +283,13 @@ body.admin-entry #guestEntryButton {
 body.creator-entry .topbar,
 body.creator-entry .main-strip,
 body.creator-entry [data-view="landing"],
-body.creator-entry [data-view="viewer"],
-body.creator-entry [data-view="admin"] {
+body.creator-entry [data-view="viewer"] {
+  display: none !important;
+}
+
+/* Creator portal: only library management is exposed. */
+body.creator-entry [data-admin-panel-target="users"],
+body.creator-entry [data-admin-panel-target="categories"] {
   display: none !important;
 }
 

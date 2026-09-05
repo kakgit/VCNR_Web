@@ -68,6 +68,8 @@ class Settings:
   swarm_turn_url: str
   swarm_turn_username: str
   swarm_turn_credential: str
+  swarm_max_receivers_per_seeder: int
+  swarm_seeder_ttl_seconds: int
   public_torrent_trackers: tuple[str, ...]
   r2_account_id: str
   r2_access_key_id: str
@@ -75,6 +77,13 @@ class Settings:
   r2_bucket_name: str
   r2_public_base_url: str
   expo_access_token: str
+  smtp_host: str
+  smtp_port: int
+  smtp_username: str
+  smtp_password: str
+  smtp_from_email: str
+  smtp_from_name: str
+  smtp_use_tls: bool
 
 
 @lru_cache(maxsize=1)
@@ -89,13 +98,15 @@ def get_settings() -> Settings:
     database_url=_normalize_database_url(
       os.getenv(
         "DATABASE_URL",
-        "postgresql+psycopg://postgres:postgres@localhost:5432/cineproxima",
+        "postgresql+psycopg://postgres:yHVcZRYUmMgPjiIhpEbuqxKLnadSECZr@altaria.proxy.rlwy.net:34062/railway?sslmode=require",
       )
     ),
     swarm_stun_url=os.getenv("SWARM_STUN_URL", "stun:stun.l.google.com:19302").strip(),
     swarm_turn_url=os.getenv("SWARM_TURN_URL", "").strip(),
     swarm_turn_username=os.getenv("SWARM_TURN_USERNAME", "").strip(),
     swarm_turn_credential=os.getenv("SWARM_TURN_CREDENTIAL", "").strip(),
+    swarm_max_receivers_per_seeder=int(os.getenv("SWARM_MAX_RECEIVERS_PER_SEEDER", "8").strip() or "8"),
+    swarm_seeder_ttl_seconds=int(os.getenv("SWARM_SEEDER_TTL_SECONDS", "300").strip() or "300"),
     public_torrent_trackers=_parse_csv_urls(
       os.getenv(
         "PUBLIC_TORRENT_TRACKERS",
@@ -116,4 +127,13 @@ def get_settings() -> Settings:
     r2_bucket_name=os.getenv("R2_BUCKET_NAME", "").strip(),
     r2_public_base_url=os.getenv("R2_PUBLIC_BASE_URL", "").strip().rstrip("/"),
     expo_access_token=os.getenv("EXPO_ACCESS_TOKEN", "").strip(),
+    smtp_host=os.getenv("SMTP_HOST", "").strip(),
+    smtp_port=int(os.getenv("SMTP_PORT", "587").strip() or "587"),
+    smtp_username=os.getenv("SMTP_USERNAME", "").strip(),
+    smtp_password=os.getenv("SMTP_PASSWORD", "").strip(),
+    smtp_from_email=os.getenv("SMTP_FROM_EMAIL", "").strip(),
+    smtp_from_name=(os.getenv("SMTP_FROM_NAME", "").strip() or "Cine Vault"),
+    # STARTTLS on by default; set SMTP_USE_TLS=false for plain/local relays,
+    # or use port 465 which is detected as implicit SSL automatically.
+    smtp_use_tls=os.getenv("SMTP_USE_TLS", "true").strip().lower() not in {"0", "false", "no", "off"},
   )

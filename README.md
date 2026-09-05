@@ -114,14 +114,20 @@ Render is the sole deployment platform for `VCNR_Web`.
 The repo includes a root `render.yaml` blueprint that creates:
 
 - the `vcnr-web` web service (Docker, free tier)
-- the `vcnr-postgres` PostgreSQL database (free tier)
+
+PostgreSQL is **no longer created on Render** — it runs on Railway
+(<https://railway.com>). See `docs/free-hosting-guide.md` for the full migration.
+In short: create a PostgreSQL database on Railway, enable **Public Access**
+(Settings → Networking → TCP Proxy) on it, and copy the generated
+`DATABASE_PUBLIC_URL` public connection string.
 
 Deploy steps:
 
 1. Push this repo to GitHub.
 2. In the Render dashboard: **New + → Blueprint → select this repo**.
-3. Render creates the web service and PostgreSQL automatically.
-4. Open `https://vcnr-web.onrender.com/api/health` (or the assigned subdomain).
+3. Render creates the web service.
+4. Set `DATABASE_URL` (below) from the Railway public connection string.
+5. Open `https://vcnr-web.onrender.com/api/health` (or the assigned subdomain).
 
 ### Environment variables
 
@@ -131,10 +137,15 @@ automatically. No manual frontend origin setup is needed.
 The only required manual variable is:
 
 ```text
-DATABASE_URL=<Render PostgreSQL connection string>
+DATABASE_URL=<Railway PostgreSQL public connection string>
 ```
 
-This is wired automatically by the blueprint via the `fromDatabase` binding.
+The blueprint declares this variable with `sync: false`, so you enter the value in
+the Render dashboard **Environment** tab and it is never stored in git. Paste the
+`DATABASE_PUBLIC_URL` that Railway generates after you enable Public Access /
+TCP Proxy (see `docs/free-hosting-guide.md`). The backend's
+`_normalize_database_url` accepts Railway's `postgresql://` string as-is and
+rewrites the scheme for psycopg, keeping the `sslmode` query parameter.
 
 Recommended service variables (already set by the blueprint):
 
@@ -166,7 +177,9 @@ The backend already calls `init_db()` on startup, so the current SQLAlchemy tabl
 ### Free tier caveats
 
 - Service sleeps after 15 min idle, wakes in ~50s on first request.
-- Free PostgreSQL expires after 30 days. For permanent free storage use Neon: <https://neon.tech> (see `docs/free-hosting-guide.md`).
+- PostgreSQL runs on Railway (trial ~$5 credit, then Hobby at $5/month). Railway
+  bills egress for traffic through the public TCP proxy; API traffic is small, so
+  keep large media transfers on R2.
 
 ## PostgreSQL Direction
 
@@ -188,8 +201,11 @@ The database connection is configured through:
 Example:
 
 ```text
-postgresql+psycopg://postgres:postgres@localhost:5432/cineproxima
+postgresql://postgres:postgres@altaria.proxy.rlwy.net:34062/railway?sslmode=require
 ```
+
+(The backend's `_normalize_database_url` rewrites `postgresql://` to
+`postgresql+psycopg://` automatically, so the Railway public string works as-is.)
 
 ## VCNR Notes
 
@@ -210,6 +226,6 @@ VCNR support follows:
 
 1. Push the current project snapshot to GitHub.
 2. Confirm the Render web service builds from the root `Dockerfile`.
-3. Confirm the Render PostgreSQL service is bound with `DATABASE_URL`.
+3. Confirm `DATABASE_URL` points at the Railway database and `init_db()` created the tables on startup.
 4. Deploy and smoke-test `/`, `/Admin/`, `/docs`, and login.
 5. Continue moving remaining demo-only flows into persistent PostgreSQL-backed paths.

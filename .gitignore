@@ -8,6 +8,7 @@ __pycache__/
 *.pyo
 *.log
 .env
+app_logs.txt
 
 backend-start.err
 backend-start.log
@@ -15,6 +16,7 @@ backend-start.log
 Videos/
 sample-videos/
 mobile-viewer-app/
+windows-viewer-app/
 VCNR_Converter/
 VCNR_Android_Player/
 VCNR_Swarm_Test/

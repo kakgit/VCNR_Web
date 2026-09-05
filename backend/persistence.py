@@ -347,6 +347,10 @@ def _derive_default_online_stars(entries: list[dict] | None) -> int:
   return min(int(item["stars_required"]) for item in normalized)
 
 
+def _is_buy_now_active(movie) -> bool:
+  return bool(getattr(movie, "buy_now_enabled", False) or getattr(movie, "stage", None) == "released")
+
+
 def _load_cast_credits(raw_value: str | None) -> list[dict]:
   return _normalize_cast_credit_entries(_json_load(raw_value, []))
 
@@ -1898,6 +1902,7 @@ def update_movie_interest(
   user_id: str | None = None,
   wish_mode: str | None = None,
   quality_code: str | None = None,
+  ticket_count: int | None = None,
 ) -> tuple[dict, bool] | None:
   ensure_seeded(session)
   movie = session.get(MovieRecord, movie_id)
@@ -1984,7 +1989,7 @@ def update_movie_interest(
       if not movie.reserve_enabled:
         raise ValueError("Reserve Now is not active for this title yet.")
     elif kind == "buy":
-      if not movie.buy_now_enabled:
+      if not _is_buy_now_active(movie):
         raise ValueError("Buy Now is not active for this title yet.")
     else:
       raise ValueError("Unsupported title action.")
@@ -1995,9 +2000,13 @@ def update_movie_interest(
       session.add(wallet)
       session.flush()
 
-    reserve_stars = movie.stars_required_theatre if reserve_mode == "theatre" else (movie.reserve_star_price or movie.stars_required)
-    if reserve_mode == "online" and selected_quality:
+    if reserve_mode == "theatre":
+      normalized_ticket_count = max(1, min(10, int(ticket_count or 1)))
+      reserve_stars = int(movie.stars_required_theatre or movie.reserve_star_price or movie.stars_required or 0) * normalized_ticket_count
+    elif reserve_mode == "online" and selected_quality:
       reserve_stars = int(selected_quality["stars_required"])
+    else:
+      reserve_stars = int(movie.reserve_star_price or movie.stars_required or 0)
 
     if kind == "reserve" and reserve_mode == "online" and selected_quality:
       active_online_reservations = (
@@ -2428,6 +2437,10 @@ def publish_movie(session: Session, movie_id: str, release_date: str) -> dict | 
   movie.stage_label = "New Release"
   movie.release_date = release_date
   movie.countdown = f"Released on {release_date}"
+  movie.buy_now_enabled = True
+  linked_title = _get_linked_title_by_movie_id(session, movie.id)
+  if linked_title is not None:
+    linked_title.buy_now_enabled = True
   existing_request = _get_movie_change_request(session, movie.id)
   if existing_request is not None:
     session.delete(existing_request)
@@ -2683,6 +2696,72 @@ def update_user_access(session: Session, user_id: str, name: str, role: str, sta
   session.commit()
   session.refresh(user)
   return _user_to_dict(user, wallet)
+
+
+def transfer_stars(session: Session, sender_id: str, recipient_email: str, stars: int) -> dict:
+  """Share stars: deduct from the sender's wallet and credit the recipient account."""
+  ensure_seeded(session)
+  amount = int(stars)
+  if amount <= 0:
+    raise ValueError("Choose at least 1 star to share.")
+  sender = session.get(UserRecord, sender_id)
+  if sender is None:
+    raise ValueError("Your account could not be found. Please sign in again.")
+  recipient = (
+    session.query(UserRecord)
+    .filter(UserRecord.email.ilike(recipient_email.strip()))
+    .first()
+  )
+  if recipient is None:
+    raise ValueError("No Cine Vault account uses that email address.")
+  if recipient.id == sender.id:
+    raise ValueError("Pick a different account — you cannot share stars with yourself.")
+  sender_wallet = session.query(WalletRecord).filter(WalletRecord.user_id == sender.id).first()
+  if sender_wallet is None:
+    sender_wallet = WalletRecord(user_id=sender.id, available_stars=0, blocked_stars=0, disks=0)
+    session.add(sender_wallet)
+    session.flush()
+  if int(sender_wallet.available_stars or 0) < amount:
+    raise ValueError(f"Not enough stars: your balance is {sender_wallet.available_stars}.")
+  recipient_wallet = session.query(WalletRecord).filter(WalletRecord.user_id == recipient.id).first()
+  if recipient_wallet is None:
+    recipient_wallet = WalletRecord(user_id=recipient.id, available_stars=0, blocked_stars=0, disks=0)
+    session.add(recipient_wallet)
+    session.flush()
+  sender_wallet.available_stars = int(sender_wallet.available_stars or 0) - amount
+  recipient_wallet.available_stars = int(recipient_wallet.available_stars or 0) + amount
+  # keep legacy points in sync with the wallet until points is fully removed from the model
+  sender.points = sender_wallet.available_stars * 100
+  recipient.points = recipient_wallet.available_stars * 100
+  session.commit()
+  session.refresh(sender)
+  session.refresh(recipient)
+  return {
+    "sender": _user_to_dict(sender, sender_wallet),
+    "recipient_name": recipient.name or recipient.email,
+  }
+
+
+def purchase_stars(session: Session, user_id: str, stars: int, payment_method: str, payment_reference: str | None = None) -> dict:
+  """Credit stars to the signed-in viewer's wallet after a (mock) payment."""
+  ensure_seeded(session)
+  amount = int(stars)
+  if amount <= 0:
+    raise ValueError("Choose at least 1 star to buy.")
+  user = session.get(UserRecord, user_id)
+  if user is None:
+    raise ValueError("Your account could not be found. Please sign in again.")
+  wallet = session.query(WalletRecord).filter(WalletRecord.user_id == user.id).first()
+  if wallet is None:
+    wallet = WalletRecord(user_id=user.id, available_stars=0, blocked_stars=0, disks=0)
+    session.add(wallet)
+    session.flush()
+  wallet.available_stars = int(wallet.available_stars or 0) + amount
+  user.points = int(wallet.available_stars or 0) * 100
+  session.commit()
+  session.refresh(user)
+  session.refresh(wallet)
+  return {"user": _user_to_dict(user, wallet)}
 
 
 def authenticate_user(session: Session, email: str, password: str) -> dict | None:

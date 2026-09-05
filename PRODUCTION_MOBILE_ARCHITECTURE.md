@@ -178,14 +178,14 @@ Recommended path shape:
 
 - React Native mobile app
 - Render backend (deploy via `render.yaml` blueprint)
-- Render Postgres (free tier, 30-day expiry; use Neon afterward)
+- Railway Postgres (PostgreSQL lives on Railway, not Render; see docs/free-hosting-guide.md)
 - Cloudflare R2 for encrypted chunks
 
 ### Production Direction
 
 - React Native mobile app
 - Render backend
-- Render Postgres (or Neon for permanent free storage)
+- Railway Postgres (managed PostgreSQL; Public Access/TCP proxy so Render can reach it)
 - Cloudflare R2 for encrypted chunks
 - Signed content access controlled by backend
 - Peer-assisted layer only after server-only delivery is proven stable

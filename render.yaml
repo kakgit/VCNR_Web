@@ -3,24 +3,22 @@
 #
 # Render is the only deployment platform for VCNR_Web.
 #
+# PostgreSQL runs on Railway (https://railway.com), NOT on Render.
+# See docs/free-hosting-guide.md for the step-by-step migration.
+#
 # Deploy steps:
 #   1. Push this repo to GitHub
 #   2. In Render dashboard: New + -> Blueprint -> select this repo
-#   3. Render creates the web service + PostgreSQL automatically
-#   4. Frontend origin is auto-detected from RENDER_EXTERNAL_URL
+#   3. Render creates the web service automatically
+#   4. Create the PostgreSQL DB on Railway, enable Public Access /
+#      TCP Proxy (Settings -> Networking), and paste the public connection
+#      string into the DATABASE_URL variable on the service Environment tab
+#   5. Frontend origin is auto-detected from RENDER_EXTERNAL_URL
 #      (no FRONTEND_ORIGIN manual setup needed)
 #
 # Free tier caveats:
 #   - Service sleeps after 15 min idle, wakes in ~50s on first request
-#   - Free PostgreSQL expires after 30 days (use Neon for permanent free DB)
-
-databases:
-  - name: vcnr-postgres
-    databaseName: cineproxima
-    user: vcnr
-    plan: free
-    # Free Postgres on Render expires after 30 days.
-    # For permanent free storage use Neon: https://neon.tech (see docs/free-hosting-guide.md)
+#   - Railway is a paid PostgreSQL host (trial credit, then Hobby at $5/mo)
 
 services:
   - type: web
@@ -37,10 +35,13 @@ services:
         value: 0.0.0.0
       - key: APP_PORT
         value: "8000"
+      # PostgreSQL lives on Railway. Set this manually in the Render dashboard
+      # (Environment tab) to Railway's public connection string
+      # (DATABASE_PUBLIC_URL after enabling the TCP proxy).
+      # `sync: false` keeps the value out of git and stops Blueprint syncs
+      # from overwriting it.
       - key: DATABASE_URL
-        fromDatabase:
-          name: vcnr-postgres
-          property: connectionString
+        sync: false
       # RENDER_EXTERNAL_URL is set automatically by Render.
       # The backend uses it as the frontend origin for CORS and webseed URLs.
       - key: SWARM_STUN_URL

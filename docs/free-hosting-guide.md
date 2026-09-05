@@ -19,7 +19,7 @@ project's stack:
 | Option | What it's for | Free tier | Best for |
 |---|---|---|---|
 | **Render** | Stable public backend | 750 hrs/mo, sleeps after 15 min idle | Sole app deployment platform |
-| **Neon** | PostgreSQL | 0.5 GB, permanently free | Long-term free database (after Render's 30-day Postgres expires) |
+| **Railway** | PostgreSQL (managed) | Trial ~$5 credit, then Hobby $5/mo | Long-term database host outside Render (needs Public Access / TCP proxy) |
 | **Cloudflare R2** | Object storage for media | 10 GB storage, 1M reads/mo | Storing large `.vcnr` packages |
 | **Cloudflare quick tunnel** | Temporary public URL | Free, unlimited | Ad-hoc phone testing while laptop is on |
 
@@ -27,9 +27,10 @@ project's stack:
 
 ## Option 1 — Render (the only deployment platform)
 
-Render deploys your root `Dockerfile` directly, gives a stable HTTPS URL, and can
-provision a free PostgreSQL. The `render.yaml` blueprint is already included in this
-repo and is wired to auto-detect your public URL.
+Render deploys your root `Dockerfile` directly, gives a stable HTTPS URL, and is
+the only app deployment platform. The `render.yaml` blueprint is already included
+in this repo and is wired to auto-detect your public URL. PostgreSQL now runs on
+Railway (Option 3), not on Render.
 
 ### Setup
 
@@ -38,7 +39,8 @@ repo and is wired to auto-detect your public URL.
 3. Dashboard → **New +** → **Blueprint** → select `VCNR_Web`.
 4. Render reads `render.yaml` and creates:
    - `vcnr-web` web service (Docker, free plan)
-   - `vcnr-postgres` database (free plan)
+
+   PostgreSQL is **not** created on Render anymore — it runs on Railway (Option 3).
 5. **No manual `FRONTEND_ORIGIN` setup is needed.** The backend reads
    `RENDER_EXTERNAL_URL` (set automatically by Render) and uses it as the
    frontend origin for CORS and webseed URLs.
@@ -55,7 +57,7 @@ repo and is wired to auto-detect your public URL.
 | `APP_ENV` | blueprint | `production` |
 | `APP_HOST` | blueprint | `0.0.0.0` |
 | `APP_PORT` | blueprint | `8000` |
-| `DATABASE_URL` | blueprint | `fromDatabase` → `vcnr-postgres` |
+| `DATABASE_URL` | **manual** (`sync: false`) | Railway `DATABASE_PUBLIC_URL` (public TCP proxy) |
 | `FRONTEND_ORIGIN` | **auto-detected** | `RENDER_EXTERNAL_URL` (set by Render) |
 | `SWARM_STUN_URL` | blueprint | `stun:stun.l.google.com:19302` |
 
@@ -71,7 +73,7 @@ PUBLIC_TORRENT_TRACKERS=udp://tracker.opentrackr.org:1337/announce,udp://open.st
 ### Free tier limits that matter
 
 - **Sleeps after 15 min idle** → first request after sleep takes ~50s.
-- **Free Postgres expires after 30 days** → use Neon (Option 3) after that.
+- **PostgreSQL lives on Railway** (see Option 3) — Render only runs the web service.
 - **Bandwidth ~100 GB/month** → a 2.5 GB package downloaded ~30 times hits the cap.
 - **Disk is ephemeral** → anything written under `media/` is lost on redeploy.
   Long downloads can also be interrupted if the service restarts/sleeps mid-transfer.
@@ -95,39 +97,77 @@ cloudflared tunnel --url http://localhost:8000
 
 ---
 
-## Option 3 — Neon (permanent free PostgreSQL)
+## Option 3 — Railway (PostgreSQL database)
 
-Render's free Postgres expires after 30 days. Neon's free tier is **permanently free**
-(0.5 GB), which makes it the right database for ongoing testing alongside Render.
+The app stays on Render, but the database runs on **Railway** (<https://railway.com>).
+Railway Postgres deploys private by default, and Render is outside Railway's private
+network — so the database must be exposed with a public TCP proxy.
 
-### Setup
+> **Pricing** — Railway has no permanent free tier anymore: a new account gets a
+> free trial (~$5 credit), then the cheapest paid plan is **Hobby at $5/month**
+> (includes a ~$5 usage credit). Traffic through the public TCP proxy bills as
+> network egress, but normal API traffic is small.
 
-1. Sign up at <https://neon.tech> (GitHub login).
-2. Create a new project (any region close to your test users).
-3. Copy the connection string. Neon provides it as:
-   `postgresql://user:password@ep-xxxx-pooler.region.aws.neon.tech/neondb?sslmode=require`
-4. Your app expects the `postgresql+psycopg://` scheme. The `_normalize_database_url`
-   in `backend/core/config.py` already converts `postgres://` and `postgresql://`
-   automatically, so you can paste Neon's string as-is into `DATABASE_URL`.
-5. `init_db()` runs on startup and creates all tables automatically.
+### Create the database (one time, on Railway)
 
-### Switch Render to Neon
+1. Sign in at <https://railway.com> (GitHub login).
+2. **New Project** → start from an empty project.
+3. **+ New → Database → PostgreSQL** (or deploy the template from
+   <https://railway.com/deploy/postgres>). Wait until the service is **RUNNING**.
+4. Open the PostgreSQL service → **Settings → Networking**.
+5. Add **Public Access** (this creates a **TCP Proxy**). Enter the internal port
+   `5432`. Railway generates a proxy host/port such as `shuttle.proxy.rlwy.net:15140`
+   and populates a `DATABASE_PUBLIC_URL` variable.
+6. Copy `DATABASE_PUBLIC_URL`. It looks like:
+   `postgresql://postgres:...@shuttle.proxy.rlwy.net:15140/railway`
 
-After 30 days, or if you prefer permanent free storage:
+   Use the **public** URL — the default `DATABASE_URL` points at a
+   `*.railway.internal` host that only resolves inside Railway and cannot be
+   reached from Render.
+
+### Switch Render to Railway
 
 1. In Render → your `vcnr-web` service → **Environment** tab.
-2. Override `DATABASE_URL` with your Neon connection string.
-3. Redeploy (or the service restarts automatically).
+2. Replace `DATABASE_URL` with the `DATABASE_PUBLIC_URL` value. If the copied
+   string has no `sslmode`, append `?sslmode=require` (Railway Postgres is
+   SSL-enabled).
+3. Redeploy / restart the service.
+4. On startup `init_db()` creates all tables and compatibility columns
+   automatically, so a fresh empty database works without manual SQL.
 
-### Verification
+### Verify
 
 ```bash
 curl https://vcnr-web.onrender.com/api/health
 ```
 
-If the DB connects, admin/producer endpoints will work against the Neon database.
-If DB is unreachable, non-DB endpoints still work (the app falls back to demo data),
-and admin/producer routes return HTTP 503.
+If the DB connects, admin/producer endpoints work against the Railway database.
+If the DB is unreachable, non-DB endpoints still work (the app falls back to demo
+data) and admin/producer routes return HTTP 503.
+
+### Migrating existing data (recommended before switching)
+
+If the Render database already holds real users/movies, dump and restore it once
+(machine with Postgres client tools):
+
+```bash
+pg_dump --no-owner --no-acls "<RENDER_DATABASE_URL>" > dump.sql
+psql "<RAILWAY_PUBLIC_URL>" < dump.sql
+```
+
+- `<RENDER_DATABASE_URL>`: Render → `vcnr-postgres` database → **Connect** tab.
+- `<RAILWAY_PUBLIC_URL>`: from step 6 above.
+
+### Remove the old Render database (last step)
+
+After the app is verified working on Railway:
+
+1. Update `render.yaml` (the `databases:` block is already removed and
+   `DATABASE_URL` is `sync: false`), commit, and push. In the Render dashboard,
+   apply the Blueprint update.
+2. **Warning**: applying that update deletes the `vcnr-postgres` resource and all
+   its data on Render. Do this only after you verified Railway is serving the app
+   (or delete the database manually in the Render dashboard when you are ready).
 
 ---
 
@@ -207,7 +247,7 @@ with the same R2 env vars configured.
 | `APP_ENV` | yes | blueprint | `production` |
 | `APP_HOST` | yes | blueprint | `0.0.0.0` |
 | `APP_PORT` | yes | blueprint | `8000` |
-| `DATABASE_URL` | yes | blueprint (or Neon override) | `postgresql+psycopg://...` |
+| `DATABASE_URL` | yes | manual (`sync: false` in blueprint) | Railway public proxy URL |
 | `FRONTEND_ORIGIN` | no | auto-detected from `RENDER_EXTERNAL_URL` | `https://vcnr-web.onrender.com` |
 | `SWARM_STUN_URL` | no | blueprint | `stun:stun.l.google.com:19302` |
 | `SWARM_TURN_URL` | no | manual | (optional TURN server) |
@@ -244,8 +284,10 @@ To stay within free limits:
 
 ### App starts but `/api/admin` and `/api/producer` return 503
 
-The database is unreachable. Check `DATABASE_URL` and that Neon is accepting
-connections. Non-DB endpoints continue to work with demo data.
+The database is unreachable. Check that `DATABASE_URL` points at Railway's public
+proxy URL (host like `*.proxy.rlwy.net`, `sslmode=require`) and that Public Access
+on the Railway Postgres service is still enabled. Non-DB endpoints continue to
+work with demo data.
 
 ### Download fails mid-transfer
 

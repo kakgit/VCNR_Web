@@ -78,6 +78,10 @@ def _derive_default_online_stars(entries) -> int:
   return min(int(item["stars_required"]) for item in normalized)
 
 
+def _is_buy_now_active(movie: dict) -> bool:
+  return bool(movie.get("buy_now_enabled", False) or movie.get("stage") == "released")
+
+
 def _decorate_movie(movie: dict, viewer_wish_kind: str | None = None) -> dict:
   item = deepcopy(movie)
   approval_status = "archived" if item.get("archived") else item.get("approval_status", "published")
@@ -433,6 +437,7 @@ def update_movie_interest(
   user_id: str | None = None,
   wish_mode: str | None = None,
   quality_code: str | None = None,
+  ticket_count: int | None = None,
 ) -> tuple[dict, bool] | None:
   for movie in MOVIES:
     if movie["id"] != movie_id:
@@ -456,7 +461,7 @@ def update_movie_interest(
         if not movie.get("reserve_enabled", False):
           raise ValueError("Reserve Now is not active for this title yet.")
       elif kind == "buy":
-        if not movie.get("buy_now_enabled", False):
+        if not _is_buy_now_active(movie):
           raise ValueError("Buy Now is not active for this title yet.")
       else:
         raise ValueError("Unsupported title action.")
@@ -491,9 +496,13 @@ def update_movie_interest(
       user = next((entry for entry in USERS if entry["id"] == user_id), None)
       if user is None:
         raise ValueError("Sign in is required.")
-      reserve_stars = int(movie.get("stars_required_theatre", 3) if reserve_mode == "theatre" else movie.get("reserve_star_price", movie.get("stars_required", 0)) or movie.get("stars_required", 0))
-      if reserve_mode == "online" and selected_quality:
+      if reserve_mode == "theatre":
+        normalized_ticket_count = max(1, min(10, int(ticket_count or 1)))
+        reserve_stars = int(movie.get("stars_required_theatre", 3) or movie.get("reserve_star_price", movie.get("stars_required", 0)) or movie.get("stars_required", 0)) * normalized_ticket_count
+      elif reserve_mode == "online" and selected_quality:
         reserve_stars = int(selected_quality["stars_required"])
+      else:
+        reserve_stars = int(movie.get("reserve_star_price", movie.get("stars_required", 0)) or movie.get("stars_required", 0))
       available_stars = int(user.get("available_stars", max(user.get("points", 0) // 100, 0)))
       blocked_stars = int(user.get("blocked_stars", 0))
       if kind == "reserve" and reserve_mode == "online" and selected_quality:
@@ -761,6 +770,7 @@ def publish_movie(movie_id: str, release_date: str) -> dict | None:
     movie["stage_label"] = "New Release"
     movie["release_date"] = release_date
     movie["countdown"] = f"Released on {release_date}"
+    movie["buy_now_enabled"] = True
     _update_movie_approval_status(movie, "published")
     return _decorate_movie(movie)
   return None
@@ -985,6 +995,52 @@ def update_user_access(user_id: str, name: str, role: str, status: str, star_bal
     user["blocked_stars"] = int(user.get("blocked_stars", 0))
     return {key: value for key, value in deepcopy(user).items() if key != "password_hash"}
   return None
+
+
+def transfer_stars(sender_id: str, recipient_email: str, stars: int) -> dict:
+  """Share stars: deduct from the sender and credit the recipient account (demo store)."""
+  amount = int(stars)
+  if amount <= 0:
+    raise ValueError("Choose at least 1 star to share.")
+  sender = next((user for user in USERS if user["id"] == sender_id), None)
+  if sender is None:
+    raise ValueError("Your account could not be found. Please sign in again.")
+  normalized_email = recipient_email.strip().lower()
+  recipient = next((user for user in USERS if user["email"].lower() == normalized_email), None)
+  if recipient is None:
+    raise ValueError("No Cine Vault account uses that email address.")
+  if recipient["id"] == sender["id"]:
+    raise ValueError("Pick a different account — you cannot share stars with yourself.")
+  sender_balance = int(sender.get("available_stars", max(int(sender.get("points", 0)) // 100, 0)))
+  if sender_balance < amount:
+    raise ValueError(f"Not enough stars: your balance is {sender_balance}.")
+  sender["available_stars"] = sender_balance - amount
+  sender["points"] = (sender_balance - amount) * 100
+  recipient_balance = int(
+    recipient.get("available_stars", max(int(recipient.get("points", 0)) // 100, 0))
+  )
+  recipient["available_stars"] = recipient_balance + amount
+  recipient["points"] = (recipient_balance + amount) * 100
+  return {
+    "sender": {key: value for key, value in deepcopy(sender).items() if key != "password_hash"},
+    "recipient_name": recipient.get("name") or recipient.get("email", ""),
+  }
+
+
+def purchase_stars(user_id: str, stars: int, payment_method: str, payment_reference: str | None = None) -> dict:
+  """Credit stars to the viewer's account after a (mock) payment (demo store)."""
+  amount = int(stars)
+  if amount <= 0:
+    raise ValueError("Choose at least 1 star to buy.")
+  user = next((user for user in USERS if user["id"] == user_id), None)
+  if user is None:
+    raise ValueError("Your account could not be found. Please sign in again.")
+  balance = int(user.get("available_stars", max(int(user.get("points", 0)) // 100, 0)))
+  user["available_stars"] = balance + amount
+  user["points"] = (balance + amount) * 100
+  return {
+    "user": {key: value for key, value in deepcopy(user).items() if key != "password_hash"},
+  }
 
 
 def delete_user(user_id: str) -> dict | None:

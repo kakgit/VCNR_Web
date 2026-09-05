@@ -5061,9 +5061,14 @@ async function uploadAdminMovieConvertedContentPackageRemote(movieId, files) {
     const sourceFolder = pathParts.includes("content")
       ? pathParts[pathParts.indexOf("content") + 1]
       : pathParts.length > 1 ? pathParts[pathParts.length - 2] : "";
+    const torrentStem = file.name.toLowerCase().endsWith(".torrent")
+      ? file.name.replace(/\.torrent$/i, "").toLowerCase()
+      : "";
     const finalQualityCode = file.name.toLowerCase().endsWith(".vcnr")
       ? chunkQualityByName.get(file.name)
-      : sourceQualityMap.get(String(sourceFolder || "").toLowerCase());
+      : torrentStem
+        ? (sourceQualityMap.get(torrentStem) || sourceQualityMap.get(String(sourceFolder || "").toLowerCase()))
+        : sourceQualityMap.get(String(sourceFolder || "").toLowerCase());
     if (!finalQualityCode) {
       throw new Error(`Could not match ${file.name} to a configured title quality.`);
     }

@@ -20,7 +20,14 @@ import zipfile
 
 from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
+import uuid
 from starlette.background import BackgroundTask
+
+from backend.schemas import (
+  AdvertisementDeliveryRequest,
+  AdvertisementDeliveryResponse,
+  AdvertisementPasscodeEntry,
+)
 user_site_packages = site.getusersitepackages()
 if user_site_packages and user_site_packages not in sys.path:
   sys.path.append(user_site_packages)
@@ -33,6 +40,13 @@ from sqlalchemy.orm import Session
 from backend import auth as session_auth
 from backend.core.config import get_settings
 from backend.core.push import build_push_message, is_expo_push_token, send_push_messages_async
+from backend.core.mailer import (
+  build_gift_email_html,
+  build_sponsor_passcode_list_email_html,
+  send_advertisement_gift_email,
+  send_email_message,
+)
+from backend.core.qr import build_movie_gift_qr_payload, build_qr_png_bytes
 from backend.core.storage import (
   chunk_exists,
   chunk_public_url,
@@ -141,6 +155,11 @@ from backend.schemas import (
   LoginResponse,
   MovieInterestRequest,
   MovieInterestResponse,
+  MovieGiftRequest,
+  StarTransferRequest,
+  StarTransferResponse,
+  StarPurchaseRequest,
+  StarPurchaseResponse,
   MovieListResponse,
   PublishMovieRequest,
   MoviePublishRequest,
@@ -1012,7 +1031,8 @@ def _swarm_session_expiry() -> datetime:
 
 
 def _swarm_seeder_expiry() -> datetime:
-  return datetime.utcnow() + timedelta(minutes=SWARM_SEEDER_TTL_MINUTES)
+  ttl_seconds = max(60, get_settings().swarm_seeder_ttl_seconds)
+  return datetime.utcnow() + timedelta(seconds=ttl_seconds)
 
 
 def _swarm_seeder_cooldown_expiry() -> datetime:
@@ -1106,10 +1126,20 @@ def _get_swarm_session_or_404(session_id: str) -> dict[str, str]:
   return session
 
 
+def _swarm_receiver_count_for_seeder(seeder_id: str) -> int:
+  """Live count of active receiver sessions currently assigned to a seeder."""
+  count = 0
+  for session in SWARM_SESSIONS.values():
+    if seeder_id in _get_swarm_json_set(session, "assigned_seeder_ids"):
+      count += 1
+  return count
+
+
 def _swarm_available_seeders(movie_id: str, quality_code: str, missing_chunks: set[str]) -> list[SwarmSourceEntry]:
   _cleanup_swarm_seeders()
   normalized_quality_code = _normalize_quality_code(quality_code)
-  entries: list[SwarmSourceEntry] = []
+  max_receivers = max(1, get_settings().swarm_max_receivers_per_seeder)
+  ranked: list[tuple[int, int, datetime, dict, list[str]]] = []
   freshness_cutoff = datetime.utcnow() - timedelta(seconds=SWARM_SEEDER_FRESHNESS_SECONDS)
   for seeder in SWARM_AVAILABLE_SEEDERS.values():
     if seeder["movie_id"] != movie_id or seeder["quality_code"] != normalized_quality_code:
@@ -1127,9 +1157,22 @@ def _swarm_available_seeders(movie_id: str, quality_code: str, missing_chunks: s
           continue
       except ValueError:
         pass
+    # Do not overload a single phone: skip seeders already serving the
+    # maximum number of simultaneous receivers.
+    if _swarm_receiver_count_for_seeder(seeder["seeder_id"]) >= max_receivers:
+      continue
     chunk_names = sorted(_get_swarm_json_set(seeder, "chunk_names").intersection(missing_chunks))
     if not chunk_names:
       continue
+    recent_failures = int(seeder.get("recent_failures") or 0)
+    # Score = verified chunk coverage minus recent receiver timeouts, so healthy
+    # full seeders win while still leaving room for freshly-started ones.
+    score = max(0, len(chunk_names) - recent_failures)
+    ranked.append((score, len(chunk_names), updated_at, seeder, chunk_names))
+
+  ranked.sort(key=lambda item: (item[0], item[2]), reverse=True)
+  entries: list[SwarmSourceEntry] = []
+  for _score, chunk_count, updated_at, seeder, chunk_names in ranked:
     entries.append(
       SwarmSourceEntry(
         source_id=seeder["seeder_id"],
@@ -1137,18 +1180,10 @@ def _swarm_available_seeders(movie_id: str, quality_code: str, missing_chunks: s
         user_id=seeder.get("user_id"),
         device_label=seeder.get("device_label"),
         chunk_names=chunk_names,
-        chunk_count=len(chunk_names),
+        chunk_count=chunk_count,
         last_seen_at=updated_at.isoformat(timespec="seconds") + "Z",
       )
     )
-  def _sort_key(item: SwarmSourceEntry) -> tuple[int, datetime]:
-    try:
-      last_seen = datetime.fromisoformat(item.last_seen_at.replace("Z", ""))
-    except ValueError:
-      last_seen = datetime.min
-    return (item.chunk_count, last_seen)
-
-  entries.sort(key=_sort_key, reverse=True)
   return entries
 
 
@@ -2153,7 +2188,9 @@ def _converted_content_destination(movie_id: str, relative_path: str, final_qual
     return quality_code, filename, media_object_key(movie_id, "content", f"{quality_code}/{package}/{filename}")
   if suffix == ".torrent":
     if len(parts) < 2:
-      raise HTTPException(status_code=400, detail="Torrent files must be inside a quality folder.")
+      quality_code = _normalize_quality_code(final_quality_code or Path(filename).stem)
+      return quality_code, filename, media_object_key(movie_id, "content", f"{quality_code}/{filename}")
+    quality_code = _normalize_quality_code(parts[0])
     return quality_code, filename, media_object_key(movie_id, "content", f"{quality_code}/{quality_code}.torrent")
   raise HTTPException(status_code=400, detail="Only .vcnr chunks and .torrent files are uploaded directly.")
 
@@ -2302,6 +2339,18 @@ def _build_registered_converted_manifest(movie: dict, source_manifest: dict) -> 
       "files": saved_files,
       "torrent": torrent_metadata,
     }
+    # Converter metadata for multi-track / multi-language packages. Additive
+    # only: existing consumers ignore unknown keys.
+    for passthrough_key in (
+      "original_source_name",
+      "original_source_extension",
+      "output_extension",
+      "media",
+      "conversion",
+      "subtitle_files",
+    ):
+      if source_entry.get(passthrough_key) is not None:
+        quality_entry[passthrough_key] = source_entry[passthrough_key]
     _replace_content_quality_entry(manifest, quality_code, quality_entry)
     manifest["torrent_packages"][quality_code] = torrent_metadata
     total_chunks += len(saved_files)
@@ -2657,14 +2706,16 @@ def movie_interest(
 ) -> MovieInterestResponse:
   if payload.kind == "wish" and current_user is None:
     raise HTTPException(status_code=401, detail="Sign in is required.")
+  if payload.kind in {"reserve", "buy"} and current_user is None:
+    raise HTTPException(status_code=401, detail="Sign in is required.")
   if payload.kind == "wish" and payload.wish_mode not in {"online", "theatre"}:
     raise HTTPException(status_code=400, detail="Choose how you wish to watch.")
 
   try:
     result = (
-      persistence.update_movie_interest(db, movie_id, payload.kind, current_user["id"] if current_user else None, payload.wish_mode, payload.quality_code)
+      persistence.update_movie_interest(db, movie_id, payload.kind, current_user["id"] if current_user else None, payload.wish_mode, payload.quality_code, payload.ticket_count)
       if db
-      else demo_store.update_movie_interest(movie_id, payload.kind, current_user["id"] if current_user else None, payload.wish_mode, payload.quality_code)
+      else demo_store.update_movie_interest(movie_id, payload.kind, current_user["id"] if current_user else None, payload.wish_mode, payload.quality_code, payload.ticket_count)
     )
   except ValueError as error:
     raise HTTPException(status_code=400, detail=str(error)) from error
@@ -2707,6 +2758,261 @@ def remove_movie_wish(
   return MovieInterestResponse(
     item=_sanitize_movie_payload(movie),
     message=f'"{movie["title"]}" removed from your wish list.',
+  )
+
+
+@router.post("/movies/{movie_id}/gift", response_model=MovieInterestResponse)
+def movie_gift(
+  movie_id: str,
+  payload: MovieGiftRequest,
+  db: Session | None = Depends(get_db),
+  current_user: dict[str, str] = Depends(get_current_user),
+) -> MovieInterestResponse:
+  recipient_email = payload.recipient_email.strip()
+  recipient_phone = payload.recipient_phone.strip()
+  if not re.match(r"^[^\s@]+@[^\s@]+\.[^\s@]+$", recipient_email):
+    raise HTTPException(status_code=400, detail="Enter a valid email ID for your friend.")
+  if len(re.sub(r"\D", "", recipient_phone)) < 7:
+    raise HTTPException(status_code=400, detail="Enter a valid phone number for your friend.")
+
+  try:
+    result = (
+      persistence.update_movie_interest(db, movie_id, "reserve", current_user["id"], "online", payload.quality_code, None)
+      if db
+      else demo_store.update_movie_interest(movie_id, "reserve", current_user["id"], "online", payload.quality_code, None)
+    )
+  except ValueError as error:
+    raise HTTPException(status_code=400, detail=str(error)) from error
+  if result is None:
+    raise HTTPException(status_code=404, detail="Movie not found.")
+  movie, _created = result
+
+  return MovieInterestResponse(
+    item=_sanitize_movie_payload(movie),
+    message=f'Gift reserved for "{movie["title"]}" — your friend will receive the details at {recipient_email}.',
+  )
+
+
+@router.post("/users/stars/transfer", response_model=StarTransferResponse)
+def stars_transfer(
+  payload: StarTransferRequest,
+  db: Session | None = Depends(get_db),
+  current_user: dict[str, str] = Depends(get_current_user),
+) -> StarTransferResponse:
+  """Share stars from the signed-in viewer's account to another Cine Vault account."""
+  try:
+    result = (
+      persistence.transfer_stars(db, current_user["id"], payload.recipient_email, payload.stars)
+      if db
+      else demo_store.transfer_stars(current_user["id"], payload.recipient_email, payload.stars)
+    )
+  except ValueError as error:
+    raise HTTPException(status_code=400, detail=str(error)) from error
+
+  sender = result.get("sender") or {}
+  recipient_name = str(result.get("recipient_name") or "")
+  star_balance = int(sender.get("available_stars", sender.get("star_balance", 0)) or 0)
+  return StarTransferResponse(
+    message=f"Shared ★ {payload.stars} with {recipient_name}.",
+    star_balance=star_balance,
+    recipient_name=recipient_name,
+  )
+
+
+@router.post("/users/stars/purchase", response_model=StarPurchaseResponse)
+def stars_purchase(
+  payload: StarPurchaseRequest,
+  db: Session | None = Depends(get_db),
+  current_user: dict[str, str] = Depends(get_current_user),
+) -> StarPurchaseResponse:
+  """Buy stars through the payment gateway and credit them to the viewer's wallet."""
+  reference = (payload.payment_reference or "").strip() or f"TXN-{uuid.uuid4().hex[:10].upper()}"
+  try:
+    result = (
+      persistence.purchase_stars(db, current_user["id"], payload.stars, payload.payment_method, reference)
+      if db
+      else demo_store.purchase_stars(current_user["id"], payload.stars, payload.payment_method, reference)
+    )
+  except ValueError as error:
+    raise HTTPException(status_code=400, detail=str(error)) from error
+
+  user = result.get("user") or {}
+  star_balance = int(user.get("available_stars", user.get("star_balance", 0)) or 0)
+  return StarPurchaseResponse(
+    message=f"Payment successful — ★ {payload.stars} added to your account.",
+    star_balance=star_balance,
+    stars_purchased=payload.stars,
+    payment_reference=reference,
+  )
+
+
+@router.post("/advertisements/deliver", response_model=AdvertisementDeliveryResponse)
+def deliver_advertisement(payload: AdvertisementDeliveryRequest) -> AdvertisementDeliveryResponse:
+  """Create a QR code for the sponsored movie and email it to the recipient viewer.
+
+  The QR encodes a ``cinevault://movie/{id}`` payload so the viewer can scan it
+  inside any Cine Vault app to receive the movie for watching.
+  """
+  brand_name = payload.brand_name.strip()
+  brand_email = payload.brand_email.strip()
+  if not re.match(r"^[^\s@]+@[^\s@]+\.[^\s@]+$", brand_email):
+    raise HTTPException(status_code=400, detail="Enter a valid email ID for your brand.")
+
+  recipient = payload.recipient
+  recipient_email = ((recipient.email if recipient else "") or "").strip()
+  if recipient_email and not re.match(r"^[^\s@]+@[^\s@]+\.[^\s@]+$", recipient_email):
+    raise HTTPException(status_code=400, detail="Enter the viewer's valid email ID.")
+
+  sponsor_email = (payload.sponsor_delivery_email or "").strip()
+  if sponsor_email and not re.match(r"^[^\s@]+@[^\s@]+\.[^\s@]+$", sponsor_email):
+    raise HTTPException(status_code=400, detail="Enter the sponsor's valid email ID.")
+
+  if not recipient_email and not sponsor_email:
+    raise HTTPException(
+      status_code=400,
+      detail="Add the sponsor email (for the passcode list) or a recipient viewer email.",
+    )
+
+  movie_id = payload.movie_id.strip()
+  movie_title = payload.movie_title.strip() or "a Cine Vault movie"
+  if not movie_id:
+    raise HTTPException(status_code=400, detail="Select a movie to sponsor.")
+
+  passcode_count = max(1, min(int(payload.passcode_count or 1), 200))
+  base_code = (payload.submission_id or f"AD-{secrets.token_hex(4)}").strip()
+  movie_quality_code = (payload.movie_quality_code or "").strip()
+  movie_quality_label = (payload.movie_quality_label or "").strip()
+
+  try:
+    entries: list[AdvertisementPasscodeEntry] = []
+    entry_pngs: list[bytes] = []
+    for position in range(passcode_count):
+      gift_code = base_code if passcode_count == 1 else f"{base_code}-{position + 1:03d}"
+      qr_payload = build_movie_gift_qr_payload(
+        movie_id,
+        movie_title,
+        brand_name,
+        gift_code,
+        quality_code=movie_quality_code or None,
+      )
+      qr_png = build_qr_png_bytes(qr_payload)
+      entry_pngs.append(qr_png)
+      entries.append(
+        AdvertisementPasscodeEntry(
+          code=gift_code,
+          qr_payload=qr_payload,
+          qr_data_url=f"data:image/png;base64,{b64encode(qr_png).decode('ascii')}",
+        )
+      )
+  except ImportError as error:
+    raise HTTPException(
+      status_code=503,
+      detail="QR generation is unavailable on this server (missing 'qrcode[pil]' package).",
+    ) from error
+  except Exception as error:  # noqa: BLE001 - surface any rendering problem clearly.
+    raise HTTPException(status_code=500, detail=f"Could not render the QR code: {error}") from error
+
+  settings = get_settings()
+  resolution_note = f' ({movie_quality_label or movie_quality_code})' if (movie_quality_label or movie_quality_code) else ""
+  mail_sent = False
+  list_mail_sent = False
+  details: list[str] = []
+  # 1) Optional single-viewer delivery: passcode #1 goes to the recipient viewer.
+  recipient_message = ""
+  if recipient_email:
+    viewer_label = ((recipient.name if recipient else "") or "").strip() or recipient_email
+    html_body = build_gift_email_html(
+      viewer_name=viewer_label,
+      brand_name=brand_name,
+      brand_email=brand_email,
+      movie_title=f"{movie_title}{resolution_note}",
+      qr_payload=entries[0].qr_payload,
+      frontend_origin=settings.frontend_origin,
+    )
+    plain_body = (
+      f"Hi {viewer_label},\n\n"
+      f'{brand_name} is sponsoring "{movie_title}"{resolution_note} on Cine Vault and has sent you a movie gift.\n\n'
+      "Open your Cine Vault app, scan the attached QR code, and the movie opens in your library ready to watch.\n\n"
+      f"Gift code payload: {entries[0].qr_payload}\n\n"
+      f"Questions about this sponsorship? Contact the brand at {brand_email}.\n"
+    )
+    mail_result = send_advertisement_gift_email(
+      to_email=recipient_email,
+      subject=f'{brand_name} sent you "{movie_title}" · Cine Vault',
+      html_body=html_body,
+      plain_body=plain_body,
+      qr_png=entry_pngs[0],
+    )
+    mail_sent = bool(mail_result.get("sent"))
+    recipient_message = (
+      f'Movie gift QR emailed to {recipient_email} — scanning it in the app unlocks "{movie_title}".'
+      if mail_sent
+      else str(mail_result.get("detail") or "QR code created, but the viewer email could not be sent.")
+    )
+    details.append(recipient_message)
+
+  # 2) Sponsor delivery: the full QR ID passcode list, ready to share.
+  if sponsor_email:
+    list_html = build_sponsor_passcode_list_email_html(
+      brand_name=brand_name,
+      brand_email=brand_email,
+      movie_title=f"{movie_title}{resolution_note}",
+      entries=[{"qr_payload": entry.qr_payload} for entry in entries],
+      frontend_origin=settings.frontend_origin,
+    )
+    list_plain = (
+      f"Hi {brand_name} team,\n\n"
+      f'Your sponsorship of "{movie_title}"{resolution_note} on Cine Vault is ready with '
+      f"{passcode_count} viewer passcode{'' if passcode_count == 1 else 's'}.\n\n"
+      "Share one code per customer or client — each viewer pastes the code in the movie page "
+      "In-Branding box (or scans the attached QR) to receive the movie:\n\n"
+      + "\n".join(f"{index}. {entry.qr_payload}" for index, entry in enumerate(entries, start=1))
+      + f"\n\nAll {passcode_count} QR images are attached as PNG files.\n"
+      f"Brand contact: {brand_email}.\n"
+    )
+    list_result = send_email_message(
+      to_email=sponsor_email,
+      subject=(
+        f'{brand_name} sponsored "{movie_title}" · {passcode_count} viewer '
+        f"passcode{'' if passcode_count == 1 else 's'} · Cine Vault"
+      ),
+      html_body=list_html,
+      plain_body=list_plain,
+      attachments=[
+        (f"cine-vault-passcode-{position + 1:03d}.png", entry_png)
+        for position, entry_png in enumerate(entry_pngs)
+      ],
+    )
+    list_mail_sent = bool(list_result.get("sent"))
+    details.append(
+      f"Passcode list emailed to {sponsor_email}."
+      if list_mail_sent
+      else str(list_result.get("detail") or "Passcode list email could not be sent.")
+    )
+
+  if list_mail_sent and mail_sent:
+    message = (
+      f"{passcode_count} QR ID passcode{'' if passcode_count == 1 else 's'} emailed to {sponsor_email}; "
+      f"passcode #1 also sent to {recipient_email}."
+    )
+  elif list_mail_sent:
+    message = f"{passcode_count} QR ID passcode{'' if passcode_count == 1 else 's'} emailed to {sponsor_email} — share them with your viewers to unlock \"{movie_title}\"."
+  elif mail_sent:
+    message = recipient_message
+  elif details:
+    message = "QR passcodes created, but the email could not be sent. " + " ".join(details)
+  else:
+    message = "QR passcodes created, but the email could not be sent."
+
+  return AdvertisementDeliveryResponse(
+    status="delivered" if (mail_sent or list_mail_sent) else "qr_created",
+    message=message,
+    qr_payload=entries[0].qr_payload,
+    qr_data_url=entries[0].qr_data_url,
+    mail_sent=mail_sent or list_mail_sent,
+    detail=" ".join(details) or None,
+    list_mail_sent=list_mail_sent,
+    passcodes=entries,
   )
 
 
@@ -4806,6 +5112,7 @@ def announce_movie_swarm_seeder(
     # The active receiver, if any, will be reassigned immediately below.
     "assigned_session_id": "",
     "cooldown_until": str(previous.get("cooldown_until") or ""),
+    "recent_failures": str(previous.get("recent_failures") or 0),
     "expires_at": expires_at.isoformat(),
     "created_at": str(previous.get("created_at") or datetime.utcnow().isoformat()),
     "updated_at": datetime.utcnow().isoformat(),
@@ -5034,6 +5341,7 @@ def cooldown_movie_swarm_seeder(
     raise HTTPException(status_code=404, detail="That live seeder is not available.")
   cooldown_until = _swarm_seeder_cooldown_expiry()
   seeder["cooldown_until"] = cooldown_until.isoformat()
+  seeder["recent_failures"] = str(int(seeder.get("recent_failures") or 0) + 1)
   seeder["updated_at"] = datetime.utcnow().isoformat()
   return SwarmSeederCooldownResponse(
     movie_id=movie_id,

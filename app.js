@@ -4335,7 +4335,7 @@ async function saveCreatorAssignment(event) {
   }
   const creatorIds = Array.from(creatorAssignmentAssignedIds);
   try {
-    const response = await apiRequest(`/admin/movies/${movieId}/creators`, {
+    const response = await apiRequest(`/admin/movies/${movieId}/creator`, {
       method: "POST",
       body: JSON.stringify({ creator_ids: creatorIds }),
     });

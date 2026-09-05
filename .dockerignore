@@ -8,6 +8,7 @@ __pycache__
 .env
 .gitrepo
 
+windows-viewer-app
 Videos
 
 mobile-viewer-app/node_modules

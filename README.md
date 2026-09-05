@@ -105,54 +105,56 @@ http://localhost:8000
 
 The backend currently mounts the frontend files directly, so the app can be served through FastAPI as the stack converges.
 
-## Deployment (Render only)
+## Deployment (Railway)
 
-Render is the sole deployment platform for `VCNR_Web`.
+Railway is the **only** deployment platform for `VCNR_Web`. It runs both the app
+(web service built from the root `Dockerfile` via `railway.json`) and the
+PostgreSQL database in one project. Render is no longer used.
 
-### One-click Render Blueprint deploy
+### One-click Railway deploy
 
-The repo includes a root `render.yaml` blueprint that creates:
+The repo ships with a `railway.json` that tells Railway to:
 
-- the `vcnr-web` web service (Docker, free tier)
-
-PostgreSQL is **no longer created on Render** — it runs on Railway
-(<https://railway.com>). See `docs/free-hosting-guide.md` for the full migration.
-In short: create a PostgreSQL database on Railway, enable **Public Access**
-(Settings → Networking → TCP Proxy) on it, and copy the generated
-`DATABASE_PUBLIC_URL` public connection string.
+- build the root `Dockerfile`
+- run `uvicorn backend.main:app --host 0.0.0.0 --port ${PORT:-8000}`
+- healthcheck at `/api/health`
 
 Deploy steps:
 
 1. Push this repo to GitHub.
-2. In the Render dashboard: **New + → Blueprint → select this repo**.
-3. Render creates the web service.
-4. Set `DATABASE_URL` (below) from the Railway public connection string.
-5. Open `https://vcnr-web.onrender.com/api/health` (or the assigned subdomain).
+2. Go to <https://railway.com> → **New Project** → start from an empty project.
+3. Add **PostgreSQL**: **+ New → Database → PostgreSQL** and wait for it to be `RUNNING`.
+4. Add the web service: **+ New → GitHub Repo** → select `VCNR_Web`.
+5. In the web service **Variables** tab, set `DATABASE_URL` by picking the
+   PostgreSQL service's `DATABASE_URL` via the reference picker (it becomes e.g.
+   `${{Postgres.DATABASE_URL}}`). This is the private `*.railway.internal` URL and
+   works without `sslmode=require`.
+6. Generate a public domain: web service **Settings → Networking → Generate Domain**.
+7. Open `https://<your-service>.up.railway.app/api/health` (or the assigned domain).
+
+`FRONTEND_ORIGIN` is **auto-detected**: the backend reads `RAILWAY_PUBLIC_DOMAIN`
+(set automatically once your service has a public domain) and uses it for CORS and
+webseed URLs. No manual setup is needed. If you attach a custom domain, the same
+auto-detection covers it.
+
+### Port
+
+The app binds `${PORT:-8000}`. If your domain doesn't respond immediately, open
+the service **Settings → Networking** and set the service **Port** to `8000` (the
+value uvicorn binds to when Railway doesn't provide `PORT`).
 
 ### Environment variables
 
-`FRONTEND_ORIGIN` is auto-detected from `RENDER_EXTERNAL_URL`, which Render sets
-automatically. No manual frontend origin setup is needed.
-
-The only required manual variable is:
+The only required variable is:
 
 ```text
-DATABASE_URL=<Railway PostgreSQL public connection string>
+DATABASE_URL=<reference your Railway PostgreSQL service's DATABASE_URL>
 ```
 
-The blueprint declares this variable with `sync: false`, so you enter the value in
-the Render dashboard **Environment** tab and it is never stored in git. Paste the
-`DATABASE_PUBLIC_URL` that Railway generates after you enable Public Access /
-TCP Proxy (see `docs/free-hosting-guide.md`). The backend's
-`_normalize_database_url` accepts Railway's `postgresql://` string as-is and
-rewrites the scheme for psycopg, keeping the `sslmode` query parameter.
-
-Recommended service variables (already set by the blueprint):
+Recommended service variables (add in the web service **Variables** tab):
 
 ```text
 APP_ENV=production
-APP_HOST=0.0.0.0
-APP_PORT=8000
 SWARM_STUN_URL=stun:stun.l.google.com:19302
 ```
 
@@ -170,16 +172,28 @@ Optional public torrent trackers (comma-separated):
 PUBLIC_TORRENT_TRACKERS=udp://tracker.opentrackr.org:1337/announce,udp://open.stealth.si:80/announce
 ```
 
+Optional Cloudflare R2 storage (see `docs/free-hosting-guide.md`):
+
+```text
+R2_ACCOUNT_ID=...
+R2_ACCESS_KEY_ID=...
+R2_SECRET_ACCESS_KEY=...
+R2_BUCKET_NAME=vcnr-media
+R2_PUBLIC_BASE_URL=https://pub-xxxxxxxxxxxx.r2.dev
+```
+
 ### Important note
 
-The backend already calls `init_db()` on startup, so the current SQLAlchemy tables and compatibility columns will be created automatically when the database is reachable.
+The backend already calls `init_db()` on startup, so the current SQLAlchemy tables
+and compatibility columns are created automatically when the database is reachable.
 
-### Free tier caveats
+### Cost / limits
 
-- Service sleeps after 15 min idle, wakes in ~50s on first request.
-- PostgreSQL runs on Railway (trial ~$5 credit, then Hobby at $5/month). Railway
-  bills egress for traffic through the public TCP proxy; API traffic is small, so
-  keep large media transfers on R2.
+- Railway has no permanent free tier: new accounts get a trial credit, then the
+  cheapest plan is Hobby (~$5/month plus usage credit).
+- Railway bills **network egress** — keep large media transfers on R2.
+- The container disk is ephemeral: anything written under `media/` is lost on
+  redeploy.
 
 ## PostgreSQL Direction
 
@@ -225,7 +239,7 @@ VCNR support follows:
 ## Recommended Next Steps
 
 1. Push the current project snapshot to GitHub.
-2. Confirm the Render web service builds from the root `Dockerfile`.
-3. Confirm `DATABASE_URL` points at the Railway database and `init_db()` created the tables on startup.
+2. Confirm the Railway web service builds from the root `Dockerfile` (`railway.json`).
+3. Confirm `DATABASE_URL` points at the Railway PostgreSQL service and `init_db()` created the tables on startup.
 4. Deploy and smoke-test `/`, `/Admin/`, `/docs`, and login.
 5. Continue moving remaining demo-only flows into persistent PostgreSQL-backed paths.

@@ -21,8 +21,8 @@ Why egress matters:
 ### App Layer
 
 - Mobile app: React Native viewer app for Android and iOS
-- Backend API: Render
-- Database: Render Postgres
+- Backend API: Railway
+- Database: Railway Postgres
 
 ### Content Layer
 
@@ -40,10 +40,10 @@ Why egress matters:
 
 ```mermaid
 flowchart LR
-    A["Viewer Mobile App<br/>React Native (Android + iOS)"] --> B["API Gateway / Backend<br/>Render"]
+    A["Viewer Mobile App<br/>React Native (Android + iOS)"] --> B["API Gateway / Backend<br/>Railway"]
     A --> C["Object Storage / Content Layer<br/>Cloudflare R2"]
 
-    B --> D["Render Postgres<br/>Users, Wallets, Entitlements, Device Rules"]
+    B --> D["Railway Postgres<br/>Users, Wallets, Entitlements, Device Rules"]
     B --> E["Admin / Super Admin Web"]
     E --> B
 
@@ -71,7 +71,7 @@ flowchart LR
 ### Server-Only Mode
 
 1. Viewer logs into mobile app
-2. Mobile app talks to Render backend
+2. Mobile app talks to Railway backend
 3. Backend checks user, wallet, purchase state, release rules, and device rules
 4. Backend returns catalog data and permissioned content access
 5. Mobile app downloads encrypted chunks from object storage
@@ -166,8 +166,8 @@ Recommended path shape:
 
 ## Why This Is Cost-Efficient
 
-- Render handles API + DB well
-- Large content bytes should not be served directly from the Render app service
+- Railway handles API + DB well
+- Large content bytes should not be served directly from the Railway app service
 - Object storage is better for large encrypted content distribution
 - Server-only mode is simplest and safest first release
 - Peer-assisted mode can later reduce storage-origin delivery bandwidth without removing server fallback
@@ -177,15 +177,15 @@ Recommended path shape:
 ### Demo / Testing
 
 - React Native mobile app
-- Render backend (deploy via `render.yaml` blueprint)
-- Railway Postgres (PostgreSQL lives on Railway, not Render; see docs/free-hosting-guide.md)
+- Railway backend (deploy via `railway.json` + root `Dockerfile`)
+- Railway Postgres (same project; see docs/free-hosting-guide.md)
 - Cloudflare R2 for encrypted chunks
 
 ### Production Direction
 
 - React Native mobile app
-- Render backend
-- Railway Postgres (managed PostgreSQL; Public Access/TCP proxy so Render can reach it)
+- Railway backend
+- Railway Postgres (managed PostgreSQL; private `*.railway.internal` URL via variable reference)
 - Cloudflare R2 for encrypted chunks
 - Signed content access controlled by backend
 - Peer-assisted layer only after server-only delivery is proven stable

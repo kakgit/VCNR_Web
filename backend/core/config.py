@@ -6,13 +6,37 @@ from functools import lru_cache
 from pathlib import Path
 
 
-def _normalize_database_url(value: str) -> str:
-  normalized = value.strip()
+_SAFE_DEFAULT_DATABASE_URL = "postgresql+psycopg://postgres:postgres@localhost:5432/cineproxima"
+
+
+def _normalize_database_url(value: str | None) -> str:
+  """Normalize a Postgres URL for psycopg, never raising on bad input.
+
+  Returns the safe local default whenever the value is empty, is an
+  unresolved service reference (e.g. Railway's ``${{Postgres.DATABASE_URL}}``
+  when the variable picker wasn't wired up), or does not look like a
+  PostgreSQL connection string — so a malformed ``DATABASE_URL`` can never
+  crash the app on startup; it degrades to the graceful 503 DB-unavailable
+  behavior instead.
+  """
+  normalized = (value or "").strip()
+  # Some dashboards / CLIs paste the URL wrapped in quotes.
+  if (
+    len(normalized) >= 2
+    and normalized[0] == normalized[-1]
+    and normalized[0] in {'"', "'"}
+  ):
+    normalized = normalized[1:-1].strip()
+  if not normalized:
+    return _SAFE_DEFAULT_DATABASE_URL
   if normalized.startswith("postgres://"):
     return "postgresql+psycopg://" + normalized[len("postgres://"):]
   if normalized.startswith("postgresql://"):
     return "postgresql+psycopg://" + normalized[len("postgresql://"):]
-  return normalized
+  if normalized.startswith("postgresql+"):
+    return normalized
+  # Unresolved reference (${{...}} / ${...}) or unknown scheme -> fail safe.
+  return _SAFE_DEFAULT_DATABASE_URL
 
 
 def _parse_csv_urls(value: str) -> tuple[str, ...]:
@@ -45,7 +69,8 @@ def _resolve_frontend_origin() -> str:
   Priority:
     1. Explicit FRONTEND_ORIGIN env var (if provided)
     2. RENDER_EXTERNAL_URL (automatically set by Render to the service URL)
-    3. Local default
+    3. RAILWAY_PUBLIC_DOMAIN (automatically set by Railway, e.g. app.up.railway.app)
+    4. Local default
   """
   configured = os.getenv("FRONTEND_ORIGIN", "").strip()
   if configured:
@@ -53,6 +78,9 @@ def _resolve_frontend_origin() -> str:
   render_url = os.getenv("RENDER_EXTERNAL_URL", "").strip()
   if render_url:
     return render_url
+  railway_domain = os.getenv("RAILWAY_PUBLIC_DOMAIN", "").strip()
+  if railway_domain:
+    return "https://" + railway_domain.removeprefix("https://").strip("/")
   return "http://localhost:8000"
 
 

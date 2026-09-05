@@ -6,17 +6,24 @@ from functools import lru_cache
 from fastapi import HTTPException, Request
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import ArgumentError, SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 
-from backend.core.config import get_settings
+from backend.core.config import _SAFE_DEFAULT_DATABASE_URL, get_settings
 from backend.models import Base
 
 
 @lru_cache(maxsize=1)
 def get_engine() -> Engine:
   settings = get_settings()
-  return create_engine(settings.database_url, future=True, pool_pre_ping=True)
+  try:
+    return create_engine(settings.database_url, future=True, pool_pre_ping=True)
+  except (ArgumentError, ValueError, SQLAlchemyError) as error:
+    # Belt-and-suspenders: a malformed DATABASE_URL must never take the
+    # whole app down at import. Fall back to a safe local default so the
+    # server boots and DB-backed routes degrade to the graceful 503 path.
+    print(f"[db] Unusable DATABASE_URL ({error}); falling back to local default.", flush=True)
+    return create_engine(_SAFE_DEFAULT_DATABASE_URL, future=True, pool_pre_ping=True)
 
 
 SessionLocal = sessionmaker(

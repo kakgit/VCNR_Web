@@ -1016,8 +1016,16 @@
       </div>
       <form id="adminCreatorAssignmentForm" class="admin-user-editor-form">
         <input id="adminCreatorAssignmentMovieId" type="hidden">
-        <p class="helper-text">Choose one or more creators for this title. Assigned creators can view and edit this title in their workspace.</p>
-        <div id="adminCreatorAssignmentList" class="admin-creator-assignment-list"></div>
+        <p class="helper-text">Search creators and add them to this title. Assigned creators can view and edit this title in their workspace.</p>
+        <label class="field">
+          <span>Search creators</span>
+          <input id="adminCreatorAssignmentSearch" type="text" placeholder="Search by name or email..." autocomplete="off">
+        </label>
+        <div id="adminCreatorAssignmentResults" class="admin-creator-assignment-results"></div>
+        <div class="admin-creator-assignment-assigned">
+          <span class="admin-creator-assignment-label">Assigned (<span id="adminCreatorAssignmentCount">0</span>)</span>
+          <div id="adminCreatorAssignmentPanel" class="admin-creator-assignment-panel"></div>
+        </div>
         <div class="taxonomy-form-actions">
           <button type="submit" class="primary-btn" id="adminCreatorAssignmentSaveButton">Save Assignment</button>
           <button type="button" class="ghost-btn" data-admin-creator-assignment-close>Close</button>

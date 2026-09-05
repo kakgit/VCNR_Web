@@ -2530,7 +2530,7 @@ body.creator-entry #guestEntryButton {
 .admin-movie-table-head,
 .admin-movie-row {
   display: grid;
-  grid-template-columns: minmax(240px, 1.35fr) 0.7fr 1fr 0.8fr 0.72fr 0.72fr 0.72fr 288px;
+  grid-template-columns: minmax(240px, 1.35fr) 0.7fr 1fr 0.8fr 0.72fr 0.72fr 0.72fr 380px;
   gap: 14px;
   align-items: center;
   padding: 14px 16px;

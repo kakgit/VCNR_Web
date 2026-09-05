@@ -126,7 +126,7 @@ def get_settings() -> Settings:
     database_url=_normalize_database_url(
       os.getenv(
         "DATABASE_URL",
-        "postgresql+psycopg://postgres:yHVcZRYUmMgPjiIhpEbuqxKLnadSECZr@altaria.proxy.rlwy.net:34062/railway?sslmode=require",
+        "postgresql+psycopg://postgres:xoclgXikvSTYyLRiEflbuNYrZaWAnwmb@altaria.proxy.rlwy.net:41555/railway?sslmode=require",
       )
     ),
     swarm_stun_url=os.getenv("SWARM_STUN_URL", "stun:stun.l.google.com:19302").strip(),

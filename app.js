@@ -4173,8 +4173,11 @@ function renderAdminArchiveMovieList() {
 // Keeps the creator dropdown in sync with the Manage Users data. The movie
 // row chips resolve names from the same source once it is loaded.
 function ensureAdminCreatorsLoaded() {
-  if (creatorAssignmentUsersPromise || adminCreators.length) {
+  if (creatorAssignmentUsersPromise) {
     return creatorAssignmentUsersPromise;
+  }
+  if (adminCreators.length) {
+    return Promise.resolve();
   }
   creatorAssignmentUsersPromise = loadAdminCreatorsFromApi()
     .catch(() => {

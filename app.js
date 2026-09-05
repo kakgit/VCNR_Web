@@ -239,7 +239,10 @@ const adminLibraryCreator = document.getElementById("adminLibraryCreator");
 const adminCreatorAssignmentModal = document.getElementById("adminCreatorAssignmentModal");
 const adminCreatorAssignmentForm = document.getElementById("adminCreatorAssignmentForm");
 const adminCreatorAssignmentMovieId = document.getElementById("adminCreatorAssignmentMovieId");
-const adminCreatorAssignmentList = document.getElementById("adminCreatorAssignmentList");
+const adminCreatorAssignmentSearch = document.getElementById("adminCreatorAssignmentSearch");
+const adminCreatorAssignmentResults = document.getElementById("adminCreatorAssignmentResults");
+const adminCreatorAssignmentPanel = document.getElementById("adminCreatorAssignmentPanel");
+const adminCreatorAssignmentCount = document.getElementById("adminCreatorAssignmentCount");
 const adminCreatorAssignmentSaveButton = document.getElementById("adminCreatorAssignmentSaveButton");
 const adminLibraryCategory = document.getElementById("adminLibraryCategory");
 const adminLibraryTitle = document.getElementById("adminLibraryTitle");
@@ -383,6 +386,8 @@ let adminTaxonomyPage = 1;
 const ADMIN_TAXONOMY_PER_PAGE = 6;
 let adminCreators = [];
 let creatorAssignmentUsersPromise = null;
+let creatorAssignmentAssignedIds = new Set();
+let creatorAssignmentSearchTerm = "";
 let adminLibrarySearchTerm = "";
 let adminLibraryStageFilter = "all";
 let adminLibrarySortValue = "title-asc";
@@ -4223,11 +4228,19 @@ function openCreatorAssignmentModal(movieId) {
   if (!movie || !adminCreatorAssignmentModal || !adminCreatorAssignmentForm) {
     return;
   }
+  creatorAssignmentAssignedIds = new Set(movie.creatorIds || []);
   ensureAdminCreatorsLoaded().then(() => {
     adminCreatorAssignmentMovieId.value = movieId;
-    renderCreatorAssignmentList(movie);
+    if (adminCreatorAssignmentSearch) {
+      adminCreatorAssignmentSearch.value = "";
+    }
+    renderCreatorAssignmentResults("");
+    renderCreatorAssignmentPanel();
     adminCreatorAssignmentModal.classList.remove("hidden");
     adminCreatorAssignmentModal.setAttribute("aria-hidden", "false");
+    if (adminCreatorAssignmentSearch) {
+      adminCreatorAssignmentSearch.focus();
+    }
   });
 }
 
@@ -4237,33 +4250,78 @@ function closeCreatorAssignmentModal() {
   }
   adminCreatorAssignmentModal.classList.add("hidden");
   adminCreatorAssignmentModal.setAttribute("aria-hidden", "true");
+  creatorAssignmentAssignedIds = new Set();
   if (adminCreatorAssignmentForm) {
     adminCreatorAssignmentForm.reset();
   }
 }
 
-function renderCreatorAssignmentList(movie) {
-  if (!adminCreatorAssignmentList) {
+function renderCreatorAssignmentResults(searchTerm) {
+  if (!adminCreatorAssignmentResults) {
     return;
   }
-  const selectedIds = new Set(movie.creatorIds || []);
+  const term = (searchTerm || "").trim().toLowerCase();
   if (!adminCreators.length) {
-    adminCreatorAssignmentList.innerHTML = `<p class="helper-text">No creator accounts found. Create a user with the Creator role first.</p>`;
+    adminCreatorAssignmentResults.innerHTML = `<p class="helper-text">No creator accounts found. Create a user with the Creator role first.</p>`;
     return;
   }
-  adminCreatorAssignmentList.innerHTML = adminCreators
+  const filtered = adminCreators.filter((creator) => {
+    if (!term) {
+      return true;
+    }
+    return (
+      String(creator.name || "").toLowerCase().includes(term) ||
+      String(creator.email || "").toLowerCase().includes(term)
+    );
+  });
+  if (!filtered.length) {
+    adminCreatorAssignmentResults.innerHTML = `<p class="helper-text">No creators match "${escapeHtml(term)}".</p>`;
+    return;
+  }
+  adminCreatorAssignmentResults.innerHTML = filtered
     .map((creator) => {
-      const checked = selectedIds.has(creator.id) ? "checked" : "";
+      const isAssigned = creatorAssignmentAssignedIds.has(creator.id);
       return `
-        <label class="admin-creator-assignment-item">
-          <input type="checkbox" name="creatorAssignment" value="${escapeHtml(creator.id)}" ${checked}>
+        <button type="button" class="admin-creator-result-item${isAssigned ? " is-assigned" : ""}" data-creator-id="${escapeHtml(creator.id)}" data-creator-action="add">
           <span>
             <strong>${escapeHtml(creator.name)}</strong>
             <small>${escapeHtml(creator.email)}</small>
           </span>
-        </label>`;
+          <span class="admin-creator-result-toggle">${isAssigned ? "✓" : "+"}</span>
+        </button>`;
     })
     .join("");
+}
+
+function renderCreatorAssignmentPanel() {
+  if (!adminCreatorAssignmentPanel) {
+    return;
+  }
+  if (adminCreatorAssignmentCount) {
+    adminCreatorAssignmentCount.textContent = String(creatorAssignmentAssignedIds.size);
+  }
+  if (!creatorAssignmentAssignedIds.size) {
+    adminCreatorAssignmentPanel.innerHTML = `<p class="helper-text">No creators assigned yet. Search above and click to add.</p>`;
+    return;
+  }
+  const assignedCreators = adminCreators.filter((creator) => creatorAssignmentAssignedIds.has(creator.id));
+  adminCreatorAssignmentPanel.innerHTML = assignedCreators
+    .map((creator) => {
+      const removeLabel = `Remove ${creator.name} from this title`;
+      return `
+        <div class="admin-creator-assigned-item">
+          <span>
+            <strong>${escapeHtml(creator.name)}</strong>
+            <small>${escapeHtml(creator.email)}</small>
+          </span>
+          <button type="button" class="icon-btn danger" data-creator-id="${escapeHtml(creator.id)}" data-creator-action="remove" title="${escapeLabel(removeLabel)}" aria-label="${escapeLabel(removeLabel)}">&times;</button>
+        </div>`;
+    })
+    .join("");
+}
+
+function escapeLabel(value) {
+  return String(value || "").replace(/"/g, "&quot;");
 }
 
 async function saveCreatorAssignment(event) {
@@ -4275,11 +4333,11 @@ async function saveCreatorAssignment(event) {
   if (!movieId) {
     return;
   }
-  const checked = Array.from(document.querySelectorAll('[name="creatorAssignment"]:checked')).map((input) => input.value);
+  const creatorIds = Array.from(creatorAssignmentAssignedIds);
   try {
     const response = await apiRequest(`/admin/movies/${movieId}/creators`, {
       method: "POST",
-      body: JSON.stringify({ creator_ids: checked }),
+      body: JSON.stringify({ creator_ids: creatorIds }),
     });
     const updatedMovie = normalizeMovie(response.item);
     updateMovieCollections(updatedMovie);
@@ -9073,10 +9131,34 @@ if (adminCreatorAssignmentForm) {
   adminCreatorAssignmentForm.addEventListener("submit", saveCreatorAssignment);
 }
 
+if (adminCreatorAssignmentSearch) {
+  adminCreatorAssignmentSearch.addEventListener("input", () => {
+    renderCreatorAssignmentResults(adminCreatorAssignmentSearch.value);
+  });
+}
+
 if (adminCreatorAssignmentModal) {
   adminCreatorAssignmentModal.addEventListener("click", (event) => {
     if (event.target.closest("[data-admin-creator-assignment-close]")) {
       closeCreatorAssignmentModal();
+      return;
+    }
+    const actionButton = event.target.closest("[data-creator-action]");
+    if (!actionButton) {
+      return;
+    }
+    const creatorId = actionButton.dataset.creatorId;
+    if (!creatorId) {
+      return;
+    }
+    if (actionButton.dataset.creatorAction === "add") {
+      creatorAssignmentAssignedIds.add(creatorId);
+      renderCreatorAssignmentResults(adminCreatorAssignmentSearch ? adminCreatorAssignmentSearch.value : "");
+      renderCreatorAssignmentPanel();
+    } else if (actionButton.dataset.creatorAction === "remove") {
+      creatorAssignmentAssignedIds.delete(creatorId);
+      renderCreatorAssignmentResults(adminCreatorAssignmentSearch ? adminCreatorAssignmentSearch.value : "");
+      renderCreatorAssignmentPanel();
     }
   });
 }

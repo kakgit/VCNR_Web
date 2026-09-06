@@ -1972,6 +1972,17 @@ def create_movie(session: Session, payload: dict) -> dict:
   result["creator_ids"] = creator_ids
   result["creator_names"] = [creator_names.get(uid) for uid in creator_ids]
   return result
+
+
+def update_movie_interest(
+  session: Session,
+  movie_id: str,
+  kind: str,
+  user_id: str | None = None,
+  wish_mode: str | None = None,
+  quality_code: str | None = None,
+  ticket_count: int | None = None,
+) -> tuple[dict, bool] | None:
   ensure_seeded(session)
   movie = session.get(MovieRecord, movie_id)
   if movie is None or movie.archived:

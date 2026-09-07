@@ -27,6 +27,7 @@ MOVIES = []
 MOVIE_CHANGE_REQUESTS: dict[str, dict] = {}
 MOVIE_WISHES: list[dict] = []
 MOVIE_RESERVATIONS: list[dict] = []
+MOVIE_ENGAGEMENT_EVENTS: list[dict] = []
 DEFAULT_STAR_PRICE_SETTINGS = {
   "price_inr": 50,
   "price_usd": 0.0,
@@ -92,6 +93,9 @@ def _decorate_movie(movie: dict, viewer_wish_kind: str | None = None) -> dict:
   item.setdefault("wish_theatre_count", 0)
   item.setdefault("cast_credits", [])
   item.setdefault("online_pricing_options", [])
+  # Demo movies store a single legacy creator_id; mirror the DB payload shape
+  # so clients can gate creator-only features on the assignment list.
+  item.setdefault("creator_ids", [item["creator_id"]] if item.get("creator_id") else [])
   item["viewer_wish_kind"] = viewer_wish_kind
   return item
 
@@ -748,7 +752,12 @@ def list_creators() -> list[dict]:
 
 
 def list_movies_for_creator(user_id: str) -> list[dict]:
-  return [_decorate_movie(movie, viewer_wish_kind=None) for movie in MOVIES if movie.get("creator_id") == user_id]
+  def is_assigned(movie: dict) -> bool:
+    creator_ids = movie.get("creator_ids")
+    if isinstance(creator_ids, list) and creator_ids:
+      return user_id in creator_ids
+    return movie.get("creator_id") == user_id
+  return [_decorate_movie(movie, viewer_wish_kind=None) for movie in MOVIES if is_assigned(movie)]
 
 
 def get_movie_creator_id(movie_id: str) -> str | None:
@@ -758,15 +767,85 @@ def get_movie_creator_id(movie_id: str) -> str | None:
   return None
 
 
+def get_movie_creator_ids(movie_id: str) -> list[str]:
+  """All creator user ids assigned to a title (assignment gate for creator-only features)."""
+  for movie in MOVIES:
+    if movie["id"] == movie_id:
+      creator_ids = movie.get("creator_ids")
+      if isinstance(creator_ids, list) and creator_ids:
+        return [str(value) for value in creator_ids if value]
+      creator_id = movie.get("creator_id")
+      return [str(creator_id)] if creator_id else []
+  return []
+
+
+ENGAGEMENT_EVENT_KINDS = ("detail", "poster", "teaser", "gallery", "music")
+
+
+def record_movie_engagement(movie_id: str, event_kind: str, user_id: str | None = None) -> bool:
+  """Append one viewer engagement event (detail/poster/teaser/gallery/music view)."""
+  if event_kind not in ENGAGEMENT_EVENT_KINDS:
+    raise ValueError("Unsupported engagement kind.")
+  for movie in MOVIES:
+    if movie["id"] == movie_id:
+      if movie.get("archived", False):
+        return False
+      MOVIE_ENGAGEMENT_EVENTS.append(
+        {
+          "movie_id": movie_id,
+          "user_id": user_id,
+          "event_kind": event_kind,
+          "created_at": datetime.utcnow().isoformat(timespec="minutes"),
+        }
+      )
+      return True
+  return False
+
+
+def get_movie_engagement_summary(movie_id: str) -> dict:
+  """Aggregate engagement counts for a title, grouped by event kind."""
+  summary = {
+    "detail_views": 0,
+    "poster_views": 0,
+    "teaser_views": 0,
+    "gallery_views": 0,
+    "music_views": 0,
+    "total_views": 0,
+    "unique_viewers": 0,
+  }
+  viewer_ids: set[str] = set()
+  for event in MOVIE_ENGAGEMENT_EVENTS:
+    if event["movie_id"] != movie_id:
+      continue
+    key = f"{event['event_kind']}_views"
+    if key in summary:
+      summary[key] += 1
+    if event.get("user_id"):
+      viewer_ids.add(str(event["user_id"]))
+  summary["total_views"] = sum(summary[key] for key in ("detail_views", "poster_views", "teaser_views", "gallery_views", "music_views"))
+  summary["unique_viewers"] = len(viewer_ids)
+  return summary
+
+
 def set_movie_creator(movie_id: str, creator_id: str | None) -> dict:
+  # Backward-compatible single-id wrapper: clears when None, else [creator_id].
+  creator_ids = [creator_id] if creator_id else []
+  return set_movie_creators(movie_id, creator_ids)
+
+
+def set_movie_creators(movie_id: str, creator_ids: list[str]) -> dict:
+  """Assign one or more creators to a title. An empty list clears the assignment."""
   for movie in MOVIES:
     if movie["id"] != movie_id:
       continue
-    if creator_id:
-      creator = next((user for user in USERS if user["id"] == creator_id), None)
+    resolved_ids: list[str] = []
+    for cid in creator_ids:
+      creator = next((user for user in USERS if user["id"] == cid), None)
       if creator is None or creator.get("role") != "creator":
         raise ValueError("The selected creator account was not found.")
-    movie["creator_id"] = creator_id or None
+      resolved_ids.append(cid)
+    movie["creator_ids"] = resolved_ids
+    movie["creator_id"] = resolved_ids[0] if resolved_ids else None
     return _decorate_movie(movie)
   raise LookupError("Movie not found.")
 

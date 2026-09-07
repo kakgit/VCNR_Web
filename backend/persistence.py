@@ -8,6 +8,7 @@ from pathlib import Path
 import re
 import secrets
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from backend.core.push import (
@@ -31,6 +32,7 @@ from backend.models import (
   MovieRecord,
   MovieChangeRequestRecord,
   MovieCreatorRecord,
+  MovieEngagementEventRecord,
   MovieWishRecord,
   PublishSubmissionRecord,
   PushDeviceTokenRecord,
@@ -2781,6 +2783,80 @@ def get_movie_creator_id(session: Session, movie_id: str) -> str | None:
   # assigned creator (or None) for legacy single-creator consumers.
   link = session.query(MovieCreatorRecord).filter(MovieCreatorRecord.movie_id == movie.id).first()
   return link.user_id if link else None
+
+
+def get_movie_creator_ids(session: Session, movie_id: str) -> list[str]:
+  """All creator user ids assigned to a title (assignment gate for creator-only features)."""
+  movie = session.get(MovieRecord, movie_id)
+  if movie is None:
+    return []
+  links = session.query(MovieCreatorRecord.user_id).filter(MovieCreatorRecord.movie_id == movie.id).all()
+  return [row[0] for row in links if row[0]]
+
+
+ENGAGEMENT_EVENT_KINDS = ("detail", "poster", "teaser", "gallery", "music")
+
+
+def record_movie_engagement(
+  session: Session,
+  movie_id: str,
+  event_kind: str,
+  user_id: str | None = None,
+) -> bool:
+  """Append one viewer engagement event (detail/poster/teaser/gallery/music view)."""
+  if event_kind not in ENGAGEMENT_EVENT_KINDS:
+    raise ValueError("Unsupported engagement kind.")
+  ensure_seeded(session)
+  movie = session.get(MovieRecord, movie_id)
+  if movie is None or movie.archived:
+    return False
+  session.add(
+    MovieEngagementEventRecord(
+      movie_id=movie.id,
+      user_id=user_id,
+      event_kind=event_kind,
+      created_at=datetime.utcnow(),
+    )
+  )
+  session.commit()
+  return True
+
+
+def get_movie_engagement_summary(session: Session, movie_id: str) -> dict:
+  """Aggregate engagement counts for a title, grouped by event kind."""
+  summary = {
+    "detail_views": 0,
+    "poster_views": 0,
+    "teaser_views": 0,
+    "gallery_views": 0,
+    "music_views": 0,
+    "total_views": 0,
+    "unique_viewers": 0,
+  }
+  rows = (
+    session.query(MovieEngagementEventRecord.event_kind, func.count(MovieEngagementEventRecord.id))
+    .filter(MovieEngagementEventRecord.movie_id == movie_id)
+    .group_by(MovieEngagementEventRecord.event_kind)
+    .all()
+  )
+  for event_kind, count in rows:
+    key = f"{event_kind}_views"
+    if key in summary:
+      summary[key] = int(count)
+  summary["total_views"] = sum(summary[key] for key in ("detail_views", "poster_views", "teaser_views", "gallery_views", "music_views"))
+  unique_row = (
+    session.query(func.count(func.distinct(MovieEngagementEventRecord.user_id)))
+    .filter(MovieEngagementEventRecord.movie_id == movie_id, MovieEngagementEventRecord.user_id.isnot(None))
+    .one()
+  )
+  summary["unique_viewers"] = int(unique_row[0]) if unique_row else 0
+  return summary
+
+
+def set_movie_creator(session: Session, movie_id: str, creator_id: str | None) -> dict:
+  # Backward-compatible single-id wrapper: clears when None, else [creator_id].
+  creator_ids = [creator_id] if creator_id else []
+  return set_movie_creators(session, movie_id, creator_ids)
 
 
 def set_movie_creators(session: Session, movie_id: str, creator_ids: list[str]) -> dict:

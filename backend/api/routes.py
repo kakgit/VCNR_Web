@@ -141,6 +141,9 @@ from backend.schemas import (
   TeaserLinksUpdateRequest,
   AdminUserCreateRequest,
   MovieDetailResponse,
+  MovieEngagementAckResponse,
+  MovieEngagementEventRequest,
+  MovieEngagementStatsResponse,
   PushDeviceRegisterRequest,
   PushDeviceResponse,
   PushDeviceUnregisterRequest,
@@ -2459,9 +2462,24 @@ def require_admin_or_creator(current_user: dict[str, str] = Depends(get_current_
 def _ensure_creator_owns_movie(current_user: dict[str, str], movie_id: str, db: Session | None) -> None:
   if current_user["role"] != "creator":
     return
-  creator_id = persistence.get_movie_creator_id(db, movie_id) if db else demo_store.get_movie_creator_id(movie_id)
-  if creator_id != current_user["id"]:
+  if current_user["id"] not in (
+    persistence.get_movie_creator_ids(db, movie_id) if db else demo_store.get_movie_creator_ids(movie_id)
+  ):
     raise HTTPException(status_code=403, detail="This title is not assigned to you.")
+
+
+def _viewer_can_view_movie_statistics(current_user: dict[str, str] | None, movie_id: str, db: Session | None) -> bool:
+  """Super Admins see every title; creators see only titles assigned to them."""
+  if not current_user:
+    return False
+  role = str(current_user.get("role") or "").strip().lower()
+  if role == "super_admin":
+    return True
+  if role == "creator":
+    return current_user["id"] in (
+      persistence.get_movie_creator_ids(db, movie_id) if db else demo_store.get_movie_creator_ids(movie_id)
+    )
+  return False
 
 
 def get_optional_current_user(authorization: str | None = Header(default=None)) -> dict[str, str] | None:
@@ -2592,6 +2610,16 @@ def get_movie_details(
   if matched is None or matched.get("archived"):
     raise HTTPException(status_code=404, detail="Movie not found.")
 
+  # Real viewer-activity statistics ride on the details payload, but only for
+  # super admins and the creators assigned to this title (same gate as the
+  # Statistics button in the viewer apps).
+  engagement_payload = None
+  if _viewer_can_view_movie_statistics(current_user, movie_id, db):
+    engagement_summary = (
+      persistence.get_movie_engagement_summary(db, movie_id) if db else demo_store.get_movie_engagement_summary(movie_id)
+    )
+    engagement_payload = MovieEngagementStatsResponse(**engagement_summary)
+
   return MovieDetailResponse(
     item=_sanitize_movie_payload(matched),
     posters=[MediaAssetResponse(**item) for item in _list_media_assets(movie_id, "posters")],
@@ -2599,6 +2627,31 @@ def get_movie_details(
     gallery=[MediaAssetResponse(**item) for item in _list_media_assets(movie_id, "gallery")],
     music=[MediaAssetResponse(**item) for item in _list_media_assets(movie_id, "music")],
     content=[MediaAssetResponse(**item) for item in _list_media_assets(movie_id, "content")],
+    engagement=engagement_payload,
+  )
+
+
+@router.post("/movies/{movie_id}/engagement", response_model=MovieEngagementAckResponse)
+def record_movie_engagement(
+  movie_id: str,
+  payload: MovieEngagementEventRequest,
+  db: Session | None = Depends(get_db),
+  current_user: dict[str, str] | None = Depends(get_optional_current_user),
+) -> MovieEngagementAckResponse:
+  """Record one viewer engagement event (detail page open, poster/teaser/gallery/music view)."""
+  try:
+    recorded = (
+      persistence.record_movie_engagement(db, movie_id, payload.kind, current_user["id"] if current_user else None)
+      if db
+      else demo_store.record_movie_engagement(movie_id, payload.kind, current_user["id"] if current_user else None)
+    )
+  except ValueError as error:
+    raise HTTPException(status_code=400, detail=str(error)) from error
+  if not recorded:
+    raise HTTPException(status_code=404, detail="Movie not found.")
+  return MovieEngagementAckResponse(
+    message="View recorded.",
+    kind=payload.kind,
   )
 
 
@@ -3244,7 +3297,11 @@ def admin_movies(
   items = persistence.list_movies(db, include_archived=True, prefer_pending=True) if db else demo_store.list_movies(include_archived=True, prefer_pending=True)
   # Creators only see the titles assigned to them.
   if current_user["role"] == "creator":
-    items = [item for item in items if item.get("creator_id") == current_user["id"]]
+    user_id = current_user["id"]
+    items = [
+      item for item in items
+      if (user_id in (item.get("creator_ids") or [])) or item.get("creator_id") == user_id
+    ]
   return AdminMovieListResponse(items=_sanitize_movie_payloads(items))
 
 

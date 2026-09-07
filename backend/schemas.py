@@ -142,6 +142,10 @@ class MovieResponse(BaseModel):
   stage: str
   creator_id: str | None = None
   creator_name: str | None = None
+  # All creator user ids assigned to this title. Lets the viewer apps show
+  # creator-only features (e.g. the Statistics button) only on titles the
+  # signed-in creator is assigned to.
+  creator_ids: list[str] = []
   approval_status: str = "published"
   approval_status_label: str = "Published"
   requires_super_admin_approval: bool = False
@@ -273,6 +277,25 @@ class DeliveryQueueListResponse(BaseModel):
   items: list[DeliveryQueueItemResponse] = Field(default_factory=list)
 
 
+class MovieEngagementStatsResponse(BaseModel):
+  detail_views: int = 0
+  poster_views: int = 0
+  teaser_views: int = 0
+  gallery_views: int = 0
+  music_views: int = 0
+  total_views: int = 0
+  unique_viewers: int = 0
+
+
+class MovieEngagementEventRequest(BaseModel):
+  kind: str = Field(pattern="^(detail|poster|teaser|gallery|music)$")
+
+
+class MovieEngagementAckResponse(BaseModel):
+  message: str
+  kind: str
+
+
 class MovieDetailResponse(BaseModel):
   item: MovieResponse
   posters: list[MediaAssetResponse] = []
@@ -280,6 +303,10 @@ class MovieDetailResponse(BaseModel):
   gallery: list[MediaAssetResponse] = []
   music: list[MediaAssetResponse] = []
   content: list[MediaAssetResponse] = []
+  # Real viewer-activity counts (detail/poster/teaser/gallery/music views).
+  # Populated only for super admins and creators assigned to the title;
+  # regular viewers receive null.
+  engagement: MovieEngagementStatsResponse | None = None
 
 
 class MovieInterestRequest(BaseModel):

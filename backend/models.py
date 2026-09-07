@@ -69,6 +69,26 @@ class MovieWishRecord(Base):
   created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
 
 
+class MovieEngagementEventRecord(Base):
+  """One viewer interaction with a title's promotional content.
+
+  A row is appended every time a viewer opens the title's detail page or views
+  its posters / teaser / gallery / music from the viewer apps. Wish / reserve /
+  buy actions keep their dedicated counters on MovieRecord; this table tracks
+  the promotional "views" that previously had no statistics.
+  """
+
+  __tablename__ = "movie_engagement_events"
+
+  id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+  movie_id: Mapped[str] = mapped_column(ForeignKey("movies.id"), nullable=False, index=True)
+  # Null for anonymous (signed-out) viewers.
+  user_id: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True, index=True)
+  # One of: detail | poster | teaser | gallery | music.
+  event_kind: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+  created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+
+
 class MovieCreatorRecord(Base):
   __tablename__ = "movie_creators"
   __table_args__ = (UniqueConstraint("movie_id", "user_id", name="uq_movie_creators_movie_user"),)

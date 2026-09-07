@@ -137,6 +137,7 @@ MOVIE_RECORD_FIELDS = {
   "id",
   "archived",
   "creator_id",
+  "creator_ids",
   "stage",
   "title_category",
   "title",
@@ -456,7 +457,9 @@ def _capture_movie_snapshot(movie: MovieRecord) -> dict:
       "title_caption": movie.title_caption,
       "poster": movie.poster,
       "genre": movie.genre,
-      "creator_id": movie.creator_id,
+      # MovieRecord stores creators via the movie_creators join table; capture
+      # the assigned ids so change-request snapshots carry the assignment.
+      "creator_ids": [user.id for user in movie.creators],
       "stars_required": movie.stars_required,
       "online_pricing_options": _load_online_pricing_options(movie.online_pricing_options),
       "stars_required_theatre": movie.stars_required_theatre,
@@ -1015,7 +1018,18 @@ def _get_taxonomy_model(kind: str):
   return model
 
 
+_seed_state_checked = False
+
+
 def ensure_seeded(session: Session) -> None:
+  # Seeding and legacy cleanups are one-time idempotent backfills. Every
+  # persistence helper calls this function, and requests nest several calls,
+  # so re-running all the checks/queries each time adds dozens of database
+  # round trips per request (painful on remote databases). Run the full body
+  # once per server process, then skip.
+  global _seed_state_checked
+  if _seed_state_checked:
+    return
   _purge_legacy_demo_library(session)
   _purge_legacy_demo_users(session)
 
@@ -1052,6 +1066,9 @@ def ensure_seeded(session: Session) -> None:
   _seed_publish_submissions(session)
 
   session.commit()
+  # Only mark the state as checked after the first pass fully succeeded so a
+  # startup failure retries on the next request instead of being masked.
+  _seed_state_checked = True
 
 
 def _cleanup_language_taxonomy(session: Session) -> None:
@@ -1749,9 +1766,11 @@ def list_movies(
 
 def list_movies_for_creator(session: Session, user_id: str) -> list[dict]:
   ensure_seeded(session)
+  # MovieRecord has no creator_id column; assignments live in movie_creators.
   movies = (
     session.query(MovieRecord)
-    .filter(MovieRecord.creator_id == user_id)
+    .join(MovieCreatorRecord, MovieCreatorRecord.movie_id == MovieRecord.id)
+    .filter(MovieCreatorRecord.user_id == user_id)
     .order_by(MovieRecord.title.asc())
     .all()
   )
@@ -1944,7 +1963,12 @@ def add_publish_queue_item(session: Session, payload: dict) -> dict:
 def create_movie(session: Session, payload: dict) -> dict:
   ensure_seeded(session)
   cast_credits = _normalize_cast_credit_entries(payload.get("cast_credits", []))
+  # Creator assignments ride on the payload but are NOT MovieRecord columns -
+  # pull them out before the record keyword arguments are built.
+  requested_creator_ids = [str(value) for value in (payload.get("creator_ids") or []) if value]
   payload = _movie_record_payload(payload)
+  payload.pop("creator_ids", None)
+  payload.pop("creator_id", None)
   payload.setdefault("archived", False)
   payload["pricing_snapshot"] = _current_star_price_snapshot(session)
   movie = MovieRecord(**payload)
@@ -1960,8 +1984,8 @@ def create_movie(session: Session, payload: dict) -> dict:
   pending_snapshot["cast_credits"] = cast_credits
   _save_pending_movie_snapshot(change_request, pending_snapshot)
   # Sync the many-to-many creator assignments from the payload (if provided).
-  if "creator_ids" in payload:
-    _sync_movie_creators(session, movie.id, payload.get("creator_ids") or [])
+  if requested_creator_ids:
+    _sync_movie_creators(session, movie.id, requested_creator_ids)
   approval_status = _set_movie_approval_status(session, movie, "pending_super_admin_approval")
   _set_linked_title_cast_credits(session, movie.id, cast_credits)
   session.commit()
@@ -2454,6 +2478,9 @@ def update_movie_details(session: Session, movie_id: str, payload: dict) -> dict
   # an empty list clears it, and a non-empty list (re)assigns the title.
   if "creator_ids" in payload:
     _sync_movie_creators(session, movie.id, payload.get("creator_ids") or [])
+    # Keep the pending snapshot in step with the new assignment so approval
+    # reviews list the creators that will apply, not the stale captured ones.
+    pending_snapshot["creator_ids"] = list(payload.get("creator_ids") or [])
     pending_snapshot.pop("creator_id", None)
   _save_pending_movie_snapshot(change_request, pending_snapshot)
   approval_status = _set_movie_approval_status(session, movie, "pending_super_admin_approval")
@@ -2750,7 +2777,10 @@ def get_movie_creator_id(session: Session, movie_id: str) -> str | None:
   movie = session.get(MovieRecord, movie_id)
   if movie is None:
     return None
-  return movie.creator_id
+  # Creators are linked via the movie_creators join table; return the first
+  # assigned creator (or None) for legacy single-creator consumers.
+  link = session.query(MovieCreatorRecord).filter(MovieCreatorRecord.movie_id == movie.id).first()
+  return link.user_id if link else None
 
 
 def set_movie_creators(session: Session, movie_id: str, creator_ids: list[str]) -> dict:
@@ -2973,10 +3003,9 @@ def delete_user(session: Session, user_id: str) -> dict | None:
     {TitleRecord.creator_user_id: None},
     synchronize_session=False,
   )
-  session.query(MovieRecord).filter(MovieRecord.creator_id == user.id).update(
-    {MovieRecord.creator_id: None},
-    synchronize_session=False,
-  )
+  # Movie creators are linked through the movie_creators join table (MovieRecord
+  # itself has no creator_id column), so remove those links for the deleted user.
+  session.query(MovieCreatorRecord).filter(MovieCreatorRecord.user_id == user.id).delete(synchronize_session=False)
   session.query(PublishSubmissionRecord).filter(PublishSubmissionRecord.creator_user_id == user.id).update(
     {PublishSubmissionRecord.creator_user_id: None},
     synchronize_session=False,

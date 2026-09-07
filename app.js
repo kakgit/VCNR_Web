@@ -5973,7 +5973,9 @@ async function updateAdminMovieDetailsRemote(movieId, payload) {
       cast_credits: payload.castCredits,
       story_line: payload.storyLine,
       release_date: payload.expectedDate || null,
-      creator_id: payload.creatorId || null,
+      // Send creator_ids only when a creator was actually chosen in the editor;
+      // omitting the field preserves the existing assignment on the backend.
+      ...(payload.creatorId ? { creator_ids: [payload.creatorId] } : {}),
     }),
   });
 
@@ -6022,7 +6024,7 @@ async function createAdminMovieRemote(payload) {
       cast_credits: payload.castCredits,
       story_line: payload.storyLine,
       release_date: payload.expectedDate || null,
-      creator_id: payload.creatorId || null,
+      creator_ids: payload.creatorId ? [payload.creatorId] : [],
       stage: payload.stage,
     }),
   });
@@ -6038,10 +6040,17 @@ async function createAdminMovieRemote(payload) {
   renderAdminArchiveMovieList();
   renderMovieGrid();
   syncDetailPanel();
-  await loadPlatformSummaryFromApi();
-  await loadAdminSummaryFromApi();
+  // Close the editor and confirm success FIRST: the title is saved at this
+  // point, so cosmetic summary refreshes must never block the visible
+  // "it worked" feedback (or leave the modal stuck open on a slow summary call).
   closeAdminLibraryEditor();
   adminHelper.textContent = response.message;
+  try {
+    await loadPlatformSummaryFromApi();
+    await loadAdminSummaryFromApi();
+  } catch {
+    // Summary refresh is cosmetic here; the title itself was saved.
+  }
 }
 
 async function updateAdminStarPricingRemote(payload) {
@@ -8374,9 +8383,25 @@ if (adminLibraryEditor) {
     const storyLine = adminLibraryDescription.value.trim();
     const expectedDate = formatAdminDateForApi(adminLibraryExpectedDate.value);
     const stage = adminLibraryMovieStage.value;
-    const creatorId = adminLibraryCreator.value;
+    // The creator picker only exists in the creator-facing editor, so never
+    // assume the element is present (a missing #adminLibraryCreator would
+    // previously throw here and silently kill the whole save flow).
+    const creatorId = adminLibraryCreator ? adminLibraryCreator.value : "";
     const editId = adminLibraryEditId.value.trim();
 
+    const saveButton = document.getElementById("adminLibrarySaveButton");
+    const setSaving = (saving) => {
+      if (!saveButton) return;
+      saveButton.disabled = saving;
+      if (saving) {
+        saveButton.dataset.originalLabel = saveButton.textContent;
+        saveButton.textContent = "Saving…";
+      } else if (saveButton.dataset.originalLabel) {
+        saveButton.textContent = saveButton.dataset.originalLabel;
+        delete saveButton.dataset.originalLabel;
+      }
+    };
+    setSaving(true);
     try {
       if (!titleCategory || !title || !genre || !storyLine) {
         throw new Error("Title category, title name, genre, and story line are required.");
@@ -8422,6 +8447,8 @@ if (adminLibraryEditor) {
       }
     } catch (error) {
       adminHelper.textContent = error.message;
+    } finally {
+      setSaving(false);
     }
   });
 }

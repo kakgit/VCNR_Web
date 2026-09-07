@@ -3282,7 +3282,25 @@ def admin_create_movie(
     "music": "Music upload pending",
     "reward_bonus": "+0 pts",
   }
+  # Validate requested creator assignments up front so an unknown creator id
+  # fails before a title record is created.
+  if payload.creator_ids:
+    creator_options = persistence.list_creators(db) if db else demo_store.list_creators()
+    valid_ids = {option["id"] for option in creator_options}
+    unknown = [cid for cid in payload.creator_ids if cid not in valid_ids]
+    if unknown:
+      raise HTTPException(status_code=400, detail="One or more selected creator accounts were not found.")
+
   movie = persistence.create_movie(db, movie_payload) if db else demo_store.create_movie(movie_payload)
+  if payload.creator_ids:
+    try:
+      movie = (
+        persistence.set_movie_creators(db, movie["id"], payload.creator_ids)
+        if db
+        else demo_store.set_movie_creators(movie["id"], payload.creator_ids)
+      )
+    except (LookupError, ValueError) as error:
+      raise HTTPException(status_code=400, detail=str(error)) from error
   return AdminMovieActionResponse(
     item=_sanitize_movie_payload(movie),
     message=f'"{movie["title"]}" created in {movie["stage_label"]} and sent for Super Admin approval.',
@@ -6431,7 +6449,10 @@ def admin_update_movie_details(
   current_user: dict[str, str] = Depends(require_admin_or_creator),
 ) -> AdminMovieActionResponse:
   _ensure_creator_owns_movie(current_user, movie_id, db)
-  payload_dict = payload.model_dump()
+  # exclude_unset keeps "creator_ids" absent when the client omitted it, so a
+  # plain "Edit Title" save preserves the current creator assignment (an
+  # explicitly sent empty list still clears it, and a non-empty list reassigns).
+  payload_dict = payload.model_dump(exclude_unset=True)
   # Creators edit their assigned titles but never reassign the creator.
   if current_user["role"] == "creator":
     payload_dict.pop("creator_ids", None)

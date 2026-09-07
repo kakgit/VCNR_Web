@@ -2522,19 +2522,33 @@ body.creator-entry #guestEntryButton {
 }
 
 .admin-movie-list {
-  display: grid;
+  display: flex;
+  flex-direction: column;
   gap: 12px;
   margin-top: 18px;
 }
 
+/*
+ * The movie tables must keep ONE set of column tracks shared by the header and
+ * every data row. Every flexible track uses `minmax(0, Xfr)` so no cell's
+ * content can inflate its own column: head and rows always resolve identical
+ * widths. (A subgrid-based version was tried here, but the row's full-width
+ * "upload start" strip plus per-item padding/borders made browsers resolve the
+ * shared tracks inconsistently, which reintroduced column drift.)
+ */
 .admin-movie-table-head,
 .admin-movie-row {
   display: grid;
-  grid-template-columns: minmax(240px, 1.35fr) 0.7fr 1fr 0.8fr 0.72fr 0.72fr 0.72fr 380px;
+  grid-template-columns: minmax(210px, 1.5fr) minmax(0, 0.85fr) minmax(0, 1.1fr) minmax(0, 0.95fr) minmax(0, 0.62fr) minmax(0, 0.62fr) minmax(0, 0.85fr) 380px;
   gap: 14px;
   align-items: center;
   padding: 14px 16px;
   border-radius: 18px;
+}
+
+.admin-archive-table-head,
+.admin-archive-row {
+  grid-template-columns: minmax(210px, 1.2fr) minmax(0, 0.85fr) minmax(0, 0.75fr) minmax(0, 0.8fr) minmax(0, 0.7fr) minmax(0, 0.7fr) minmax(0, 0.7fr) minmax(0, 0.9fr);
 }
 
 .admin-movie-table-head {

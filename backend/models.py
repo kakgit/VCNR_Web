@@ -15,7 +15,8 @@ class MovieRecord(Base):
 
   id: Mapped[str] = mapped_column(String(120), primary_key=True)
   archived: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
-  stage: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+  stage: Mapped[str] = mapped_column(String(30), nullable=False, index=True)
+  library_subtype: Mapped[str | None] = mapped_column(String(20), nullable=True)  # "free" | "paid" | None for non-library
   title_category: Mapped[str | None] = mapped_column(String(120), nullable=True)
   title: Mapped[str] = mapped_column(String(255), nullable=False)
   title_caption: Mapped[str | None] = mapped_column(String(255), nullable=True)
@@ -50,6 +51,7 @@ class MovieRecord(Base):
   posters: Mapped[str] = mapped_column(String(120), nullable=False)
   music: Mapped[str] = mapped_column(String(120), nullable=False)
   reward_bonus: Mapped[str] = mapped_column(String(80), nullable=False)
+  source_extension: Mapped[str | None] = mapped_column(String(10), nullable=True, default=None)
 
   creators: Mapped[list["UserRecord"]] = relationship(
     secondary="movie_creators",

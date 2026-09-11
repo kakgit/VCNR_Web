@@ -3311,6 +3311,7 @@ def admin_create_movie(
   db: Session | None = Depends(get_db),
   _: dict[str, str] = Depends(require_admin),
 ) -> AdminMovieActionResponse:
+  is_library = str(payload.stage or "").strip().lower() == "library"
   slug_base = payload.title.lower().replace("&", "and")
   movie_id = "-".join(filter(None, ["".join(character if character.isalnum() else "-" for character in slug_base).strip("-"), "admin"]))
   total_movies = len(persistence.list_movies(db, include_archived=True) if db else demo_store.list_movies(include_archived=True))
@@ -3323,15 +3324,19 @@ def admin_create_movie(
     "poster": None,
     "genre": payload.genre,
     "cast_credits": [item.model_dump() for item in payload.cast_credits],
-    "stars_required": payload.stars_required,
-    "stars_required_theatre": payload.stars_required_theatre,
-    "expected_stars": payload.expected_stars,
-    "stage_label": "Upcoming" if payload.stage == "upcoming" else "New Release" if payload.stage == "released" else "Old Movies",
-    "countdown": "Release date to be confirmed" if payload.stage == "upcoming" else "Now showing" if payload.stage == "released" else "Library title",
-    "release_date": payload.release_date or "TBA",
+    "stars_required": 0 if is_library else payload.stars_required,
+    "stars_required_theatre": 0 if is_library else payload.stars_required_theatre,
+    "expected_stars": 0 if is_library else payload.expected_stars,
+    "reserve_enabled": False,
+    "buy_now_enabled": False,
+    "release_decision": "approved" if is_library else "pending",
+    "stage_label": "Upcoming" if payload.stage == "upcoming" else "New Release" if payload.stage == "released" else "Library",
+    "countdown": "Release date to be confirmed" if payload.stage == "upcoming" else "Now showing" if payload.stage == "released" else "Library title - play directly",
+    "release_date": "" if is_library else payload.release_date or "TBA",
     "description": payload.story_line,
     "budget": "TBD",
-    "expected_revenue": f"{payload.expected_stars} stars",
+    "expected_revenue": "0 stars",
+    "source_extension": payload.source_extension,
     "wish_count": 0,
     "reserve_count": 0,
     "revenue": "$0K",
@@ -3340,8 +3345,9 @@ def admin_create_movie(
     "reward_bonus": "+0 pts",
   }
   # Validate requested creator assignments up front so an unknown creator id
-  # fails before a title record is created.
-  if payload.creator_ids:
+  # fails before a title record is created. Library titles skip creator assignment
+  # (they are direct-play, no creator workspace).
+  if not is_library and payload.creator_ids:
     creator_options = persistence.list_creators(db) if db else demo_store.list_creators()
     valid_ids = {option["id"] for option in creator_options}
     unknown = [cid for cid in payload.creator_ids if cid not in valid_ids]
@@ -3349,7 +3355,8 @@ def admin_create_movie(
       raise HTTPException(status_code=400, detail="One or more selected creator accounts were not found.")
 
   movie = persistence.create_movie(db, movie_payload) if db else demo_store.create_movie(movie_payload)
-  if payload.creator_ids:
+  # Library titles are direct-play and do not require creator assignment.
+  if not is_library and payload.creator_ids:
     try:
       movie = (
         persistence.set_movie_creators(db, movie["id"], payload.creator_ids)
@@ -3360,7 +3367,11 @@ def admin_create_movie(
       raise HTTPException(status_code=400, detail=str(error)) from error
   return AdminMovieActionResponse(
     item=_sanitize_movie_payload(movie),
-    message=f'"{movie["title"]}" created in {movie["stage_label"]} and sent for Super Admin approval.',
+    message=(
+      f'"{movie["title"]}" created in {movie["stage_label"]} and is now live in the Library.' 
+      if is_library
+      else f'"{movie["title"]}" created in {movie["stage_label"]} and sent for Super Admin approval.'
+    ),
   )
 
 
@@ -3758,6 +3769,51 @@ async def admin_upload_movie_converted_content_package(
   )
 
 
+@router.post("/admin/movies/{movie_id}/assets/library-content", response_model=AdminMovieActionResponse)
+async def admin_upload_library_content(
+  movie_id: str,
+  file: UploadFile = File(...),
+  db: Session | None = Depends(get_db),
+  _: dict[str, str] = Depends(require_admin),
+) -> AdminMovieActionResponse:
+  """Upload a raw .mp4 or .mkv file for a library title. No encryption, no VCNR packaging.
+  The file is stored at ``{LIBRARY_MEDIA_ROOT}/{movie_id}/content/main.{ext}`` and served
+  directly by the ``/movies/{movie_id}/content/stream`` endpoint.
+  """
+  movie = _get_movie_or_404(db, movie_id)
+  source_ext = Path(file.filename or "").suffix.lower()
+  if source_ext not in {".mp4", ".mkv"}:
+    raise HTTPException(status_code=400, detail="Library content must be .mp4 or .mkv.")
+
+  # Persist the source extension on the movie record so the stream endpoint knows
+  # which format to serve.
+  if db:
+    movie_record = persistence.get_movie_by_id(db, movie_id)
+    if movie_record is not None:
+      movie_record.source_extension = source_ext
+      persistence.save_movie(db, movie_record)
+  else:
+    demo_store.set_movie_source_extension(movie_id, source_ext)
+
+  content_dir = LIBRARY_MEDIA_ROOT / movie_id / "content"
+  content_dir.mkdir(parents=True, exist_ok=True)
+  target_path = content_dir / f"main{source_ext}"
+  await _save_upload_file(target_path, file)
+
+  # Bump the asset-change tracker so the admin UI refreshes the content status.
+  matched = persistence.register_movie_asset_change(db, movie_id, "content") if db else demo_store.register_movie_asset_change(movie_id, "content")
+  if matched is None:
+    raise HTTPException(status_code=404, detail="Movie not found.")
+
+  return AdminMovieActionResponse(
+    item=_sanitize_movie_payload(matched),
+    message=(
+      f'Library video "{file.filename}" uploaded for "{matched["title"]}". '
+      "Upload future start time was reset."
+    ),
+  )
+
+
 @router.post("/admin/movies/{movie_id}/assets/content-package/presign")
 def admin_presign_movie_converted_content_file(
   movie_id: str,
@@ -3938,6 +3994,75 @@ def get_movie_content_manifest(
     raise HTTPException(status_code=403, detail="Content download is not available yet.")
 
   return _viewer_content_manifest_payload(manifest)
+
+
+@router.get("/movies/{movie_id}/content/stream")
+def stream_movie_content(
+  movie_id: str,
+  db: Session | None = Depends(get_db),
+  current_user: dict[str, str] = Depends(get_current_user),
+  token: str | None = None,
+) -> StreamingResponse:
+  """Stream a library title's raw .mp4/.mkv content directly (no encryption/decryption).
+  Library titles store their source_extension on the movie record; the actual file
+  lives at ``{LIBRARY_MEDIA_ROOT}/{movie_id}/content/main.{mp4|mkv}``.
+
+  The player apps stream through an in-app <video>/expo-video element that cannot
+  attach an Authorization header, so the signed-in ``token`` query parameter is
+  accepted as a fallback for the Bearer header.
+  """
+  if token:
+    # Trusted in-app player fallback: validate the query token exactly like the
+    # Authorization header path does (same session store, same expiry rules).
+    session = session_auth.get_session(token)
+    if session is not None and session.status == "active":
+      current_user = session.to_user()
+    else:
+      raise HTTPException(status_code=401, detail="Your session has expired. Please sign in again.")
+  viewer_id = current_user["id"]
+  movie_items = persistence.list_movies(db, include_archived=True, viewer_user_id=viewer_id) if db else demo_store.list_movies(include_archived=True, viewer_user_id=viewer_id)
+  movie = next((item for item in movie_items if item["id"] == movie_id), None)
+  if movie is None:
+    raise HTTPException(status_code=404, detail="Movie not found.")
+
+  source_ext = str(movie.get("source_extension") or "").strip().lower()
+  if source_ext not in {".mp4", ".mkv"}:
+    raise HTTPException(status_code=400, detail="This title does not have a direct-play library video.")
+
+  # Resolve the file on disk.
+  content_path = LIBRARY_MEDIA_ROOT / movie_id / "content"
+  candidate = None
+  for ext in (source_ext, ".mp4", ".mkv"):
+    probe = content_path / f"main{ext}"
+    if probe.exists():
+      candidate = probe
+      break
+  if candidate is None:
+    for file_path in content_path.rglob("*"):
+      if file_path.is_file() and file_path.suffix.lower() in {".mp4", ".mkv"}:
+        candidate = file_path
+        break
+  if candidate is None or not candidate.exists():
+    raise HTTPException(status_code=404, detail="Library video file not found.")
+
+  media_type = "video/mp4" if candidate.suffix.lower() == ".mp4" else "video/x-matroska"
+  return StreamingResponse(
+    _stream_file_bytes(candidate),
+    media_type=media_type,
+    headers={
+      "Content-Disposition": f"inline; filename=\"{candidate.name}\"",
+      "Cache-Control": "no-cache",
+    },
+  )
+
+
+def _stream_file_bytes(path: Path, chunk_size: int = 1024 * 1024):
+  with path.open("rb") as fh:
+    while True:
+      piece = fh.read(chunk_size)
+      if not piece:
+        break
+      yield piece
 
 
 @router.get("/movies/{movie_id}/delivery/status", response_model=DeliveryStatusResponse)

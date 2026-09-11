@@ -972,13 +972,19 @@
             <select id="adminLibraryMovieStage" class="select-input">
               <option value="upcoming">Upcoming</option>
               <option value="released">Released</option>
-              <option value="library">Library</option>
+              <option value="library_free">Library (Free)</option>
+              <option value="library_paid">Library (Paid)</option>
             </select>
           </label>
-          <label class="field">
+          <label class="field" id="adminLibraryExpectedDateField">
             <span>Expected date</span>
             <input id="adminLibraryExpectedDate" type="date" placeholder="DD-MM-YYYY">
           </label>
+          <div class="field field-full hidden" id="adminLibraryContentField">
+            <span>Library Video (.mp4 or .mkv)</span>
+            <input id="adminLibraryContentFile" type="file" accept=".mp4,.mkv,video/mp4,video/x-matroska">
+            <p class="helper-text">Upload a raw .mp4 or .mkv file. It will be stored as a direct-play stream (no VCNR encryption). No release date, stars, or creator assignment needed.</p>
+          </div>
           <div class="field field-full admin-library-story-row">
             <label class="field">
               <span>Genre</span>

@@ -427,9 +427,20 @@ def create_movie(movie: dict) -> dict:
   movie.setdefault("archived", False)
   movie.setdefault("approval_status", "pending_super_admin_approval")
   movie["online_pricing_options"] = _normalize_online_pricing_options(movie.get("online_pricing_options", []))
-  movie["stars_required"] = _derive_default_online_stars(movie["online_pricing_options"])
-  movie.setdefault("stars_required_theatre", 3)
-  movie.setdefault("pricing_snapshot", deepcopy(ADMIN_STATE.get("star_price_settings", DEFAULT_STAR_PRICE_SETTINGS)))
+  is_library = str(movie.get("stage", "")).strip().lower() in {"library", "library_free", "library_paid"}
+  if is_library:
+    movie["stars_required"] = 0
+    movie["stars_required_theatre"] = 0
+    movie["expected_stars"] = 0
+    movie["reserve_enabled"] = False
+    movie["buy_now_enabled"] = False
+    movie["release_decision"] = "approved"
+    movie["approval_status"] = "approved"
+    movie["playback_requires_subscription"] = False
+  else:
+    movie["stars_required"] = _derive_default_online_stars(movie["online_pricing_options"])
+    movie.setdefault("stars_required_theatre", 3)
+    movie.setdefault("pricing_snapshot", deepcopy(ADMIN_STATE.get("star_price_settings", DEFAULT_STAR_PRICE_SETTINGS)))
   MOVIES.insert(0, deepcopy(movie))
   _prepare_movie_change_request(movie, is_new_title=True)
   return _pending_or_live(movie, prefer_pending=True)
@@ -636,10 +647,38 @@ def update_movie_stage(movie_id: str, stage: str) -> dict | None:
   for movie in MOVIES:
     if movie["id"] != movie_id:
       continue
+    # Normalize stage: "library_free"/"library_paid" collapse to "library" + subtype.
+    raw = str(stage or "").strip().lower().replace(" ", "_").replace("-", "_")
+    if raw == "library_free":
+      canonical_stage, library_subtype = "library", "free"
+    elif raw == "library_paid":
+      canonical_stage, library_subtype = "library", "paid"
+    else:
+      canonical_stage, library_subtype = raw, None
     request = _prepare_movie_change_request(movie)
-    request["pending"]["stage"] = stage
-    request["pending"]["stage_label"] = "Upcoming" if stage == "upcoming" else "New Release" if stage == "released" else "Old Movies"
-    if not movie.get("archived"):
+    request["pending"]["stage"] = canonical_stage
+    request["pending"]["library_subtype"] = library_subtype
+    request["pending"]["stage_label"] = "Upcoming" if canonical_stage == "upcoming" else "New Release" if canonical_stage == "released" else "Library - Paid" if library_subtype == "paid" else "Library - Free"
+    request["pending"]["countdown"] = (
+      "Release date to be confirmed"
+      if canonical_stage == "upcoming"
+      else "Now showing"
+      if canonical_stage == "released"
+      else "Library title - play directly"
+    )
+    becoming_library = canonical_stage == "library"
+    if becoming_library:
+      # Library titles are direct-play: no stars/pricing, no release date, live.
+      request["pending"]["stars_required"] = 0
+      request["pending"]["stars_required_theatre"] = 0
+      request["pending"]["expected_stars"] = 0
+      request["pending"]["reserve_enabled"] = False
+      request["pending"]["buy_now_enabled"] = False
+      request["pending"]["release_decision"] = "approved"
+      request["pending"]["playback_requires_subscription"] = False
+      request["pending"]["release_date"] = ""
+      movie["approval_status"] = "approved"
+    if not movie.get("archived") and not becoming_library:
       _update_movie_approval_status(movie, "pending_super_admin_approval")
     return _pending_or_live(movie, prefer_pending=True)
   return None
@@ -740,6 +779,14 @@ def update_movie_details(movie_id: str, payload: dict) -> dict | None:
     if not movie.get("archived"):
       _update_movie_approval_status(movie, "pending_super_admin_approval")
     return _pending_or_live(movie, prefer_pending=True)
+  return None
+
+
+def set_movie_source_extension(movie_id: str, source_extension: str | None) -> dict | None:
+  for movie in MOVIES:
+    if movie["id"] == movie_id:
+      movie["source_extension"] = source_extension
+      return _decorate_movie(movie, viewer_wish_kind=None)
   return None
 
 

@@ -248,8 +248,11 @@ const adminLibraryCategory = document.getElementById("adminLibraryCategory");
 const adminLibraryTitle = document.getElementById("adminLibraryTitle");
 const adminLibraryCaption = document.getElementById("adminLibraryCaption");
 const adminLibraryGenre = document.getElementById("adminLibraryGenre");
+const adminLibraryContentFile = document.getElementById("adminLibraryContentFile");
 const adminLibraryMovieStage = document.getElementById("adminLibraryMovieStage");
 const adminLibraryExpectedDate = document.getElementById("adminLibraryExpectedDate");
+const adminLibraryExpectedDateField = document.getElementById("adminLibraryExpectedDateField");
+const adminLibraryContentField = document.getElementById("adminLibraryContentField");
 const adminLibraryCastCredits = document.getElementById("adminLibraryCastCredits");
 const adminLibraryAddCastCreditButton = document.getElementById("adminLibraryAddCastCreditButton");
 const adminLibraryDescription = document.getElementById("adminLibraryDescription");
@@ -1415,6 +1418,8 @@ function normalizeMovie(movie) {
     posters: movie.posters,
     music: movie.music,
     rewardBonus: movie.reward_bonus,
+    sourceExtension: movie.source_extension || null,
+    librarySubtype: movie.library_subtype || null,
   };
 }
 
@@ -5766,6 +5771,7 @@ function openAdminLibraryEditor(movie = null) {
   if (adminLibraryCreator) {
     adminLibraryCreator.disabled = isCreatorSession;
   }
+  syncLibraryStageFields();
   adminLibraryModalTitle.textContent = isEditing ? "Edit Title" : "Add New Title";
   adminLibraryModalCopy.textContent = isEditing
     ? "Update title details, creator assignment, and release placement."
@@ -5790,8 +5796,31 @@ function closeAdminLibraryEditor() {
   setMultiSelectValues(adminLibraryGenre, []);
   adminLibraryMovieStage.value = "upcoming";
   adminLibraryExpectedDate.value = "";
+  if (adminLibraryContentFile) {
+    adminLibraryContentFile.value = "";
+  }
   renderAdminCastCreditRows([]);
   adminLibraryDescription.value = "";
+  syncLibraryStageFields();
+}
+
+/**
+ * Toggle the admin "Add New Title" form between Upcoming/Released fields
+ * (expected date, creator assignment) and Library fields (raw .mp4/.mkv upload).
+ * Library titles are direct-play: no release date, no stars, no creator needed.
+ */
+function syncLibraryStageFields() {
+  if (!adminLibraryMovieStage || !adminLibraryExpectedDateField || !adminLibraryContentField) {
+    return;
+  }
+  const stage = adminLibraryMovieStage.value;
+  const isLibrary = stage === "library_free" || stage === "library_paid";
+  adminLibraryExpectedDateField.classList.toggle("hidden", isLibrary);
+  adminLibraryContentField.classList.toggle("hidden", !isLibrary);
+  // Creator assignment is irrelevant for library titles (direct-play, no creator workspace).
+  if (adminLibraryCreator) {
+    adminLibraryCreator.disabled = isLibrary;
+  }
 }
 
 function openAdminPricingTargetsModal(movie) {
@@ -6050,6 +6079,32 @@ async function createAdminMovieRemote(payload) {
     await loadAdminSummaryFromApi();
   } catch {
     // Summary refresh is cosmetic here; the title itself was saved.
+  }
+}
+
+/**
+ * Upload a raw .mp4/.mkv file for a library title. Stored as a direct-play
+ * stream (no VCNR encryption). The backend endpoint validates the extension
+ * and writes the file to the library content directory.
+ */
+async function uploadLibraryContentRemote(movieId, file) {
+  if (!movieId || !file) {
+    return;
+  }
+  const formData = new FormData();
+  formData.append("file", file);
+  const response = await apiUploadRequest(`/admin/movies/${movieId}/assets/library-content`, formData);
+  // Refresh the movie record so the admin UI reflects the new content status.
+  if (response?.item) {
+    const updatedMovie = normalizeMovie(response.item);
+    adminMovies = adminMovies.map((movie) => (movie.id === updatedMovie.id ? updatedMovie : movie));
+    renderAdminMovieList();
+    renderAdminArchiveMovieList();
+    renderMovieGrid();
+    syncDetailPanel();
+  }
+  if (response?.message) {
+    adminHelper.textContent = response.message;
   }
 }
 
@@ -8188,6 +8243,12 @@ if (adminAddLibraryButton) {
   });
 }
 
+if (adminLibraryMovieStage) {
+  adminLibraryMovieStage.addEventListener("change", () => {
+    syncLibraryStageFields();
+  });
+}
+
 if (adminStarPricingForm) {
   adminStarPricingForm.addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -8416,6 +8477,8 @@ if (adminLibraryEditor) {
         }
       }
 
+      const isLibraryStage = stage === "library_free" || stage === "library_paid";
+
       if (editId) {
         const existingMovie = adminMovies.find((movie) => movie.id === editId);
         await updateAdminMovieDetailsRemote(editId, {
@@ -8425,8 +8488,9 @@ if (adminLibraryEditor) {
           genre,
           castCredits,
           storyLine,
-          expectedDate,
-          creatorId,
+          // Library titles have no release date; keep the existing one untouched.
+          expectedDate: isLibraryStage ? "" : expectedDate,
+          creatorId: isLibraryStage ? "" : creatorId,
         });
         if (existingMovie && existingMovie.stage !== stage) {
           await updateAdminMovieStageRemote(editId, stage);
@@ -8440,10 +8504,17 @@ if (adminLibraryEditor) {
           genre,
           castCredits,
           storyLine,
-          expectedDate,
-          creatorId,
+          expectedDate: isLibraryStage ? "" : expectedDate,
+          creatorId: isLibraryStage ? "" : creatorId,
           stage,
         });
+      }
+      // For library titles, upload the raw .mp4/.mkv after the record is created.
+      if (isLibraryStage && adminLibraryContentFile && adminLibraryContentFile.files.length > 0) {
+        const createdMovieId = adminMovies.length > 0 ? adminMovies[0].id : null;
+        if (createdMovieId) {
+          await uploadLibraryContentRemote(createdMovieId, adminLibraryContentFile.files[0]);
+        }
       }
     } catch (error) {
       adminHelper.textContent = error.message;

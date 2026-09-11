@@ -141,6 +141,7 @@ MOVIE_RECORD_FIELDS = {
   "creator_id",
   "creator_ids",
   "stage",
+  "library_subtype",
   "title_category",
   "title",
   "title_caption",
@@ -175,7 +176,37 @@ MOVIE_RECORD_FIELDS = {
   "posters",
   "music",
   "reward_bonus",
+  "source_extension",
 }
+
+
+def normalize_movie_stage(stage: str | None) -> tuple[str, str | None]:
+  """Map the admin stage selector to canonical (stage, library_subtype).
+
+  "library_free"/"library_paid" collapse to stage "library" plus a subtype so
+  existing library checks (listing, direct playback) keep working while the
+  UI can still split the Library into Free/Paid sections.
+  """
+  value = str(stage or "").strip().lower().replace(" ", "_").replace("-", "_")
+  if value == "library_free":
+    return "library", "free"
+  if value == "library_paid":
+    return "library", "paid"
+  return value, None
+
+
+def movie_stage_label(stage: str, subtype: str | None = None) -> str:
+  if stage == "library":
+    return "Library - Paid" if subtype == "paid" else "Library - Free"
+  return "Upcoming" if stage == "upcoming" else "New Release" if stage == "released" else "Library"
+
+
+def movie_library_subtype(movie: dict | MovieRecord) -> str | None:
+  stage = str((movie.get("stage") if isinstance(movie, dict) else movie.stage) or "")
+  if stage != "library":
+    return None
+  subtype = (movie.get("library_subtype") if isinstance(movie, dict) else movie.library_subtype) or "free"
+  return "paid" if str(subtype).strip().lower() == "paid" else "free"
 
 QUEUE_RECORD_FIELDS = {
   "id",
@@ -491,6 +522,7 @@ def _capture_movie_snapshot(movie: MovieRecord) -> dict:
       "posters": movie.posters,
       "music": movie.music,
       "reward_bonus": movie.reward_bonus,
+      "source_extension": movie.source_extension,
     }
   )
 
@@ -601,6 +633,7 @@ def _movie_snapshot_to_dict(snapshot: dict, approval_status: str = "published") 
   payload.setdefault("posters", "Poster upload pending")
   payload.setdefault("music", "Music upload pending")
   payload.setdefault("reward_bonus", "+0 pts")
+  payload.setdefault("source_extension", None)
   payload["approval_status"] = approval_status
   payload["approval_status_label"] = _approval_status_label(approval_status)
   payload["requires_super_admin_approval"] = approval_status in {"pending_admin_review", "pending_super_admin_approval", "changes_requested"}
@@ -735,6 +768,7 @@ def _movie_to_dict(
     "posters": movie.posters,
     "music": movie.music,
     "reward_bonus": movie.reward_bonus,
+    "source_extension": movie.source_extension,
   }
 
 
@@ -1967,19 +2001,35 @@ def create_movie(session: Session, payload: dict) -> dict:
   cast_credits = _normalize_cast_credit_entries(payload.get("cast_credits", []))
   # Creator assignments ride on the payload but are NOT MovieRecord columns -
   # pull them out before the record keyword arguments are built.
-  requested_creator_ids = [str(value) for value in (payload.get("creator_ids") or []) if value]
+  canonical_stage, library_subtype = normalize_movie_stage(payload.get("stage"))
+  is_library = canonical_stage == "library"
+  requested_creator_ids = (
+    []
+    if is_library
+    else [str(value) for value in (payload.get("creator_ids") or []) if value]
+  )
   payload = _movie_record_payload(payload)
   payload.pop("creator_ids", None)
   payload.pop("creator_id", None)
-  payload.setdefault("archived", False)
-  payload["pricing_snapshot"] = _current_star_price_snapshot(session)
+  payload["stage"] = canonical_stage
+  payload["library_subtype"] = library_subtype
+  payload["stars_required"] = 0 if is_library else payload.get("stars_required", 1)
+  payload["stars_required_theatre"] = 0 if is_library else payload.get("stars_required_theatre", 3)
+  payload["expected_stars"] = 0 if is_library else payload.get("expected_stars", 0)
+  payload["reserve_enabled"] = False
+  payload["buy_now_enabled"] = False
+  payload["release_decision"] = "approved" if is_library else "pending"
+  payload["playback_requires_subscription"] = False if is_library else True
+  payload["pricing_snapshot"] = (
+    _current_star_price_snapshot(session) if not is_library else None
+  )
   movie = MovieRecord(**payload)
   session.add(movie)
   session.flush()
   change_request, pending_snapshot = _prepare_movie_change_request(
     session,
     movie,
-    status="pending_super_admin_approval",
+    status="approved" if is_library else "pending_super_admin_approval",
     is_new_title=True,
     capture_assets=True,
   )
@@ -1988,12 +2038,23 @@ def create_movie(session: Session, payload: dict) -> dict:
   # Sync the many-to-many creator assignments from the payload (if provided).
   if requested_creator_ids:
     _sync_movie_creators(session, movie.id, requested_creator_ids)
-  approval_status = _set_movie_approval_status(session, movie, "pending_super_admin_approval")
+  approval_status = _set_movie_approval_status(
+    session, movie, "approved" if is_library else "pending_super_admin_approval"
+  )
   _set_linked_title_cast_credits(session, movie.id, cast_credits)
   session.commit()
   session.refresh(movie)
   result = _movie_snapshot_to_dict(pending_snapshot, approval_status)
-  creator_ids = [link.user_id for link in session.query(MovieCreatorRecord).filter(MovieCreatorRecord.movie_id == movie.id).all()]
+  creator_ids = (
+    []
+    if is_library
+    else [
+      link.user_id
+      for link in session.query(MovieCreatorRecord).filter(
+        MovieCreatorRecord.movie_id == movie.id
+      ).all()
+    ]
+  )
   creator_names = _resolve_creator_names(session, creator_ids)
   result["creator_ids"] = creator_ids
   result["creator_names"] = [creator_names.get(uid) for uid in creator_ids]
@@ -2445,14 +2506,45 @@ def update_movie_stage(session: Session, movie_id: str, stage: str) -> dict | No
   movie = session.get(MovieRecord, movie_id)
   if movie is None:
     return None
-  change_request, pending_snapshot = _prepare_movie_change_request(session, movie, status="pending_super_admin_approval")
-  pending_snapshot["stage"] = stage
-  pending_snapshot["stage_label"] = "Upcoming" if stage == "upcoming" else "New Release" if stage == "released" else "Old Movies"
+  canonical_stage, library_subtype = normalize_movie_stage(stage)
+  becoming_library = canonical_stage == "library"
+  status = "approved" if becoming_library else "pending_super_admin_approval"
+  change_request, pending_snapshot = _prepare_movie_change_request(session, movie, status=status)
+  pending_snapshot["stage"] = canonical_stage
+  pending_snapshot["library_subtype"] = library_subtype
+  pending_snapshot["stage_label"] = movie_stage_label(canonical_stage, library_subtype)
+  pending_snapshot["countdown"] = (
+    "Release date to be confirmed"
+    if canonical_stage == "upcoming"
+    else "Now showing"
+    if canonical_stage == "released"
+    else "Library title - play directly"
+  )
+  if becoming_library:
+    # Library titles are direct-play: no stars/pricing, no release date, live.
+    pending_snapshot["stars_required"] = 0
+    pending_snapshot["stars_required_theatre"] = 0
+    pending_snapshot["expected_stars"] = 0
+    pending_snapshot["reserve_enabled"] = False
+    pending_snapshot["buy_now_enabled"] = False
+    pending_snapshot["release_decision"] = "approved"
+    pending_snapshot["playback_requires_subscription"] = False
+    pending_snapshot["release_date"] = ""
   _save_pending_movie_snapshot(change_request, pending_snapshot)
-  approval_status = _set_movie_approval_status(session, movie, "pending_super_admin_approval")
+  approval_status = _set_movie_approval_status(session, movie, status)
   session.commit()
   session.refresh(movie)
   return _movie_snapshot_to_dict(pending_snapshot, approval_status)
+
+
+def get_movie_by_id(session: Session, movie_id: str) -> MovieRecord | None:
+  ensure_seeded(session)
+  return session.get(MovieRecord, movie_id)
+
+
+def save_movie(session: Session, movie: MovieRecord) -> None:
+  session.add(movie)
+  session.commit()
 
 
 def update_movie_details(session: Session, movie_id: str, payload: dict) -> dict | None:
@@ -2475,6 +2567,8 @@ def update_movie_details(session: Session, movie_id: str, payload: dict) -> dict
   pending_snapshot["expected_revenue"] = f'{pending_snapshot["expected_stars"]} stars'
   if payload.get("release_date"):
     pending_snapshot["release_date"] = payload["release_date"]
+  if "source_extension" in payload:
+    movie.source_extension = payload["source_extension"]
   # Creator assignment: only touch the snapshot/join table when the caller
   # explicitly sent the field - an omitted key keeps the current assignment,
   # an empty list clears it, and a non-empty list (re)assigns the title.

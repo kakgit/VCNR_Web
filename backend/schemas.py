@@ -175,7 +175,9 @@ class MovieResponse(BaseModel):
   viewer_reservation_theatre_status: str | None = None
   stage_label: str
   countdown: str
-  release_date: str
+  # Library (direct-play) titles have no release date; null keeps the viewer
+  # apps from showing an "upcoming" release label for them.
+  release_date: str | None = None
   description: str
   budget: str
   expected_revenue: str
@@ -188,6 +190,10 @@ class MovieResponse(BaseModel):
   posters: str
   music: str
   reward_bonus: str
+  # Raw container uploaded for library (direct-play) titles: "mp4" or "mkv".
+  # Null for regular VCNR-encrypted titles. Lets viewer apps build the
+  # `/movies/{id}/content/stream` URL and play directly without a download.
+  source_extension: str | None = None
 
 
 class MovieListResponse(BaseModel):
@@ -805,11 +811,13 @@ class AdminMovieCreateRequest(BaseModel):
   cast_credits: list[CastCreditEntry] = []
   story_line: str
   creator_ids: list[str] = []
-  stars_required: int = Field(default=1, ge=1, le=10)
-  stars_required_theatre: int = Field(default=3, ge=1, le=10)
+  stars_required: int = Field(default=0, ge=0, le=10)
+  stars_required_theatre: int = Field(default=0, ge=0, le=10)
   expected_stars: int = Field(default=0, ge=0)
   release_date: str | None = None
-  stage: str = Field(pattern="^(upcoming|released|library)$")
+  stage: str = Field(pattern="^(upcoming|released|library_free|library_paid)$")
+  # Library titles are raw .mp4/.mkv direct-play streams (never encrypted VCNR).
+  source_extension: str | None = Field(default=None, pattern="^(mp4|mkv)?$")
 
 
 class AdminCreatorAssignRequest(BaseModel):

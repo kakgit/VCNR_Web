@@ -6747,7 +6747,17 @@ def admin_delete_movie(
   _: dict[str, str] = Depends(require_admin),
 ) -> dict:
   movie = _get_movie_or_404(db, movie_id)
-  deleted_movie = persistence.delete_movie_permanently(db, movie_id) if db else demo_store.delete_movie_permanently(movie_id)
+  
+  # Log the deletion attempt for debugging
+  print(f"[DEBUG] Deleting movie permanently: {movie_id} (title: {movie.get('title', 'Unknown')})")
+  
+  if db:
+    print(f"[DEBUG] Using persistence layer for movie deletion")
+    deleted_movie = persistence.delete_movie_permanently(db, movie_id)
+  else:
+    print(f"[DEBUG] Using demo_store layer for movie deletion")
+    deleted_movie = demo_store.delete_movie_permanently(movie_id)
+  
   if deleted_movie is None:
     raise HTTPException(status_code=404, detail="Movie not found.")
 

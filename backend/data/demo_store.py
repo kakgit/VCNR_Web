@@ -744,14 +744,51 @@ def restore_movie(movie_id: str) -> dict | None:
 
 
 def delete_movie_permanently(movie_id: str) -> dict | None:
+  # First find and remove the movie from MOVIES
+  movie_to_delete = None
+  movie_index = -1
   for index, movie in enumerate(MOVIES):
-    if movie["id"] != movie_id:
-      continue
-    deleted_movie = _decorate_movie(movie)
-    MOVIE_CHANGE_REQUESTS.pop(movie_id, None)
-    del MOVIES[index]
-    return deleted_movie
-  return None
+    if movie["id"] == movie_id:
+      movie_to_delete = movie
+      movie_index = index
+      break
+  
+  if movie_to_delete is None:
+    return None
+  
+  # Clean up related records (similar to persistence.delete_movie_permanently)
+  MOVIE_CHANGE_REQUESTS.pop(movie_id, None)
+  # Clean up wishes for this movie
+  global MOVIE_WISHES
+  MOVIE_WISHES[:] = [w for w in MOVIE_WISHES if w.get("movie_id") != movie_id]
+  
+  # Clean up reservations for this movie  
+  global MOVIE_RESERVATIONS
+  MOVIE_RESERVATIONS[:] = [r for r in MOVIE_RESERVATIONS if r.get("movie_id") != movie_id]
+  
+  # Clean up engagement events for this movie
+  global MOVIE_ENGAGEMENT_EVENTS
+  MOVIE_ENGAGEMENT_EVENTS[:] = [e for e in MOVIE_ENGAGEMENT_EVENTS if e.get("movie_id") != movie_id]
+  
+  # Clean up notifications related to this movie
+  global MOVIE_NOTIFICATIONS
+  MOVIE_NOTIFICATIONS[:] = [n for n in MOVIE_NOTIFICATIONS if n.get("movie_id") != movie_id]
+  
+  # Clean up change requests for this movie (already done above)
+  
+  # Clean up any other references in demo store
+  # For now, we'll just remove the movie from the main list
+  # Note: In a full implementation, we would also clean up:
+  # - MOVIE_CREATOR records (if they exist in demo store)
+  # - Any other foreign key references in demo data structures
+  
+  deleted_movie = _decorate_movie(movie_to_delete)
+  del MOVIES[movie_index]
+  return deleted_movie
+
+# Ensure MovieCreatorRecord cleanup is also handled in demo store
+# This should mirror the persistence.delete_movie_permanently logic
+# but for the in-memory demo store
 
 
 def update_movie_details(movie_id: str, payload: dict) -> dict | None:

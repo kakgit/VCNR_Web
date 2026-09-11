@@ -6166,7 +6166,22 @@ async function restoreAdminMovieRemote(movieId) {
 }
 
 async function deleteArchivedAdminMovieRemote(movieId) {
-  const response = await apiDeleteRequest(`/admin/movies/${movieId}`);
+  let response;
+  try {
+    response = await apiDeleteRequest(`/admin/movies/${movieId}`);
+  } catch (error) {
+    console.error("Delete archived movie API error:", error);
+    if (adminHelper) {
+      adminHelper.textContent = error.message;
+      adminHelper.style.display = "block";
+      adminHelper.style.backgroundColor = "#ffebee";
+      adminHelper.style.color = "#c62828";
+      adminHelper.style.padding = "12px";
+      adminHelper.style.borderRadius = "8px";
+      adminHelper.style.marginBottom = "16px";
+    }
+    throw error;
+  }
   closeAdminDeleteDialog();
   removeMovieFromCollections(movieId);
   await Promise.all([
@@ -6179,7 +6194,15 @@ async function deleteArchivedAdminMovieRemote(movieId) {
   renderAdminArchiveMovieList();
   renderMovieGrid();
   syncDetailPanel();
-  adminHelper.textContent = response.message;
+  if (adminHelper) {
+    adminHelper.textContent = response.message || "Movie deleted permanently.";
+    adminHelper.style.display = "block";
+    adminHelper.style.backgroundColor = "#e8f5e9";
+    adminHelper.style.color = "#2e7d32";
+    adminHelper.style.padding = "12px";
+    adminHelper.style.borderRadius = "8px";
+    adminHelper.style.marginBottom = "16px";
+  }
 }
 
 async function reviewAdminMovieApprovalRemote(movieId, action = "approve") {
@@ -8109,7 +8132,16 @@ if (adminDeleteConfirmButton) {
         await deleteAdminUserRemote(adminPendingDelete.id);
       }
     } catch (error) {
-      adminHelper.textContent = error.message;
+      console.error("Delete confirm error:", error);
+      if (adminHelper) {
+        adminHelper.textContent = error.message;
+        adminHelper.style.display = "block";
+        adminHelper.style.backgroundColor = "#ffebee";
+        adminHelper.style.color = "#c62828";
+        adminHelper.style.padding = "12px";
+        adminHelper.style.borderRadius = "8px";
+        adminHelper.style.marginBottom = "16px";
+      }
     }
   });
 }

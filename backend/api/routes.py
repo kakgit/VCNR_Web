@@ -3311,7 +3311,7 @@ def admin_create_movie(
   db: Session | None = Depends(get_db),
   _: dict[str, str] = Depends(require_admin),
 ) -> AdminMovieActionResponse:
-  is_library = str(payload.stage or "").strip().lower() == "library"
+  is_library = str(payload.stage or "").strip().lower() in {"library", "library_free", "library_paid"}
   slug_base = payload.title.lower().replace("&", "and")
   movie_id = "-".join(filter(None, ["".join(character if character.isalnum() else "-" for character in slug_base).strip("-"), "admin"]))
   total_movies = len(persistence.list_movies(db, include_archived=True) if db else demo_store.list_movies(include_archived=True))

@@ -629,9 +629,7 @@ function getAdminLibraryEditorStageValue(movie) {
     return stage;
   }
   if (stage === "library") {
-    return String(movie.librarySubtype || "").toLowerCase() === "paid"
-      ? "library_paid"
-      : "library_free";
+    return getAdminLibrarySubtype(movie) === "paid" ? "library_paid" : "library_free";
   }
   return stage || "upcoming";
 }
@@ -642,10 +640,14 @@ function getAdminLibrarySubtype(movie) {
   }
   const stage = String(movie.stage || "").toLowerCase();
   const subtype = String(movie.librarySubtype || "").toLowerCase();
-  if (stage === "library_paid" || (stage === "library" && subtype === "paid")) {
+  const stageLabel = String(movie.stageLabel || "").toLowerCase();
+  if (subtype === "paid" || stage === "library_paid" || stageLabel.includes("paid")) {
     return "paid";
   }
-  if (stage === "library_free" || stage === "library") {
+  if (subtype === "free" || stage === "library_free" || stageLabel.includes("free")) {
+    return "free";
+  }
+  if (stage === "library") {
     // A canonical library record without a subtype defaults to Free, matching
     // the backend default (movie_library_subtype -> "free").
     return "free";

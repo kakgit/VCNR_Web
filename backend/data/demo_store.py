@@ -439,6 +439,9 @@ def create_movie(movie: dict) -> dict:
   movie["online_pricing_options"] = _normalize_online_pricing_options(movie.get("online_pricing_options", []))
   is_library = str(movie.get("stage", "")).strip().lower() in {"library", "library_free", "library_paid"}
   if is_library:
+    raw_stage = str(movie.get("stage", "")).strip().lower()
+    paid = raw_stage == "library_paid" or str(movie.get("library_subtype") or "").strip().lower() == "paid"
+    movie["stage_label"] = "Library - Paid" if paid else "Library - Free"
     movie["stars_required"] = 0
     movie["stars_required_theatre"] = 0
     movie["expected_stars"] = 0

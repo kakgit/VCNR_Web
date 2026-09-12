@@ -2014,6 +2014,7 @@ def create_movie(session: Session, payload: dict) -> dict:
   payload.pop("creator_id", None)
   payload["stage"] = canonical_stage
   payload["library_subtype"] = library_subtype
+  payload["stage_label"] = movie_stage_label(canonical_stage, library_subtype)
   payload["stars_required"] = 0 if is_library else payload.get("stars_required", 1)
   payload["stars_required_theatre"] = 0 if is_library else payload.get("stars_required_theatre", 3)
   payload["expected_stars"] = 0 if is_library else payload.get("expected_stars", 0)
@@ -2525,6 +2526,7 @@ def update_movie_stage(session: Session, movie_id: str, stage: str) -> dict | No
     # Library titles are direct-play: no stars/pricing, no release date, live.
     movie.stage = canonical_stage
     movie.library_subtype = library_subtype
+    movie.stage_label = movie_stage_label(canonical_stage, library_subtype)
     pending_snapshot["stars_required"] = 0
     pending_snapshot["stars_required_theatre"] = 0
     pending_snapshot["expected_stars"] = 0

@@ -617,6 +617,22 @@ function isAdminLibraryMovie(movie) {
   );
 }
 
+function getAdminLibraryEditorStageValue(movie) {
+  if (!movie) {
+    return "upcoming";
+  }
+  const stage = String(movie.stage || "").toLowerCase();
+  if (stage === "library_free" || stage === "library_paid") {
+    return stage;
+  }
+  if (stage === "library") {
+    return String(movie.librarySubtype || "").toLowerCase() === "paid"
+      ? "library_paid"
+      : "library_free";
+  }
+  return stage || "upcoming";
+}
+
 function getAdminMovieStageLabel(movie) {
   if (movie.archived) {
     return "Archived";
@@ -5775,7 +5791,7 @@ function openAdminLibraryEditor(movie = null) {
   adminLibraryTitle.value = movie?.title || "";
   adminLibraryCaption.value = movie?.titleCaption || "";
   setMultiSelectValues(adminLibraryGenre, String(movie?.genre || "").split(","));
-  adminLibraryMovieStage.value = movie?.stage || "upcoming";
+  adminLibraryMovieStage.value = getAdminLibraryEditorStageValue(movie);
   adminLibraryExpectedDate.value = formatAdminDateForInput(movie?.releaseDate);
   renderAdminCastCreditRows(movie?.castCredits || []);
   adminLibraryDescription.value = movie?.description || "";

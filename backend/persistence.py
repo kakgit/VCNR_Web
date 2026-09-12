@@ -2830,6 +2830,8 @@ def delete_movie_permanently(session: Session, movie_id: str) -> dict | None:
   session.query(MovieWishRecord).filter(MovieWishRecord.movie_id == movie_id).delete()
   session.query(MovieCreatorRecord).filter(MovieCreatorRecord.movie_id == movie_id).delete()
   session.query(ContentDeliveryEnrollmentRecord).filter(ContentDeliveryEnrollmentRecord.movie_id == movie_id).delete()
+  session.query(MovieEngagementEventRecord).filter(MovieEngagementEventRecord.movie_id == movie_id).delete()
+  session.query(NotificationRecord).filter(NotificationRecord.movie_id == movie_id).delete()
   linked_title = session.query(TitleRecord).filter(TitleRecord.legacy_movie_id == movie_id).first()
   if linked_title is not None:
     session.query(TitlePosterRecord).filter(TitlePosterRecord.title_id == linked_title.id).delete()

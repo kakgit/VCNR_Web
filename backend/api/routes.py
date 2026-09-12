@@ -3784,8 +3784,8 @@ async def admin_upload_library_content(
   _: dict[str, str] = Depends(require_admin),
 ) -> AdminMovieActionResponse:
   """Upload a raw .mp4 or .mkv file for a library title. No encryption, no VCNR packaging.
-  The file is stored at ``{LIBRARY_MEDIA_ROOT}/{movie_id}/content/main.{ext}`` and served
-  directly by the ``/movies/{movie_id}/content/stream`` endpoint.
+  The file is uploaded to Cloudflare R2 and served directly by the
+  ``/movies/{movie_id}/content/stream`` endpoint via presigned URL or proxy.
   """
   movie = _get_movie_or_404(db, movie_id)
   source_ext = Path(file.filename or "").suffix.lower()
@@ -3802,10 +3802,10 @@ async def admin_upload_library_content(
   else:
     demo_store.set_movie_source_extension(movie_id, source_ext)
 
-  content_dir = LIBRARY_MEDIA_ROOT / movie_id / "content"
-  content_dir.mkdir(parents=True, exist_ok=True)
-  target_path = content_dir / f"main{source_ext}"
-  await _save_upload_file(target_path, file)
+  # Upload the raw MP4/MKV to Cloudflare R2 (not local Railway storage).
+  object_key = media_object_key(movie_id, "content", f"main{source_ext}")
+  data = await file.read()
+  upload_media_object(object_key, data, media_content_type(file.filename or ""))
 
   # Bump the asset-change tracker so the admin UI refreshes the content status.
   matched = persistence.register_movie_asset_change(db, movie_id, "content") if db else demo_store.register_movie_asset_change(movie_id, "content")
@@ -4012,7 +4012,7 @@ def stream_movie_content(
 ) -> StreamingResponse:
   """Stream a library title's raw .mp4/.mkv content directly (no encryption/decryption).
   Library titles store their source_extension on the movie record; the actual file
-  lives at ``{LIBRARY_MEDIA_ROOT}/{movie_id}/content/main.{mp4|mkv}``.
+  lives in Cloudflare R2 and is served via presigned URL (or proxied as fallback).
 
   The player apps stream through an in-app <video>/expo-video element that cannot
   attach an Authorization header, so the signed-in ``token`` query parameter is
@@ -4036,28 +4036,43 @@ def stream_movie_content(
   if source_ext not in {".mp4", ".mkv"}:
     raise HTTPException(status_code=400, detail="This title does not have a direct-play library video.")
 
-  # Resolve the file on disk.
-  content_path = LIBRARY_MEDIA_ROOT / movie_id / "content"
-  candidate = None
-  for ext in (source_ext, ".mp4", ".mkv"):
-    probe = content_path / f"main{ext}"
-    if probe.exists():
-      candidate = probe
-      break
-  if candidate is None:
-    for file_path in content_path.rglob("*"):
-      if file_path.is_file() and file_path.suffix.lower() in {".mp4", ".mkv"}:
-        candidate = file_path
-        break
-  if candidate is None or not candidate.exists():
+  # Resolve the file on Cloudflare R2.
+  object_key = media_object_key(movie_id, "content", f"main{source_ext}")
+  if not media_object_exists(object_key):
+    # Fallback: try alternate extension and any file under the content prefix.
+    alt_ext = ".mkv" if source_ext == ".mp4" else ".mp4"
+    alt_key = media_object_key(movie_id, "content", f"main{alt_ext}")
+    if media_object_exists(alt_key):
+      object_key = alt_key
+      source_ext = alt_ext
+    else:
+      found = next(
+        (key for key in list_media_keys(f"{movie_id}/content/") if key.lower().endswith((".mp4", ".mkv"))),
+        None,
+      )
+      if found is None:
+        raise HTTPException(status_code=404, detail="Library video file not found.")
+      object_key = found
+      source_ext = Path(found).suffix.lower()
+
+  # Prefer a presigned/public URL so the browser streams directly from R2.
+  download_url = media_download_url(object_key)
+  if download_url and download_url.startswith("http"):
+    from fastapi.responses import RedirectResponse
+    return RedirectResponse(url=download_url, status_code=307)
+
+  # Fallback: stream the bytes from R2 through the API.
+  data = download_media_object(object_key)
+  if data is None:
     raise HTTPException(status_code=404, detail="Library video file not found.")
 
-  media_type = "video/mp4" if candidate.suffix.lower() == ".mp4" else "video/x-matroska"
+  filename = f"main{source_ext}"
+  media_type = "video/mp4" if source_ext == ".mp4" else "video/x-matroska"
   return StreamingResponse(
-    _stream_file_bytes(candidate),
+    iter([data]),
     media_type=media_type,
     headers={
-      "Content-Disposition": f"inline; filename=\"{candidate.name}\"",
+      "Content-Disposition": f"inline; filename=\"{filename}\"",
       "Cache-Control": "no-cache",
     },
   )

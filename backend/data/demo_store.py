@@ -42,7 +42,7 @@ def _approval_label(status: str) -> str:
   return APPROVAL_STATUS_LABELS.get(status, status.replace("_", " ").title())
 
 
-def _normalize_online_pricing_options(entries) -> list[dict]:
+def _normalize_online_pricing_options(entries, allow_zero_stars: bool = False) -> list[dict]:
   normalized: list[dict] = []
   if isinstance(entries, str):
     try:
@@ -59,7 +59,11 @@ def _normalize_online_pricing_options(entries) -> list[dict]:
     quality_label = str(item.get("quality_label") or "").strip()
     stars_required = int(item.get("stars_required") or 0)
     sort_order = int(item.get("sort_order", index) or index)
-    if not quality_code or not quality_label or stars_required <= 0 or quality_code in seen_codes:
+    if not quality_code or not quality_label or quality_code in seen_codes:
+      continue
+    # Tiers below 1 star are only meaningful for free Library titles, where the
+    # chosen qualities are kept at 0 stars so the admin selection round-trips.
+    if not allow_zero_stars and stars_required <= 0:
       continue
     seen_codes.add(quality_code)
     normalized.append({
@@ -436,10 +440,14 @@ def add_publish_queue_item(item: dict) -> dict:
 def create_movie(movie: dict) -> dict:
   movie.setdefault("archived", False)
   movie.setdefault("approval_status", "pending_super_admin_approval")
-  movie["online_pricing_options"] = _normalize_online_pricing_options(movie.get("online_pricing_options", []))
   is_library = str(movie.get("stage", "")).strip().lower() in {"library", "library_free", "library_paid"}
+  raw_stage = str(movie.get("stage", "")).strip().lower()
+  # Free Library titles keep 0-star quality tiers, so normalization must not
+  # drop them at creation time.
+  allow_zero = raw_stage in {"library", "library_free"} and str(movie.get("library_subtype") or "").lower() != "paid"
+  movie["online_pricing_options"] = _normalize_online_pricing_options(movie.get("online_pricing_options", []), allow_zero_stars=allow_zero)
+  is_library = raw_stage in {"library", "library_free", "library_paid"}
   if is_library:
-    raw_stage = str(movie.get("stage", "")).strip().lower()
     paid = raw_stage == "library_paid" or str(movie.get("library_subtype") or "").strip().lower() == "paid"
     movie["stage_label"] = "Library - Paid" if paid else "Library - Free"
     movie["stars_required"] = 0
@@ -952,7 +960,6 @@ def update_movie_pricing_config(movie_id: str, payload: dict) -> dict | None:
     if movie["id"] != movie_id:
       continue
     request = _prepare_movie_change_request(movie)
-    options = _normalize_online_pricing_options(payload.get("online_pricing_options", []))
     raw_stage = str(movie.get("stage", "")).strip().lower()
     library_subtype = str(movie.get("library_subtype") or "").strip().lower()
     if raw_stage == "library_free":
@@ -964,15 +971,20 @@ def update_movie_pricing_config(movie_id: str, payload: dict) -> dict | None:
     is_library = raw_stage in {"library", "library_free", "library_paid"}
     if is_library and library_subtype not in {"free", "paid"}:
       library_subtype = "free"
+    options = _normalize_online_pricing_options(
+      payload.get("online_pricing_options", []),
+      allow_zero_stars=(is_library and library_subtype != "paid"),
+    )
     if is_library:
       if library_subtype == "paid":
         if not options:
           raise ValueError("Library (Paid) titles need at least one online quality with stars required (min 1).")
         default_online_stars = _derive_default_online_stars(options)
       else:
-        # Library (Free) titles are always free - quality rows are informational
-        # and the stored online options stay empty while all star values are 0.
-        options = []
+        # Library (Free) titles are always free - keep the chosen qualities but
+        # every tier stays at 0 stars so the admin selection round-trips.
+        for option in options:
+          option["stars_required"] = 0
         default_online_stars = 0
       theatre_stars = 0
       target_stars = 0

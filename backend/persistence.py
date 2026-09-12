@@ -202,7 +202,15 @@ def movie_stage_label(stage: str, subtype: str | None = None) -> str:
 
 
 def movie_library_subtype(movie: dict | MovieRecord) -> str | None:
-  stage = str((movie.get("stage") if isinstance(movie, dict) else movie.stage) or "")
+  stage = str((movie.get("stage") if isinstance(movie, dict) else movie.stage) or "").strip().lower()
+  # Titles created through the Add/Edit Title form store the Free/Paid split
+  # directly in the stage ("library_free"/"library_paid"), so those stages
+  # resolve here too - otherwise the pricing serializer drops the 0-star
+  # quality rows that Library (Free) selections need to round-trip.
+  if stage == "library_paid":
+    return "paid"
+  if stage == "library_free":
+    return "free"
   if stage != "library":
     return None
   subtype = (movie.get("library_subtype") if isinstance(movie, dict) else movie.library_subtype) or "free"
@@ -338,7 +346,7 @@ def _normalize_cast_credit_entries(entries) -> list[dict]:
   return normalized
 
 
-def _normalize_online_pricing_options(entries) -> list[dict]:
+def _normalize_online_pricing_options(entries, allow_zero_stars: bool = False) -> list[dict]:
   normalized: list[dict] = []
   if isinstance(entries, str):
     entries = _json_load(entries, [])
@@ -353,7 +361,11 @@ def _normalize_online_pricing_options(entries) -> list[dict]:
     quality_label = str(item.get("quality_label") or "").strip()
     stars_required = int(item.get("stars_required") or 0)
     sort_order = int(item.get("sort_order", index) or index)
-    if not quality_code or not quality_label or stars_required <= 0 or quality_code in seen_codes:
+    if not quality_code or not quality_label or quality_code in seen_codes:
+      continue
+    # Tiers below 1 star are only meaningful for free Library titles, where the
+    # chosen qualities are kept at 0 stars so the admin selection round-trips.
+    if not allow_zero_stars and stars_required <= 0:
       continue
     seen_codes.add(quality_code)
     normalized.append({
@@ -371,8 +383,17 @@ def _load_online_pricing_options(raw_value: str | None) -> list[dict]:
   return _normalize_online_pricing_options(_json_load(raw_value, []))
 
 
-def _dump_online_pricing_options(entries: list[dict] | None) -> str | None:
-  normalized = _normalize_online_pricing_options(entries or [])
+def _load_online_pricing_options_for_movie(movie) -> list[dict]:
+  # Free Library titles keep their quality tiers at 0 stars; the serializer
+  # must not drop them or the admin selection cannot be restored.
+  return _normalize_online_pricing_options(
+    _json_load(str(getattr(movie, "online_pricing_options", None) or ""), []),
+    allow_zero_stars=movie_library_subtype(movie) == "free",
+  )
+
+
+def _dump_online_pricing_options(entries: list[dict] | None, allow_zero_stars: bool = False) -> str | None:
+  normalized = _normalize_online_pricing_options(entries or [], allow_zero_stars=allow_zero_stars)
   return _json_dump(normalized) if normalized else None
 
 
@@ -399,7 +420,13 @@ def _dump_cast_credits(entries: list[dict] | None) -> str | None:
 def _movie_record_payload(payload: dict) -> dict:
   normalized = {key: value for key, value in deepcopy(payload).items() if key in MOVIE_RECORD_FIELDS}
   if "online_pricing_options" in normalized:
-    normalized["online_pricing_options"] = _dump_online_pricing_options(normalized.get("online_pricing_options"))
+    # Free Library titles keep their 0-star quality tiers; derive the subtype
+    # from the payload itself so raw ("library_free"/"library_paid") and
+    # canonical ("library") stages both round-trip their selections.
+    normalized["online_pricing_options"] = _dump_online_pricing_options(
+      normalized.get("online_pricing_options"),
+      allow_zero_stars=movie_library_subtype(normalized) == "free",
+    )
   return normalized
 
 
@@ -485,6 +512,7 @@ def _capture_movie_snapshot(movie: MovieRecord) -> dict:
       "id": movie.id,
       "archived": movie.archived,
       "stage": movie.stage,
+      "library_subtype": movie.library_subtype,
       "title_category": movie.title_category,
       "title": movie.title,
       "title_caption": movie.title_caption,
@@ -494,6 +522,7 @@ def _capture_movie_snapshot(movie: MovieRecord) -> dict:
       # the assigned ids so change-request snapshots carry the assignment.
       "creator_ids": [user.id for user in movie.creators],
       "stars_required": movie.stars_required,
+      "online_pricing_options": _load_online_pricing_options_for_movie(movie),
       "online_pricing_options": _load_online_pricing_options(movie.online_pricing_options),
       "stars_required_theatre": movie.stars_required_theatre,
       "expected_stars": movie.expected_stars,
@@ -595,7 +624,10 @@ def _capture_movie_asset_snapshot(movie_id: str) -> dict[str, list[str]]:
 def _movie_snapshot_to_dict(snapshot: dict, approval_status: str = "published") -> dict:
   payload = _movie_record_payload(snapshot)
   payload["cast_credits"] = _normalize_cast_credit_entries(snapshot.get("cast_credits", []))
-  payload["online_pricing_options"] = _normalize_online_pricing_options(snapshot.get("online_pricing_options", []))
+  payload["online_pricing_options"] = _normalize_online_pricing_options(
+    snapshot.get("online_pricing_options", []),
+    allow_zero_stars=movie_library_subtype(snapshot) == "free",
+  )
   payload.setdefault("id", "")
   payload.setdefault("archived", False)
   payload.setdefault("stage", "upcoming")
@@ -738,7 +770,7 @@ def _movie_to_dict(
     "genre": movie.genre,
     "cast_credits": _normalize_cast_credit_entries(cast_credits or []),
     "stars_required": movie.stars_required,
-    "online_pricing_options": _load_online_pricing_options(movie.online_pricing_options),
+    "online_pricing_options": _load_online_pricing_options_for_movie(movie),
     "stars_required_theatre": movie.stars_required_theatre,
     "expected_stars": movie.expected_stars,
     "reserve_enabled": movie.reserve_enabled,
@@ -924,7 +956,10 @@ def _seed_titles(session: Session) -> None:
       release_date_text=movie["release_date"],
       tentative_release_date_text=movie["release_date"] if movie["stage"] == "upcoming" else None,
       reserve_star_price=movie.get("reserve_star_price", 0),
-      online_pricing_options=_dump_online_pricing_options(movie.get("online_pricing_options", [])),
+      online_pricing_options=_dump_online_pricing_options(
+        movie.get("online_pricing_options", []),
+        allow_zero_stars=movie_library_subtype(movie) == "free",
+      ),
       reserve_enabled=movie.get("reserve_enabled", False),
       buy_now_enabled=movie.get("buy_now_enabled", False),
       release_decision=movie.get("release_decision", "pending"),
@@ -2013,7 +2048,13 @@ def create_movie(session: Session, payload: dict) -> dict:
   payload.pop("creator_ids", None)
   payload.pop("creator_id", None)
   payload["stage"] = canonical_stage
-  payload["library_subtype"] = library_subtype
+  # Preserve an explicit subtype from the payload when the stage arrives
+  # already canonical ("library" + library_subtype="paid") - normalize_movie_stage
+  # only derives the subtype from combined stages like "library_paid".
+  payload["library_subtype"] = (
+    library_subtype
+    or (str(payload.get("library_subtype") or "").strip().lower() or None)
+  )
   payload["stage_label"] = movie_stage_label(canonical_stage, library_subtype)
   payload["stars_required"] = 0 if is_library else payload.get("stars_required", 1)
   payload["stars_required_theatre"] = 0 if is_library else payload.get("stars_required_theatre", 3)
@@ -2608,16 +2649,20 @@ def update_movie_pricing_config(session: Session, movie_id: str, payload: dict) 
     library_subtype = "free" if raw_stage == "library_free" else "paid"
   is_library = library_subtype is not None
 
-  options = _normalize_online_pricing_options(payload.get("online_pricing_options", []))
+  options = _normalize_online_pricing_options(
+    payload.get("online_pricing_options", []),
+    allow_zero_stars=library_subtype == "free",
+  )
   if is_library:
     if library_subtype == "paid":
       if not options:
         raise ValueError("Library (Paid) titles need at least one online quality with stars required (min 1).")
       default_online_stars = _derive_default_online_stars(options)
     else:
-      # Library (Free) titles are always free - quality rows are informational
-      # and the stored online options stay empty while all star values are 0.
-      options = []
+      # Library (Free) titles are always free - keep the chosen qualities but
+      # every tier stays at 0 stars so the admin selection round-trips.
+      for option in options:
+        option["stars_required"] = 0
       default_online_stars = 0
     theatre_stars = 0
     target_stars = 0
@@ -2632,7 +2677,7 @@ def update_movie_pricing_config(session: Session, movie_id: str, payload: dict) 
     if not (1 <= theatre_stars <= 10):
       raise ValueError("Stars Required - Theatre must be between 1 and 10.")
 
-  movie.online_pricing_options = _dump_online_pricing_options(options)
+  movie.online_pricing_options = _dump_online_pricing_options(options, allow_zero_stars=library_subtype == "free")
   movie.stars_required = default_online_stars
   movie.reserve_star_price = default_online_stars
   movie.stars_required_theatre = theatre_stars

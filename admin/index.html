@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -1282,7 +1282,37 @@
         <div class="taxonomy-form-actions admin-content-actions">
           <button type="submit" class="primary-btn">Save Upload Start Date Time</button>
           <button type="button" class="icon-btn danger admin-content-delete-btn" id="adminContentDeleteFolderButton" aria-label="Delete Content Folder" title="Delete Content Folder">&#128465;</button>
-          <button type="button" class="ghost-btn" id="adminContentCancelButton">Close</button>
+          <button type="button" class="ghost-btn" id="adminContentCancelButton">Close</button
+
+  <div id="adminLibraryContentUploadModal" class="admin-modal hidden" aria-hidden="true">
+    <div class="admin-modal-backdrop" data-admin-library-content-close></div>
+    <div class="admin-modal-card admin-media-preview-modal" role="dialog" aria-modal="true" aria-labelledby="adminLibraryContentUploadTitle">
+      <div class="admin-modal-header">
+        <div>
+          <p class="section-kicker">Upload Library Video</p>
+          <h2 id="adminLibraryContentUploadTitle">Library Video Upload</h2>
+        </div>
+        <button type="button" class="icon-btn" data-admin-library-content-close aria-label="Close dialog">x</button>
+      </div>
+
+      <form id="adminLibraryContentUploadForm" class="admin-user-editor-form" enctype="multipart/form-data">
+        <input id="adminLibraryContentMovieId" type="hidden">
+        <div id="adminLibraryContentUploadPreview" class="admin-upload-note hidden"></div>
+        <label class="field">
+          <span class="admin-content-field-label-row">
+            <span>Library Video (.mp4 or .mkv)</span>
+            <small id="adminLibraryContentFileName" class="admin-content-field-value">No file selected</small>
+          </span>
+          <input id="adminLibraryContentFile" type="file" accept=".mp4,.mkv">
+          <small class="field-hint">This file will be uploaded to the R2 server. It will not be converted to VCNR format.</small>
+        </label>
+        <div class="taxonomy-form-actions admin-content-actions">
+          <button type="submit" class="primary-btn" id="adminLibraryContentUploadButton">Upload to R2</button>
+          <button type="button" class="ghost-btn" data-admin-library-content-close>Close</button>
+        </div>
+      </form>
+    </div>
+  </div>>
         </div>
       </form>
     </div>

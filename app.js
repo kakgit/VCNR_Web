@@ -1,4 +1,4 @@
-import {
+﻿import {
   FragmentedMp4Assembler,
   joinBytes,
   mimeFromInitializationSegment,
@@ -312,6 +312,11 @@ const adminMusicAssetList = document.getElementById("adminMusicAssetList");
 const adminMusicCancelButton = document.getElementById("adminMusicCancelButton");
 const adminContentUploadModal = document.getElementById("adminContentUploadModal");
 const adminContentUploadForm = document.getElementById("adminContentUploadForm");
+const adminLibraryContentUploadModal = document.getElementById("adminLibraryContentUploadModal");
+const adminLibraryContentUploadForm = document.getElementById("adminLibraryContentUploadForm");
+const adminLibraryContentMovieId = document.getElementById("adminLibraryContentMovieId");
+const adminLibraryContentFile = document.getElementById("adminLibraryContentFile");
+const adminLibraryContentFileName = document.getElementById("adminLibraryContentFileName");
 const adminContentMovieId = document.getElementById("adminContentMovieId");
 const adminContentFiles = document.getElementById("adminContentFiles");
 const adminContentPassword = document.getElementById("adminContentPassword");
@@ -4163,7 +4168,7 @@ function renderAdminMovieList() {
             <button type="button" class="icon-btn admin-movie-action-approve" data-admin-movie-action="approve" title="Approve title" aria-label="Approve title" ${canApproveMovie(movie) ? "" : "disabled"}>&#10003;</button>
             <button type="button" class="icon-btn" data-admin-movie-action="pricing-targets" title="Pricing and targets" aria-label="Pricing and targets" ${movie.archived ? "disabled" : ""}>&#127919;</button>
             ${isAdminLibraryMovie(movie) ? "" : `<button type="button" class="icon-btn admin-movie-action-reserve-start${movie.reserveEnabled ? " is-active" : ""}" data-admin-movie-action="reserve-start" title="${movie.reserveEnabled ? "Stop Reserve Now" : "Start Reserve Now"}" aria-label="${movie.reserveEnabled ? "Stop Reserve Now" : "Start Reserve Now"}" ${canToggleReserve(movie) ? "" : "disabled"}>${movie.reserveEnabled ? "&#9733;" : "&#9734;"}</button>`}
-            <button type="button" class="icon-btn admin-movie-action-content" data-admin-movie-action="content" data-admin-content-open="${movie.id}" onclick="window.openAdminContentUploadForMovie('${movie.id}')" title="Upload main content" aria-label="Upload main content" ${movie.archived ? "disabled" : ""}>&#127916;</button>
+            ${isAdminLibraryMovie(movie) ? `<button type="button" class="icon-btn icon-btn-processed icon-btn-successful" onclick="window.openAdminLibraryContentUploadForMovie('${movie.id}')" title="Upload library video" aria-label="Upload library video" ${!movie.archived ? "" : "disabled"}>&#127916;</button>` : `<button type="button" class="icon-btn" onclick="window.openAdminContentUploadForMovie('${movie.id}')" title="Upload main content" aria-label="Upload main content" ${movie.archived ? "disabled" : ""}>&#127916;</button>`}
             ${isAdminLibraryMovie(movie) ? "" : `<button type="button" class="icon-btn admin-movie-action-release-main" data-admin-movie-action="release-main-content" data-admin-release-main-open="${movie.id}" onclick="window.openAdminReleaseMainContentForMovie('${movie.id}')" title="Release main content" aria-label="Release main content" ${movie.archived ? "disabled" : ""}>&#9654;</button>`}
             <button type="button" class="icon-btn" data-admin-movie-action="edit" title="Edit title" aria-label="Edit title">&#9998;</button>
             <button type="button" class="icon-btn danger" data-admin-movie-action="archive" title="Archive title" aria-label="Archive title" ${movie.archived ? "disabled" : ""}>&#128465;</button>
@@ -5224,7 +5229,59 @@ function openAdminContentUploadModal(movie) {
   });
 }
 
-function closeAdminContentUploadModal() {
+function openAdminLibraryContentUploadModal(movie) {
+  if (!adminLibraryContentUploadModal || !adminLibraryContentMovieId || !movie) {
+    return;
+  }
+
+  adminLibraryContentMovieId.value = movie.id;
+  if (adminLibraryContentFile) {
+    adminLibraryContentFile.value = "";
+  }
+  if (adminLibraryContentFileName) {
+    adminLibraryContentFileName.textContent = "No file selected";
+  }
+  if (adminLibraryContentUploadPreview) {
+    adminLibraryContentUploadPreview.classList.add("hidden");
+    adminLibraryContentUploadPreview.textContent = "";
+  }
+  adminLibraryContentUploadModal.classList.remove("hidden");
+  adminLibraryContentUploadModal.setAttribute("aria-hidden", "false");
+  const selectedMovie = adminMovies.find((item) => item.id === movie.id);
+  if (adminHelper) {
+    adminHelper.textContent = `Ready to upload a library video for \"${escapeHtml(selectedMovie?.title || movie.title)}\".`;
+  }
+}
+
+function closeAdminLibraryContentUploadModal() {
+  if (!adminLibraryContentUploadModal || !adminLibraryContentMovieId) {
+    return;
+  }
+
+  adminLibraryContentUploadModal.classList.add("hidden");
+  adminLibraryContentUploadModal.setAttribute("aria-hidden", "true");
+  adminLibraryContentMovieId.value = "";
+  if (adminLibraryContentFile) {
+    adminLibraryContentFile.value = "";
+  }
+  if (adminLibraryContentFileName) {
+    adminLibraryContentFileName.textContent = "No file selected";
+  }
+  if (adminLibraryContentUploadPreview) {
+    adminLibraryContentUploadPreview.classList.add("hidden");
+    adminLibraryContentUploadPreview.textContent = "";
+  }
+  if (adminHelper) {
+    adminHelper.textContent = "";
+  }
+}
+
+window.openAdminContentUploadForMovie = function openAdminContentUploadForMovie(movieId) {
+  const selectedMovie = adminMovies.find((movie) => movie.id === movieId);
+  if (selectedMovie && !selectedMovie.archived && !isAdminLibraryMovie(selectedMovie)) {
+    openAdminContentQualityUploadModal(selectedMovie);
+  }
+};
   if (!adminContentUploadModal || !adminContentMovieId) {
     return;
   }
@@ -5427,10 +5484,10 @@ async function deleteAdminContentQualityRemote(movieId, qualityCode) {
   adminHelper.textContent = response.message;
 }
 
-window.openAdminContentUploadForMovie = function openAdminContentUploadForMovie(movieId) {
+window.openAdminLibraryContentUploadForMovie = function openAdminLibraryContentUploadForMovie(movieId) {
   const selectedMovie = adminMovies.find((movie) => movie.id === movieId);
-  if (selectedMovie && !selectedMovie.archived) {
-    openAdminContentQualityUploadModal(selectedMovie);
+  if (selectedMovie && !selectedMovie.archived && isAdminLibraryMovie(selectedMovie)) {
+    openAdminLibraryContentUploadModal(selectedMovie);
   }
 };
 
@@ -9074,6 +9131,57 @@ if (adminContentUploadForm) {
       await scheduleAdminMovieContentRemote(movieId, uploadStartAt);
     } catch (error) {
       adminHelper.textContent = error.message;
+    }
+  });
+}
+
+if (adminLibraryContentUploadForm) {
+  adminLibraryContentUploadForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+
+    const movieId = adminLibraryContentMovieId?.value.trim();
+    const file = adminLibraryContentFile?.files?.[0];
+    const sourceName = file?.name?.trim();
+
+    try {
+      if (!movieId) {
+        throw new Error("Please choose a title first.");
+      }
+      if (!file) {
+        throw new Error("Choose a library video file.");
+      }
+      if (!sourceName || !/\.(mp4|mkv)$/i.test(sourceName)) {
+        throw new Error("Library content must be .mp4 or .mkv.");
+      }
+      if (adminLibraryContentFileName) {
+        adminLibraryContentFileName.textContent = sourceName;
+      }
+      if (adminLibraryContentUploadPreview) {
+        adminLibraryContentUploadPreview.classList.remove("hidden");
+        adminLibraryContentUploadPreview.textContent = `Uploading "${escapeHtml(sourceName)}" to R2...`;
+      }
+      adminHelper.className = "admin-helper neutral";
+      adminHelper.textContent = `Uploading "${escapeHtml(sourceName)}" to R2...`;
+      const formData = new FormData();
+      formData.append("file", file);
+      const response = await apiUploadRequest(`/admin/movies/${encodeURIComponent(movieId)}/assets/library-content`, formData);
+      const updatedMovie = normalizeMovie(response.item);
+      updateMovieCollections(updatedMovie);
+      renderAdminMovieList();
+      renderAdminArchiveMovieList();
+      if (adminLibraryUploadStartAtDisplay) {
+        setAdminLibraryUploadStartAtDisplay(updatedMovie?.title || "", "");
+        setAdminContentUploadStartAtDisplay("");
+      }
+      adminHelper.textContent = response.message;
+      adminHelper.className = "admin-helper success";
+      closeAdminLibraryContentUploadModal();
+    } catch (error) {
+      adminHelper.className = "admin-helper danger";
+      adminHelper.textContent = error.message || "Library content upload failed.";
+      if (adminLibraryContentUploadPreview) {
+        adminLibraryContentUploadPreview.textContent = error.message || "Library content upload failed.";
+      }
     }
   });
 }

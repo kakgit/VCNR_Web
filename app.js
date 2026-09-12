@@ -602,6 +602,21 @@ function getAdminMovieSortMeta() {
   return { key, direction };
 }
 
+function isAdminLibraryMovie(movie) {
+  if (!movie) {
+    return false;
+  }
+  const stage = String(movie.stage || "").toLowerCase();
+  const subtype = String(movie.librarySubtype || "").toLowerCase();
+  return (
+    stage === "library" ||
+    stage === "library_free" ||
+    stage === "library_paid" ||
+    subtype === "free" ||
+    subtype === "paid"
+  );
+}
+
 function getAdminMovieStageLabel(movie) {
   if (movie.archived) {
     return "Archived";
@@ -4101,14 +4116,14 @@ function renderAdminMovieList() {
             <button type="button" class="icon-btn admin-movie-action-trailer" data-admin-movie-action="trailer" title="Upload teasers" aria-label="Upload teasers" ${movie.archived ? "disabled" : ""}>&#127909;</button>
             <button type="button" class="icon-btn admin-movie-action-gallery" data-admin-movie-action="gallery" title="Upload gallery" aria-label="Upload gallery" ${movie.archived ? "disabled" : ""}>&#127748;</button>
             <button type="button" class="icon-btn admin-movie-action-music" data-admin-movie-action="music" title="Upload music" aria-label="Upload music" ${movie.archived ? "disabled" : ""}>&#9835;</button>
-            <button type="button" class="icon-btn" data-admin-movie-action="delivery-queue" title="Open delivery queue" aria-label="Open delivery queue">&#9201;</button>
+            ${isAdminLibraryMovie(movie) ? "" : `<button type="button" class="icon-btn" data-admin-movie-action="delivery-queue" title="Open delivery queue" aria-label="Open delivery queue">&#9201;</button>`}
           </div>
           <div class="admin-movie-actions-bottom">
             <button type="button" class="icon-btn admin-movie-action-approve" data-admin-movie-action="approve" title="Approve title" aria-label="Approve title" ${canApproveMovie(movie) ? "" : "disabled"}>&#10003;</button>
             <button type="button" class="icon-btn" data-admin-movie-action="pricing-targets" title="Pricing and targets" aria-label="Pricing and targets" ${movie.archived ? "disabled" : ""}>&#127919;</button>
-            <button type="button" class="icon-btn admin-movie-action-reserve-start${movie.reserveEnabled ? " is-active" : ""}" data-admin-movie-action="reserve-start" title="${movie.reserveEnabled ? "Stop Reserve Now" : "Start Reserve Now"}" aria-label="${movie.reserveEnabled ? "Stop Reserve Now" : "Start Reserve Now"}" ${canToggleReserve(movie) ? "" : "disabled"}>${movie.reserveEnabled ? "&#9733;" : "&#9734;"}</button>
+            ${isAdminLibraryMovie(movie) ? "" : `<button type="button" class="icon-btn admin-movie-action-reserve-start${movie.reserveEnabled ? " is-active" : ""}" data-admin-movie-action="reserve-start" title="${movie.reserveEnabled ? "Stop Reserve Now" : "Start Reserve Now"}" aria-label="${movie.reserveEnabled ? "Stop Reserve Now" : "Start Reserve Now"}" ${canToggleReserve(movie) ? "" : "disabled"}>${movie.reserveEnabled ? "&#9733;" : "&#9734;"}</button>`}
             <button type="button" class="icon-btn admin-movie-action-content" data-admin-movie-action="content" data-admin-content-open="${movie.id}" onclick="window.openAdminContentUploadForMovie('${movie.id}')" title="Upload main content" aria-label="Upload main content" ${movie.archived ? "disabled" : ""}>&#127916;</button>
-            <button type="button" class="icon-btn admin-movie-action-release-main" data-admin-movie-action="release-main-content" data-admin-release-main-open="${movie.id}" onclick="window.openAdminReleaseMainContentForMovie('${movie.id}')" title="Release main content" aria-label="Release main content" ${movie.archived ? "disabled" : ""}>&#9654;</button>
+            ${isAdminLibraryMovie(movie) ? "" : `<button type="button" class="icon-btn admin-movie-action-release-main" data-admin-movie-action="release-main-content" data-admin-release-main-open="${movie.id}" onclick="window.openAdminReleaseMainContentForMovie('${movie.id}')" title="Release main content" aria-label="Release main content" ${movie.archived ? "disabled" : ""}>&#9654;</button>`}
             <button type="button" class="icon-btn" data-admin-movie-action="edit" title="Edit title" aria-label="Edit title">&#9998;</button>
             <button type="button" class="icon-btn danger" data-admin-movie-action="archive" title="Archive title" aria-label="Archive title" ${movie.archived ? "disabled" : ""}>&#128465;</button>
           </div>

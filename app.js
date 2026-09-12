@@ -331,6 +331,9 @@ let adminContentQualityState = {
   items: [],
   isComplete: false,
 };
+// Pricing & Targets modal mode - "standard" | "library_free" | "library_paid".
+// Set when the modal opens so star fields and quality-row constraints match the stage.
+let adminPricingMode = "standard";
 const adminSessionRole = document.getElementById("adminSessionRole");
 const adminSessionEmail = document.getElementById("adminSessionEmail");
 const adminSignoutButton = document.getElementById("adminSignoutButton");
@@ -631,6 +634,21 @@ function getAdminLibraryEditorStageValue(movie) {
       : "library_free";
   }
   return stage || "upcoming";
+}
+
+function getAdminLibrarySubtype(movie) {
+  if (!movie) {
+    return "";
+  }
+  const stage = String(movie.stage || "").toLowerCase();
+  const subtype = String(movie.librarySubtype || "").toLowerCase();
+  if (stage === "library_free" || (stage === "library" && subtype === "free")) {
+    return "free";
+  }
+  if (stage === "library_paid" || (stage === "library" && subtype === "paid")) {
+    return "paid";
+  }
+  return "";
 }
 
 function getAdminMovieStageLabel(movie) {
@@ -1853,7 +1871,10 @@ function renderAdminPricingRows(items = []) {
 
   adminPricingOnlineRows.innerHTML = rows.map((entry, index) => {
     const qualityCode = String(entry.qualityCode || entry.quality_code || "").trim().toLowerCase();
-    const starsRequired = String(entry.starsRequired || entry.stars_required || "").trim();
+    const starsLockedAtZero = adminPricingMode === "library_free";
+    const starsRequired = starsLockedAtZero ? "0" : String(entry.starsRequired || entry.stars_required || "").trim();
+    const starsDisabled = starsLockedAtZero ? " disabled" : "";
+    const starsMin = starsLockedAtZero ? "0" : "1";
     return `
       <div class="admin-pricing-row" data-pricing-row="${index}">
         <label class="field">
@@ -1865,7 +1886,7 @@ function renderAdminPricingRows(items = []) {
         </label>
         <label class="field">
           <span class="sr-only">Stars required</span>
-          <input type="number" min="1" max="10" step="1" data-pricing-stars placeholder="Stars required" value="${escapeHtml(starsRequired)}">
+          <input type="number" min="${starsMin}" max="10" step="1" data-pricing-stars placeholder="Stars required" value="${escapeHtml(starsRequired)}"${starsDisabled}>
         </label>
         <button type="button" class="icon-btn danger" data-remove-pricing-row title="Remove row" aria-label="Remove row">&#128465;</button>
       </div>
@@ -5853,15 +5874,31 @@ function openAdminPricingTargetsModal(movie) {
     return;
   }
 
+  const librarySubtype = getAdminLibrarySubtype(movie);
+  adminPricingMode = librarySubtype === "paid"
+    ? "library_paid"
+    : librarySubtype === "free"
+      ? "library_free"
+      : "standard";
+  const isLibraryMode = adminPricingMode !== "standard";
+
   adminPricingTargetsMovieId.value = movie.id;
   if (adminPricingTargetsCopy) {
-    adminPricingTargetsCopy.textContent = `Set online quality pricing, theatre stars, and target stars for "${movie.title}".`;
+    if (adminPricingMode === "library_free") {
+      adminPricingTargetsCopy.textContent = `"${movie.title}" is a Library (Free) title - star pricing, theatre stars, and target stars are locked at 0.`;
+    } else if (adminPricingMode === "library_paid") {
+      adminPricingTargetsCopy.textContent = `"${movie.title}" is a Library (Paid) title - set online star pricing (min 1); theatre stars and target stars stay 0.`;
+    } else {
+      adminPricingTargetsCopy.textContent = `Set online quality pricing, theatre stars, and target stars for "${movie.title}".`;
+    }
   }
   if (adminPricingTheatreStars) {
-    adminPricingTheatreStars.value = String(movie.starsRequiredTheatre ?? 3);
+    adminPricingTheatreStars.value = isLibraryMode ? "0" : String(movie.starsRequiredTheatre ?? 3);
+    adminPricingTheatreStars.disabled = isLibraryMode;
   }
   if (adminPricingTargetStars) {
-    adminPricingTargetStars.value = String(movie.expectedStars ?? 0);
+    adminPricingTargetStars.value = isLibraryMode ? "0" : String(movie.expectedStars ?? 0);
+    adminPricingTargetStars.disabled = isLibraryMode;
   }
   renderAdminPricingRows(movie.onlinePricingOptions || []);
   adminPricingTargetsModal.classList.remove("hidden");
@@ -5872,14 +5909,17 @@ function closeAdminPricingTargetsModal() {
   if (!adminPricingTargetsModal || !adminPricingTargetsMovieId) {
     return;
   }
+  adminPricingMode = "standard";
   adminPricingTargetsModal.classList.add("hidden");
   adminPricingTargetsModal.setAttribute("aria-hidden", "true");
   adminPricingTargetsMovieId.value = "";
   if (adminPricingTheatreStars) {
     adminPricingTheatreStars.value = "3";
+    adminPricingTheatreStars.disabled = false;
   }
   if (adminPricingTargetStars) {
     adminPricingTargetStars.value = "";
+    adminPricingTargetStars.disabled = false;
   }
   renderAdminPricingRows([]);
 }
@@ -8558,12 +8598,23 @@ if (adminPricingTargetsForm) {
     const starsRequiredTheatre = Number(adminPricingTheatreStars?.value || 0);
     const expectedStars = Number(adminPricingTargetStars?.value || 0);
 
+    const isFreeLibraryPricing = adminPricingMode === "library_free";
+    const isPaidLibraryPricing = adminPricingMode === "library_paid";
+    const isLibraryPricing = isFreeLibraryPricing || isPaidLibraryPricing;
+
     try {
       if (!movieId) {
         throw new Error("Choose a title before saving pricing.");
       }
       if (!onlinePricingOptions.length) {
         throw new Error("Add at least one online quality row.");
+      }
+
+      // Library (Free) titles are always free - every online quality stays at 0 stars.
+      if (isFreeLibraryPricing) {
+        for (const item of onlinePricingOptions) {
+          item.starsRequired = 0;
+        }
       }
 
       const seenQualities = new Set();
@@ -8575,17 +8626,29 @@ if (adminPricingTargetsForm) {
           throw new Error("Each online quality can be used only once.");
         }
         seenQualities.add(item.qualityCode);
-        if (!Number.isFinite(item.starsRequired) || item.starsRequired < 1 || item.starsRequired > 10) {
+        if (isFreeLibraryPricing) {
+          if (item.starsRequired !== 0) {
+            throw new Error("Stars required must be 0 for Library (Free) titles.");
+          }
+        } else if (!Number.isFinite(item.starsRequired) || item.starsRequired < 1 || item.starsRequired > 10) {
           throw new Error(`Stars required for ${item.qualityLabel || item.qualityCode} must be between 1 and 10.`);
         }
       }
 
-      if (!Number.isFinite(starsRequiredTheatre) || starsRequiredTheatre < 1 || starsRequiredTheatre > 10) {
-        throw new Error("Stars Required - Theatre must be between 1 and 10.");
-      }
-
-      if (!Number.isFinite(expectedStars) || expectedStars < 0) {
-        throw new Error("Target Stars must be zero or higher.");
+      if (isLibraryPricing) {
+        if (starsRequiredTheatre !== 0) {
+          throw new Error("Stars Required - Theatre must be 0 for Library titles.");
+        }
+        if (expectedStars !== 0) {
+          throw new Error("Target Stars must be 0 for Library titles.");
+        }
+      } else {
+        if (!Number.isFinite(starsRequiredTheatre) || starsRequiredTheatre < 1 || starsRequiredTheatre > 10) {
+          throw new Error("Stars Required - Theatre must be between 1 and 10.");
+        }
+        if (!Number.isFinite(expectedStars) || expectedStars < 0) {
+          throw new Error("Target Stars must be zero or higher.");
+        }
       }
 
       await updateAdminMoviePricingConfigRemote(movieId, {

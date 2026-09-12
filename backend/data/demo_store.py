@@ -940,18 +940,50 @@ def update_movie_pricing_config(movie_id: str, payload: dict) -> dict | None:
       continue
     request = _prepare_movie_change_request(movie)
     options = _normalize_online_pricing_options(payload.get("online_pricing_options", []))
-    default_online_stars = _derive_default_online_stars(options)
+    raw_stage = str(movie.get("stage", "")).strip().lower()
+    library_subtype = str(movie.get("library_subtype") or "").strip().lower()
+    if raw_stage == "library_free":
+      library_subtype = "free"
+    elif raw_stage == "library_paid":
+      library_subtype = "paid"
+    elif raw_stage != "library":
+      library_subtype = ""
+    is_library = raw_stage in {"library", "library_free", "library_paid"}
+    if is_library and library_subtype not in {"free", "paid"}:
+      library_subtype = "free"
+    if is_library:
+      if library_subtype == "paid":
+        if not options:
+          raise ValueError("Library (Paid) titles need at least one online quality with stars required (min 1).")
+        default_online_stars = _derive_default_online_stars(options)
+      else:
+        # Library (Free) titles are always free - quality rows are informational
+        # and the stored online options stay empty while all star values are 0.
+        options = []
+        default_online_stars = 0
+      theatre_stars = 0
+      target_stars = 0
+    else:
+      if not options:
+        raise ValueError("Add at least one online quality row.")
+      default_online_stars = _derive_default_online_stars(options)
+      theatre_stars = payload.get("stars_required_theatre")
+      theatre_stars = 3 if theatre_stars is None else int(theatre_stars)
+      target_stars = payload.get("expected_stars")
+      target_stars = 0 if target_stars is None else int(target_stars)
+      if not (1 <= theatre_stars <= 10):
+        raise ValueError("Stars Required - Theatre must be between 1 and 10.")
     request["pending"]["online_pricing_options"] = deepcopy(options)
     request["pending"]["stars_required"] = default_online_stars
-    request["pending"]["stars_required_theatre"] = int(payload.get("stars_required_theatre") or 3)
-    request["pending"]["expected_stars"] = int(payload.get("expected_stars") or 0)
-    request["pending"]["expected_revenue"] = f'{request["pending"]["expected_stars"]} stars'
+    request["pending"]["stars_required_theatre"] = theatre_stars
+    request["pending"]["expected_stars"] = target_stars
+    request["pending"]["expected_revenue"] = f"{target_stars} stars"
     movie["online_pricing_options"] = deepcopy(options)
     movie["stars_required"] = default_online_stars
     movie["reserve_star_price"] = default_online_stars
-    movie["stars_required_theatre"] = request["pending"]["stars_required_theatre"]
-    movie["expected_stars"] = request["pending"]["expected_stars"]
-    movie["expected_revenue"] = request["pending"]["expected_revenue"]
+    movie["stars_required_theatre"] = theatre_stars
+    movie["expected_stars"] = target_stars
+    movie["expected_revenue"] = f"{target_stars} stars"
     if not movie.get("archived"):
       _update_movie_approval_status(movie, "pending_super_admin_approval")
     return _pending_or_live(movie, prefer_pending=True)

@@ -837,13 +837,15 @@ class AdminCreatorListResponse(BaseModel):
 class OnlinePricingOptionRequest(BaseModel):
   quality_code: str = Field(min_length=2, max_length=40)
   quality_label: str = Field(min_length=2, max_length=80)
-  stars_required: int = Field(ge=1, le=10)
+  stars_required: int = Field(ge=0, le=10)  # 0 allowed for Library (Free) titles
   sort_order: int = Field(default=0, ge=0)
 
 
 class AdminMoviePricingConfigRequest(BaseModel):
   online_pricing_options: list[OnlinePricingOptionRequest] = []
-  stars_required_theatre: int = Field(default=3, ge=1, le=10)
+  # 0 allowed for Library titles (forced to 0 in the store layer); standard
+  # upcoming/released titles still require 1-10.
+  stars_required_theatre: int = Field(default=0, ge=0, le=10)
   expected_stars: int = Field(default=0, ge=0)
 
 

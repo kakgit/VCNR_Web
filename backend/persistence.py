@@ -2597,10 +2597,35 @@ def update_movie_pricing_config(session: Session, movie_id: str, payload: dict) 
   if movie is None:
     return None
 
+  library_subtype = movie_library_subtype(movie)
+  raw_stage = str(movie.stage or "").strip().lower()
+  if library_subtype is None and raw_stage in {"library_free", "library_paid"}:
+    library_subtype = "free" if raw_stage == "library_free" else "paid"
+  is_library = library_subtype is not None
+
   options = _normalize_online_pricing_options(payload.get("online_pricing_options", []))
-  default_online_stars = _derive_default_online_stars(options)
-  theatre_stars = int(payload.get("stars_required_theatre") or 3)
-  target_stars = int(payload.get("expected_stars") or 0)
+  if is_library:
+    if library_subtype == "paid":
+      if not options:
+        raise ValueError("Library (Paid) titles need at least one online quality with stars required (min 1).")
+      default_online_stars = _derive_default_online_stars(options)
+    else:
+      # Library (Free) titles are always free - quality rows are informational
+      # and the stored online options stay empty while all star values are 0.
+      options = []
+      default_online_stars = 0
+    theatre_stars = 0
+    target_stars = 0
+  else:
+    if not options:
+      raise ValueError("Add at least one online quality row.")
+    default_online_stars = _derive_default_online_stars(options)
+    theatre_stars = payload.get("stars_required_theatre")
+    theatre_stars = 3 if theatre_stars is None else int(theatre_stars)
+    target_stars = payload.get("expected_stars")
+    target_stars = 0 if target_stars is None else int(target_stars)
+    if not (1 <= theatre_stars <= 10):
+      raise ValueError("Stars Required - Theatre must be between 1 and 10.")
 
   movie.online_pricing_options = _dump_online_pricing_options(options)
   movie.stars_required = default_online_stars

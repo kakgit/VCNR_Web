@@ -6655,11 +6655,14 @@ def admin_update_movie_pricing_config(
   db: Session | None = Depends(get_db),
   _: dict[str, str] = Depends(require_admin),
 ) -> AdminMovieActionResponse:
-  movie = (
-    persistence.update_movie_pricing_config(db, movie_id, payload.model_dump())
-    if db
-    else demo_store.update_movie_pricing_config(movie_id, payload.model_dump())
-  )
+  try:
+    movie = (
+      persistence.update_movie_pricing_config(db, movie_id, payload.model_dump())
+      if db
+      else demo_store.update_movie_pricing_config(movie_id, payload.model_dump())
+    )
+  except ValueError as error:
+    raise HTTPException(status_code=400, detail=str(error)) from error
   if movie is None:
     raise HTTPException(status_code=404, detail="Movie not found.")
 

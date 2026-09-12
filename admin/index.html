@@ -1282,10 +1282,13 @@
         <div class="taxonomy-form-actions admin-content-actions">
           <button type="submit" class="primary-btn">Save Upload Start Date Time</button>
           <button type="button" class="icon-btn danger admin-content-delete-btn" id="adminContentDeleteFolderButton" aria-label="Delete Content Folder" title="Delete Content Folder">&#128465;</button>
-          <button type="button" class="ghost-btn" id="adminContentCancelButton">Close</button
-
+          <button type="button" class="ghost-btn" id="adminContentCancelButton">Close</button>
+        </div>
+      </form>
     </div>
-  <div id="adminLibraryContentUploadModal"
+  </div>
+
+  <div id="adminLibraryContentUploadModal" class="admin-modal hidden" aria-hidden="true">
     <div class="admin-modal-backdrop" data-admin-library-content-close></div>
     <div class="admin-modal-card admin-media-preview-modal" role="dialog" aria-modal="true" aria-labelledby="adminLibraryContentUploadTitle">
       <div class="admin-modal-header">
@@ -1313,7 +1316,8 @@
         </div>
       </form>
     </div>
-  </div><script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+  </div>
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
   <script type="module" src="../app.js?v=__ASSET_VERSION__"></script>
 </body>
 </html>

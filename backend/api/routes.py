@@ -356,13 +356,20 @@ def _download_cast_image(source_url: str, timeout: float = 30.0) -> bytes | None
 
 def _movie_content_qualities(movie: dict) -> list[dict]:
   options = movie.get("online_pricing_options") or []
+  library_subtype = movie_library_subtype(movie)
+  is_free_library = library_subtype == "free"
   qualities: list[dict] = []
   for index, item in enumerate(options, start=1):
     quality_code = _normalize_quality_code(str(item.get("quality_code") or ""))
     quality_label = str(item.get("quality_label") or "").strip()
     stars_required = int(item.get("stars_required") or 0)
     sort_order = int(item.get("sort_order") or index)
-    if not quality_code or not quality_label or stars_required <= 0:
+    if not quality_code or not quality_label:
+      continue
+    # Free Library titles keep their chosen qualities at 0 stars, so the content
+    # pipeline must accept those tiers for package validation and the viewer
+    # quality list instead of dropping them.
+    if not is_free_library and stars_required <= 0:
       continue
     qualities.append(
       {

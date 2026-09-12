@@ -1438,7 +1438,7 @@ function normalizeMovie(movie) {
           starsRequired: Number(item?.stars_required || 0),
           sortOrder: Number(item?.sort_order || 0),
         }))
-        .filter((item) => item.qualityCode && item.qualityLabel && item.starsRequired > 0)
+        .filter((item) => item.qualityCode && item.qualityLabel && (item.starsRequired > 0 || item.qualityCode))
       : [],
     starsRequired: Number(movie.stars_required || 1),
     starsRequiredTheatre: Number(movie.stars_required_theatre || movie.reserve_star_price || 3),
@@ -1923,7 +1923,7 @@ function readAdminPricingRows() {
         sortOrder: index,
       };
     })
-    .filter((item) => item.qualityCode || item.starsRequired);
+    .filter((item) => item.qualityCode);
 }
 
 function appendAdminPricingRow() {

@@ -5282,6 +5282,15 @@ window.openAdminContentUploadForMovie = function openAdminContentUploadForMovie(
     openAdminContentQualityUploadModal(selectedMovie);
   }
 };
+
+window.openAdminLibraryContentUploadForMovie = function openAdminLibraryContentUploadForMovie(movieId) {
+  const selectedMovie = adminMovies.find((movie) => movie.id === movieId);
+  if (selectedMovie && !selectedMovie.archived && isAdminLibraryMovie(selectedMovie)) {
+    openAdminLibraryContentUploadModal(selectedMovie);
+  }
+};
+
+function closeAdminContentUploadModal() {
   if (!adminContentUploadModal || !adminContentMovieId) {
     return;
   }

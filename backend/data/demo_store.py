@@ -760,7 +760,6 @@ def delete_movie_permanently(movie_id: str) -> dict | None:
   MOVIE_CHANGE_REQUESTS.pop(movie_id, None)
   # Clean up wishes for this movie
   global MOVIE_WISHES
-<<<<<<< HEAD
   MOVIE_WISHES[:] = [w for w in MOVIE_WISHES if w.get("movie_id") != movie_id]
   
   # Clean up reservations for this movie  
@@ -774,21 +773,6 @@ def delete_movie_permanently(movie_id: str) -> dict | None:
   # Clean up notifications related to this movie
   global MOVIE_NOTIFICATIONS
   MOVIE_NOTIFICATIONS[:] = [n for n in MOVIE_NOTIFICATIONS if n.get("movie_id") != movie_id]
-=======
-  MOVIE_WISHES = [w for w in MOVIE_WISHES if w.get("movie_id") != movie_id]
-  
-  # Clean up reservations for this movie  
-  global MOVIE_RESERVATIONS
-  MOVIE_RESERVATIONS = [r for r in MOVIE_RESERVATIONS if r.get("movie_id") != movie_id]
-  
-  # Clean up engagement events for this movie
-  global MOVIE_ENGAGEMENT_EVENTS
-  MOVIE_ENGAGEMENT_EVENTS = [e for e in MOVIE_ENGAGEMENT_EVENTS if e.get("movie_id") != movie_id]
-  
-  # Clean up notifications related to this movie
-  global MOVIE_NOTIFICATIONS
-  MOVIE_NOTIFICATIONS = [n for n in MOVIE_NOTIFICATIONS if n.get("movie_id") != movie_id]
->>>>>>> 57221ea6a8857e41e5cf1b44ad0c2d1e03ba09b5
   
   # Clean up change requests for this movie (already done above)
   

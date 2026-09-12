@@ -725,6 +725,7 @@ def _movie_to_dict(
     "id": movie.id,
     "archived": movie.archived,
     "stage": movie.stage,
+    "library_subtype": movie.library_subtype,
     "creator_ids": creator_ids or [],
     "creator_names": creator_names or [],
     "approval_status": approval_status,
@@ -2522,6 +2523,8 @@ def update_movie_stage(session: Session, movie_id: str, stage: str) -> dict | No
   )
   if becoming_library:
     # Library titles are direct-play: no stars/pricing, no release date, live.
+    movie.stage = canonical_stage
+    movie.library_subtype = library_subtype
     pending_snapshot["stars_required"] = 0
     pending_snapshot["stars_required_theatre"] = 0
     pending_snapshot["expected_stars"] = 0

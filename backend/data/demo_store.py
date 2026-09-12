@@ -89,6 +89,16 @@ def _decorate_movie(movie: dict, viewer_wish_kind: str | None = None) -> dict:
   item["approval_status"] = approval_status
   item["approval_status_label"] = _approval_label(approval_status)
   item["requires_super_admin_approval"] = approval_status in {"pending_admin_review", "pending_super_admin_approval", "changes_requested"}
+  # Keep library_subtype in sync with the raw stage so clients never have to
+  # guess the Free/Paid split when the stage is stored in raw form.
+  stage_value = str(item.get("stage", "")).strip().lower()
+  subtype_value = str(item.get("library_subtype") or "").strip().lower()
+  if stage_value == "library_free":
+    item["library_subtype"] = "free"
+  elif stage_value == "library_paid":
+    item["library_subtype"] = "paid"
+  elif stage_value == "library" and subtype_value not in {"free", "paid"}:
+    item["library_subtype"] = "free"
   item.setdefault("wish_online_count", item.get("wish_count", 0))
   item.setdefault("wish_theatre_count", 0)
   item.setdefault("cast_credits", [])

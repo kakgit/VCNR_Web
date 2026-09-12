@@ -642,11 +642,13 @@ function getAdminLibrarySubtype(movie) {
   }
   const stage = String(movie.stage || "").toLowerCase();
   const subtype = String(movie.librarySubtype || "").toLowerCase();
-  if (stage === "library_free" || (stage === "library" && subtype === "free")) {
-    return "free";
-  }
   if (stage === "library_paid" || (stage === "library" && subtype === "paid")) {
     return "paid";
+  }
+  if (stage === "library_free" || stage === "library") {
+    // A canonical library record without a subtype defaults to Free, matching
+    // the backend default (movie_library_subtype -> "free").
+    return "free";
   }
   return "";
 }
@@ -5894,10 +5896,12 @@ function openAdminPricingTargetsModal(movie) {
   }
   if (adminPricingTheatreStars) {
     adminPricingTheatreStars.value = isLibraryMode ? "0" : String(movie.starsRequiredTheatre ?? 3);
+    adminPricingTheatreStars.min = isLibraryMode ? "0" : "1";
     adminPricingTheatreStars.disabled = isLibraryMode;
   }
   if (adminPricingTargetStars) {
     adminPricingTargetStars.value = isLibraryMode ? "0" : String(movie.expectedStars ?? 0);
+    adminPricingTargetStars.min = "0";
     adminPricingTargetStars.disabled = isLibraryMode;
   }
   renderAdminPricingRows(movie.onlinePricingOptions || []);
@@ -5915,6 +5919,7 @@ function closeAdminPricingTargetsModal() {
   adminPricingTargetsMovieId.value = "";
   if (adminPricingTheatreStars) {
     adminPricingTheatreStars.value = "3";
+    adminPricingTheatreStars.min = "1";
     adminPricingTheatreStars.disabled = false;
   }
   if (adminPricingTargetStars) {
@@ -8598,8 +8603,17 @@ if (adminPricingTargetsForm) {
     const starsRequiredTheatre = Number(adminPricingTheatreStars?.value || 0);
     const expectedStars = Number(adminPricingTargetStars?.value || 0);
 
-    const isFreeLibraryPricing = adminPricingMode === "library_free";
-    const isPaidLibraryPricing = adminPricingMode === "library_paid";
+    // Derive the pricing mode from the selected title so validation can never
+    // misclassify a Library title as a standard one on save.
+    const pricingMovie = adminMovies.find((movie) => movie.id === movieId);
+    const pricingSubtype = getAdminLibrarySubtype(pricingMovie || {});
+    const pricingMode = pricingSubtype === "paid"
+      ? "library_paid"
+      : pricingSubtype === "free"
+        ? "library_free"
+        : adminPricingMode;
+    const isFreeLibraryPricing = pricingMode === "library_free";
+    const isPaidLibraryPricing = pricingMode === "library_paid";
     const isLibraryPricing = isFreeLibraryPricing || isPaidLibraryPricing;
 
     try {

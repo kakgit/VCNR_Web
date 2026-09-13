@@ -18,8 +18,8 @@ import urllib.parse
 import urllib.request
 import zipfile
 
-from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, Header, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse, RedirectResponse, Response, StreamingResponse
 import uuid
 from starlette.background import BackgroundTask
 
@@ -68,6 +68,7 @@ from backend.core.storage import (
   upload_media_object,
   upload_media_object_stream,
 )
+from backend.core import hls as hls_lib
 from backend.core.time_utils import app_now, is_app_time_reached, parse_app_datetime
 from backend import persistence
 from backend.data import demo_store
@@ -417,6 +418,17 @@ def _get_movie_or_404(db: Session | None, movie_id: str) -> dict:
   if matched is None:
     raise HTTPException(status_code=404, detail="Movie not found.")
   return matched
+
+
+def _extract_auth_token(request: Request) -> str | None:
+  """Return the raw session token from the Authorization Bearer header, if any."""
+  authorization = request.headers.get("authorization") or request.headers.get("Authorization")
+  if not authorization:
+    return None
+  scheme, _, value = authorization.partition(" ")
+  if scheme.lower() == "bearer" and value:
+    return value
+  return None
 
 
 def _relative_media_path(file_path: Path) -> str:
@@ -3784,6 +3796,7 @@ async def admin_upload_library_content(
   file: UploadFile = File(...),
   db: Session | None = Depends(get_db),
   _: dict[str, str] = Depends(require_admin),
+  background_tasks: BackgroundTasks = BackgroundTasks(),
 ) -> AdminMovieActionResponse:
   """Upload a raw .mp4 or .mkv file for a library title. No encryption, no VCNR packaging.
   The file is uploaded to Cloudflare R2 and served directly by the
@@ -3823,6 +3836,9 @@ async def admin_upload_library_content(
         status_code=502,
         detail="Library video could not be uploaded to the R2 server right now. Please try again.",
       )
+    # Segment the raw video into adaptive HLS (720p/480p) in the background so
+    # viewers stream small chunks from R2 instead of one large progressive file.
+    background_tasks.add_task(hls_lib.build_library_hls, movie_id)
 
   # Bump the asset-change tracker so the admin UI refreshes the content status.
   matched = persistence.register_movie_asset_change(db, movie_id, "content") if db else demo_store.register_movie_asset_change(movie_id, "content")
@@ -3856,6 +3872,9 @@ def admin_delete_library_content(
     for key in list_media_keys(f"{movie_id}/content/"):
       if key.lower().endswith((".mp4", ".mkv")):
         delete_media_object(key)
+
+  # Remove any generated adaptive HLS segments + playlists.
+  hls_lib.delete_library_hls(movie_id)
 
   # Clear the source extension so the stream endpoint stops serving the deleted file.
   if db:
@@ -4058,17 +4077,23 @@ def get_movie_content_manifest(
 @router.get("/movies/{movie_id}/content/stream")
 def stream_movie_content(
   movie_id: str,
+  request: Request,
   db: Session | None = Depends(get_db),
   current_user: dict[str, str] = Depends(get_current_user),
   token: str | None = None,
 ) -> StreamingResponse:
-  """Stream a library title's raw .mp4/.mkv content directly (no encryption/decryption).
-  Library titles store their source_extension on the movie record; the actual file
-  lives in Cloudflare R2 and is served via presigned URL (or proxied as fallback).
+  """Stream a library title's content.
+
+  When adaptive HLS is ready (built in the background after upload), this
+  returns the HLS master playlist whose children point at the authenticated
+  ``/movies/{id}/content/hls/...`` endpoints, so viewers stream small ~6-second
+  segments directly from Cloudflare R2.  Otherwise it falls back to serving the
+  raw .mp4/.mkv file via presigned URL (or proxied bytes).
 
   The player apps stream through an in-app <video>/expo-video element that cannot
   attach an Authorization header, so the signed-in ``token`` query parameter is
-  accepted as a fallback for the Bearer header.
+  accepted as a fallback for the Bearer header (and embedded into the rewritten
+  HLS segment URIs).
   """
   if token:
     # Trusted in-app player fallback: validate the query token exactly like the
@@ -4083,6 +4108,19 @@ def stream_movie_content(
   movie = next((item for item in movie_items if item["id"] == movie_id), None)
   if movie is None:
     raise HTTPException(status_code=404, detail="Movie not found.")
+
+  # Serve the adaptive HLS manifest when the background segmentation finished.
+  if hls_lib.library_hls_ready(movie_id):
+    manifest_data = download_media_object(hls_lib.library_hls_manifest_key(movie_id))
+    if manifest_data is not None:
+      manifest_text = manifest_data.decode("utf-8", errors="replace")
+      auth_token = token or _extract_auth_token(request) or ""
+      rewritten = hls_lib.rewrite_hls_manifest(manifest_text, movie_id, str(request.base_url), auth_token) if auth_token else manifest_text
+      return Response(
+        content=rewritten,
+        media_type="application/vnd.apple.mpegurl",
+        headers={"Cache-Control": "no-cache"},
+      )
 
   source_ext = str(movie.get("source_extension") or "").strip().lower()
   if source_ext not in {".mp4", ".mkv"}:
@@ -4137,6 +4175,64 @@ def _stream_file_bytes(path: Path, chunk_size: int = 1024 * 1024):
       if not piece:
         break
       yield piece
+
+
+@router.get("/movies/{movie_id}/content/hls/{filename}")
+def stream_library_hls_file(
+  movie_id: str,
+  filename: str,
+  request: Request,
+  token: str | None = None,
+) -> Response:
+  """Serve a library title's HLS playlist or segment.
+
+  Playlists are re-served with every child URI rewritten to this authenticated
+  endpoint (embedding the session ``token``), so hls.js / native HLS players
+  fetch segments through short-lived presigned R2 URLs without leaking the raw
+  library video.
+  """
+  # Authenticate exactly like the main /content/stream endpoint: Bearer header
+  # or the trusted in-app ``token`` query fallback.
+  session_token = token or _extract_auth_token(request)
+  if session_token:
+    session = session_auth.get_session(session_token)
+    if session is None or session.status != "active":
+      raise HTTPException(status_code=401, detail="Your session has expired. Please sign in again.")
+  else:
+    raise HTTPException(status_code=401, detail="Sign in is required.")
+
+  safe_name = Path(filename).name
+  if not safe_name or safe_name != filename:
+    raise HTTPException(status_code=400, detail="Invalid HLS file name.")
+
+  key = f"{hls_lib.library_hls_prefix(movie_id)}{safe_name}"
+  if not media_object_exists(key):
+    raise HTTPException(status_code=404, detail="HLS file not found.")
+
+  if safe_name.endswith(".m3u8"):
+    data = download_media_object(key)
+    if data is None:
+      raise HTTPException(status_code=404, detail="HLS playlist not found.")
+    manifest_text = data.decode("utf-8", errors="replace")
+    rewritten = hls_lib.rewrite_hls_manifest(manifest_text, movie_id, str(request.base_url), session_token)
+    return Response(
+      content=rewritten,
+      media_type="application/vnd.apple.mpegurl",
+      headers={"Cache-Control": "no-cache"},
+    )
+
+  # Segment: redirect straight to R2 (presigned, public bucket URL, or proxied bytes).
+  segment_url = media_download_url(key)
+  if segment_url and segment_url.startswith("http"):
+    return RedirectResponse(url=segment_url, status_code=307)
+  segment_data = download_media_object(key)
+  if segment_data is None:
+    raise HTTPException(status_code=404, detail="HLS segment not found.")
+  return StreamingResponse(
+    iter([segment_data]),
+    media_type="video/mp2t",
+    headers={"Cache-Control": "no-cache"},
+  )
 
 
 @router.get("/movies/{movie_id}/delivery/status", response_model=DeliveryStatusResponse)

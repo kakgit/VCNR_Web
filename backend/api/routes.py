@@ -4130,7 +4130,6 @@ def stream_movie_content(
   movie_id: str,
   request: Request,
   db: Session | None = Depends(get_db),
-  current_user: dict[str, str] = Depends(get_current_user),
   token: str | None = None,
 ) -> StreamingResponse:
   """Stream a library title's content.
@@ -4146,14 +4145,18 @@ def stream_movie_content(
   accepted as a fallback for the Bearer header (and embedded into the rewritten
   HLS segment URIs).
   """
-  if token:
-    # Trusted in-app player fallback: validate the query token exactly like the
-    # Authorization header path does (same session store, same expiry rules).
-    session = session_auth.get_session(token)
-    if session is not None and session.status == "active":
-      current_user = session.to_user()
-    else:
-      raise HTTPException(status_code=401, detail="Your session has expired. Please sign in again.")
+  # Authenticate the same way the HLS segment endpoint does: Bearer header (for
+  # the HTTP API / browser players) or the trusted in-app ``token`` query fallback
+  # (for expo-video / native players that cannot set request headers).
+  session_token = token or _extract_auth_token(request)
+  if not session_token:
+    raise HTTPException(status_code=401, detail="Sign in is required.")
+  session = session_auth.get_session(session_token)
+  if session is None:
+    raise HTTPException(status_code=401, detail="Your session has expired. Please sign in again.")
+  if session.status != "active":
+    raise HTTPException(status_code=403, detail="This account is not active.")
+  current_user = session.to_user()
   viewer_id = current_user["id"]
   movie_items = persistence.list_movies(db, include_archived=True, viewer_user_id=viewer_id) if db else demo_store.list_movies(include_archived=True, viewer_user_id=viewer_id)
   movie = next((item for item in movie_items if item["id"] == movie_id), None)

@@ -58,7 +58,6 @@ from backend.core.storage import (
   download_media_object,
   list_media_keys,
   media_content_type,
-  media_download_url,
   media_object_exists,
   media_object_key,
   media_public_url,
@@ -67,6 +66,7 @@ from backend.core.storage import (
   r2_enabled,
   upload_media_object,
   upload_media_object_stream,
+  verified_media_download_url,
 )
 from backend.core import hls as hls_lib
 from backend.core.time_utils import app_now, is_app_time_reached, parse_app_datetime
@@ -4196,8 +4196,12 @@ def stream_movie_content(
       object_key = found
       source_ext = Path(found).suffix.lower()
 
-  # Prefer a presigned/public URL so the browser streams directly from R2.
-  download_url = media_download_url(object_key)
+  # Prefer a public URL (verified to actually serve the object) or a presigned
+  # GET so the browser/player streams directly from R2. A stale public base
+  # (bucket public read disabled) must never reach the player — it answers
+  # Cloudflare's "Is this your bucket?" 404 page and the player stalls at
+  # 00:00, so verified_media_download_url falls back to a presigned URL.
+  download_url = verified_media_download_url(object_key)
   if download_url and download_url.startswith("http"):
     from fastapi.responses import RedirectResponse
     return RedirectResponse(url=download_url, status_code=307)
@@ -4272,8 +4276,9 @@ def stream_library_hls_file(
       headers={"Cache-Control": "no-cache"},
     )
 
-  # Segment: redirect straight to R2 (presigned, public bucket URL, or proxied bytes).
-  segment_url = media_download_url(key)
+  # Segment: redirect to R2 through a verified URL (public HEAD-checked first,
+  # then presigned GET), or proxy the bytes when neither URL is available.
+  segment_url = verified_media_download_url(key)
   if segment_url and segment_url.startswith("http"):
     return RedirectResponse(url=segment_url, status_code=307)
   segment_data = download_media_object(key)

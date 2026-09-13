@@ -497,4 +497,33 @@ def media_download_url(key: str) -> str | None:
   return presign_media_download(key)
 
 
-Any  # noqa: F401 (kept for forward-compat type annotations)
+def _public_url_serves_object(url: str, timeout_seconds: float = 4.0) -> bool:
+  """HEAD-check a public media URL before handing it to a player or redirect.
+
+  A configured public base whose bucket read is disabled answers Cloudflare's
+  "Is this your bucket?" HTTP 404 page — a dead link that video players cannot
+  recover from (the stream stalls at 00:00). Callers must fall back to a
+  presigned URL when this check fails.
+  """
+  try:
+    import urllib.request
+
+    request = urllib.request.Request(url, method="HEAD")
+    with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+      return 200 <= int(response.status or 0) < 300
+  except Exception:
+    return False
+
+
+def verified_media_download_url(key: str, expires_seconds: int = 21600) -> str | None:
+  """Return a media URL that is verified to serve the object right now.
+
+  Prefers the configured public bucket URL but only after HEAD-verifying it;
+  when the public URL is unconfigured or dead, falls back to a short-lived
+  presigned GET that is signed on demand and works even when the bucket is
+  not public.
+  """
+  public_url = media_public_url(key)
+  if public_url and _public_url_serves_object(public_url):
+    return public_url
+  return presign_media_download(key, expires_seconds=expires_seconds)

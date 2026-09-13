@@ -137,11 +137,33 @@ def _probe_resolution(ffmpeg: str, path: str) -> tuple[int, int]:
   except Exception:
     logger.exception("ffmpeg probe failed for %s", path)
   return 0, 0
+def _even_target_dimensions(
+  width: int, height: int, max_width: int, max_height: int
+) -> tuple[int, int] | None:
+  """Compute an even-dimensioned fit-inside-box target size for libx264.
+
+  scale's ``force_divisible_by`` option must NOT be used: the statically
+  bundled imageio-ffmpeg binary (v4.2.2, the same one Railway runs) does not
+  know it and every build dies with
+  "Error initializing filter 'scale' ... Option not found".
+  """
+  if not width or not height:
+    return None
+  scale_factor = min(max_width / width, max_height / height, 1.0)
+  out_w = max(2, int(round(width * scale_factor)))
+  out_h = max(2, int(round(height * scale_factor)))
+  out_w -= out_w % 2
+  out_h -= out_h % 2
+  return out_w, out_h
+
+
 def _build_rendition(
   ffmpeg: str,
   source_path: str,
   out_dir: str,
   rendition: dict,
+  source_width: int = 0,
+  source_height: int = 0,
 ) -> bool:
   """Transcode one HLS rendition: h264 + aac, 6-second .ts segments, VOD playlist."""
   label = rendition["label"]
@@ -149,19 +171,25 @@ def _build_rendition(
   segment_pattern = Path(out_dir) / f"seg_{label}_%05d.ts"
   max_w = rendition["max_width"]
   max_h = rendition["max_height"]
+  # Even output dimensions are mandatory for libx264/yuv420p (odd widths abort
+  # the encode). When the probe succeeded, compute the exact target size in
+  # Python; only when it failed, fall back to a filter chain that old bundled
+  # ffmpeg binaries actually support.
+  target = _even_target_dimensions(source_width, source_height, max_w, max_h)
+  if target:
+    video_filter = f"scale={target[0]}:{target[1]}"
+  else:
+    video_filter = (
+      f"scale={max_w}:{max_h}:force_original_aspect_ratio=decrease,"
+      "pad=ceil(iw/2)*2:ceil(ih/2)*2"
+    )
   cmd = [
     ffmpeg, "-y", "-nostdin", "-loglevel", "error", "-i", source_path,
     "-preset", "veryfast",
     "-c:v", "libx264",
     "-profile:v", "main",
     "-pix_fmt", "yuv420p",
-    # force_divisible_by=2 keeps output dimensions even — libx264/yuv420p
-    # cannot encode odd widths (e.g. 853x480 from 16:9 scaling) and aborts.
-    "-vf",
-    (
-      f"scale={max_w}:{max_h}:force_original_aspect_ratio=decrease"
-      ":force_divisible_by=2"
-    ),
+    "-vf", video_filter,
     "-c:a", "aac", "-ac", "2", "-b:a", "96k",
     "-b:v", rendition["vbr"],
     "-movflags", "+faststart",
@@ -244,7 +272,7 @@ def build_library_hls(movie_id: str) -> bool:
           rendition["max_width"], rendition["max_height"] = rendition["max_height"], rendition["max_width"]
 
       for rendition in active:
-        if not _build_rendition(ffmpeg, str(source_path), tmp_dir, rendition):
+        if not _build_rendition(ffmpeg, str(source_path), tmp_dir, rendition, width, height):
           detail = f"HLS rendition {rendition['label']} failed to build (see server logs for the ffmpeg error)."
           logger.error("build_library_hls(%s): %s", movie_id, detail)
           _write_hls_status(movie_id, "failed", detail)

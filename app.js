@@ -5383,6 +5383,7 @@ async function refreshAdminLibraryContentHlsStatus() {
 
   const sourceExtension = String(payload?.source_extension || "").trim();
   const status = String(payload?.status || "none");
+  const message = String(payload?.message || "").trim();
   if (status === "none" || !sourceExtension) {
     return;
   }
@@ -5402,14 +5403,29 @@ async function refreshAdminLibraryContentHlsStatus() {
   }
 
   const badge = document.createElement("span");
-  badge.style.color = "#d97706";
   badge.style.fontWeight = "600";
+
+  if (status === "failed") {
+    badge.style.color = "#dc2626";
+    badge.textContent = "HLS streaming: Failed";
+    const detail = document.createElement("span");
+    detail.textContent = ` ${message || "Segmentation failed. Click below to retry."}`;
+    hlsEl.appendChild(badge);
+    hlsEl.appendChild(detail);
+    hlsEl.appendChild(buildAdminLibraryHlsRetryButton(movieId));
+    return;
+  }
+
+  badge.style.color = "#d97706";
   badge.textContent = "HLS streaming: Processing…";
   const detail = document.createElement("span");
   detail.textContent = " Segments are being generated in the background (this can take a few minutes for large files).";
   hlsEl.appendChild(badge);
   hlsEl.appendChild(detail);
+  hlsEl.appendChild(buildAdminLibraryHlsRetryButton(movieId));
+}
 
+function buildAdminLibraryHlsRetryButton(movieId) {
   const retryButton = document.createElement("button");
   retryButton.type = "button";
   retryButton.className = "ghost-btn";
@@ -5431,7 +5447,7 @@ async function refreshAdminLibraryContentHlsStatus() {
     }
     refreshAdminLibraryContentHlsStatus();
   });
-  hlsEl.appendChild(retryButton);
+  return retryButton;
 }
 
 async function deleteAdminLibraryContentRemote(movieId) {

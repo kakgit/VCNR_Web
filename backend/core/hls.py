@@ -13,10 +13,13 @@ presigned URLs, so:
 
 from __future__ import annotations
 
+import io
+import json
 import logging
 import re
 import shutil
 import subprocess
+import time
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from urllib.parse import quote
@@ -54,6 +57,41 @@ def library_hls_manifest_key(movie_id: str) -> str:
 def library_hls_ready(movie_id: str) -> bool:
   """True when the movie's HLS master playlist exists in R2."""
   return media_object_exists(library_hls_manifest_key(movie_id))
+
+
+def _hls_status_key(movie_id: str) -> str:
+  return f"{library_hls_prefix(movie_id)}.hls-status.json"
+
+
+def _write_hls_status(movie_id: str, state: str, detail: str = "") -> None:
+  """Persist a machine-readable HLS job state into R2 so the admin UI can tell
+  ``running`` from ``failed`` instead of showing a stuck spinner."""
+  payload = json.dumps(
+    {"state": state, "detail": detail, "updated_at": int(time.time())},
+    ensure_ascii=False,
+  ).encode("utf-8")
+  try:
+    upload_media_object_stream(_hls_status_key(movie_id), io.BytesIO(payload), "application/json")
+  except Exception:
+    logger.exception("HLS status write failed for %s", movie_id)
+
+
+def library_hls_status(movie_id: str) -> dict:
+  """Return the last HLS job state: ``ready`` (master exists), ``running``,
+  ``failed`` (+ detail), or ``pending`` (no job has started yet)."""
+  if library_hls_ready(movie_id):
+    return {"state": "ready", "detail": ""}
+  data = download_media_object(_hls_status_key(movie_id))
+  if not data:
+    return {"state": "pending", "detail": ""}
+  try:
+    parsed = json.loads(data.decode("utf-8", errors="replace"))
+    return {
+      "state": str(parsed.get("state") or "pending"),
+      "detail": str(parsed.get("detail") or ""),
+    }
+  except Exception:
+    return {"state": "pending", "detail": ""}
 
 
 def _ffmpeg_exe() -> str | None:
@@ -112,16 +150,23 @@ def _build_rendition(
   max_w = rendition["max_width"]
   max_h = rendition["max_height"]
   cmd = [
-    ffmpeg, "-y", "-i", source_path,
+    ffmpeg, "-y", "-nostdin", "-loglevel", "error", "-i", source_path,
     "-preset", "veryfast",
     "-c:v", "libx264",
     "-profile:v", "main",
     "-pix_fmt", "yuv420p",
-    "-vf", f"scale={max_w}:{max_h}:force_original_aspect_ratio=decrease",
+    # force_divisible_by=2 keeps output dimensions even — libx264/yuv420p
+    # cannot encode odd widths (e.g. 853x480 from 16:9 scaling) and aborts.
+    "-vf",
+    (
+      f"scale={max_w}:{max_h}:force_original_aspect_ratio=decrease"
+      ":force_divisible_by=2"
+    ),
     "-c:a", "aac", "-ac", "2", "-b:a", "96k",
     "-b:v", rendition["vbr"],
     "-movflags", "+faststart",
     "-hls_time", str(SEGMENT_SECONDS),
+    "-force_key_frames", f"expr:gte(t,n_forced*{SEGMENT_SECONDS})",
     "-hls_list_size", "0",
     "-hls_segment_filename", str(segment_pattern),
     "-hls_playlist_type", "vod",
@@ -142,7 +187,9 @@ def build_library_hls(movie_id: str) -> bool:
 
   Safe to run as a background task after the raw upload completes.  Returns
   True when the full HLS package (master + variant playlists + segments) is
-  present in R2.
+  present in R2.  A machine-readable job state (``running`` / ``ready`` /
+  ``failed``) is persisted next to the segments so the admin UI can surface
+  failures instead of showing a stuck spinner.
   """
   try:
     source_key = next(
@@ -154,17 +201,25 @@ def build_library_hls(movie_id: str) -> bool:
       None,
     )
     if source_key is None:
-      logger.warning("build_library_hls: no raw library source found for %s", movie_id)
+      detail = "No raw library video found in storage."
+      logger.warning("build_library_hls(%s): %s", movie_id, detail)
+      _write_hls_status(movie_id, "failed", detail)
       return False
 
     ffmpeg = _ffmpeg_exe()
     if not ffmpeg:
-      logger.warning("build_library_hls: ffmpeg is not available; skipping HLS for %s", movie_id)
+      detail = "ffmpeg binary is not available on the server."
+      logger.warning("build_library_hls(%s): %s", movie_id, detail)
+      _write_hls_status(movie_id, "failed", detail)
       return False
+
+    _write_hls_status(movie_id, "running")
 
     data = download_media_object(source_key)
     if not data:
-      logger.warning("build_library_hls: could not download raw source for %s", movie_id)
+      detail = "Could not download the raw video from storage."
+      logger.warning("build_library_hls(%s): %s", movie_id, detail)
+      _write_hls_status(movie_id, "failed", detail)
       return False
 
     with TemporaryDirectory() as tmp_dir:
@@ -190,7 +245,9 @@ def build_library_hls(movie_id: str) -> bool:
 
       for rendition in active:
         if not _build_rendition(ffmpeg, str(source_path), tmp_dir, rendition):
-          logger.error("build_library_hls: rendition %s failed for %s", rendition["label"], movie_id)
+          detail = f"HLS rendition {rendition['label']} failed to build (see server logs for the ffmpeg error)."
+          logger.error("build_library_hls(%s): %s", movie_id, detail)
+          _write_hls_status(movie_id, "failed", detail)
           return False
 
       master_lines = ["#EXTM3U", "#EXT-X-VERSION:3"]
@@ -209,9 +266,18 @@ def build_library_hls(movie_id: str) -> bool:
         if file_path.is_file() and file_path.suffix in {".ts", ".m3u8"}:
           _upload_library_hls_file(tmp_dir, movie_id, file_path.name)
 
-      return library_hls_ready(movie_id)
-  except Exception:
+      ready = library_hls_ready(movie_id)
+      if ready:
+        _write_hls_status(movie_id, "ready")
+      else:
+        detail = "HLS upload to storage did not complete."
+        logger.error("build_library_hls(%s): %s", movie_id, detail)
+        _write_hls_status(movie_id, "failed", detail)
+      return ready
+  except Exception as error:
+    detail = f"{type(error).__name__}: {error}"
     logger.exception("build_library_hls failed for %s", movie_id)
+    _write_hls_status(movie_id, "failed", detail)
     return False
 
 
@@ -245,6 +311,7 @@ __all__ = [
   "library_hls_prefix",
   "library_hls_manifest_key",
   "library_hls_ready",
+  "library_hls_status",
   "build_library_hls",
   "delete_library_hls",
   "rewrite_hls_manifest",

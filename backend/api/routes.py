@@ -3908,10 +3908,23 @@ def admin_library_content_status(
   movie = _get_movie_or_404(db, movie_id)
   source_ext = str(movie.get("source_extension") or "").strip().lower()
   if source_ext not in {".mp4", ".mkv"}:
-    return {"status": "none", "source_extension": None}
+    return {"status": "none", "source_extension": None, "message": ""}
 
-  hls_ready = hls_lib.library_hls_ready(movie_id)
-  return {"status": "ready" if hls_ready else "processing", "source_extension": source_ext}
+  hls_state = hls_lib.library_hls_status(movie_id)
+  state = hls_state.get("state")
+  if state == "ready":
+    return {"status": "ready", "source_extension": source_ext, "message": ""}
+  if state == "failed":
+    return {
+      "status": "failed",
+      "source_extension": source_ext,
+      "message": hls_state.get("detail") or "HLS generation failed on the server.",
+    }
+  return {
+    "status": "processing",
+    "source_extension": source_ext,
+    "message": hls_state.get("detail") or "HLS segments are being generated in the background.",
+  }
 
 
 @router.post("/admin/movies/{movie_id}/assets/library-content/hls/build")

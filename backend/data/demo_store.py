@@ -848,6 +848,21 @@ def set_movie_source_extension(movie_id: str, source_extension: str | None) -> d
   return None
 
 
+def register_movie_asset_change(movie_id: str, kind: str) -> dict | None:
+  """Record an asset change so the admin UI refreshes the content status.
+
+  Demo-store variant: simply marks the movie as pending approval and returns
+  the decorated record. No change-request/pending-snapshot machinery is used.
+  """
+  for movie in MOVIES:
+    if movie["id"] == movie_id:
+      movie["approval_status"] = "pending_super_admin_approval"
+      if kind == "content":
+        movie["content_status"] = "uploaded"
+      return _decorate_movie(movie, viewer_wish_kind=None)
+  return None
+
+
 def list_creators() -> list[dict]:
   return [
     {"id": user["id"], "name": user["name"], "email": user["email"]}

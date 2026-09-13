@@ -318,6 +318,49 @@ def upload_media_object(key: str, data: bytes, content_type: str | None = None) 
     return False
 
 
+def upload_media_object_stream(
+  key: str,
+  fileobj: Any,
+  content_type: str | None = None,
+  progress_callback=None,
+) -> bool:
+  """Stream a media object to R2 using boto3's managed multipart transfer.
+
+  Large files are automatically split into parallel multipart upload parts
+  (8 MiB chunks) and streamed directly from ``fileobj``, so the entire object
+  is never buffered in server memory.  ``progress_callback`` (optional)
+  receives the cumulative number of bytes transferred after every part upload.
+
+  Returns True when R2 handled the upload and False when R2 is not configured
+  or the transfer failed.
+  """
+  if not _r2_enabled():
+    return False
+  if content_type is None:
+    content_type = media_content_type(key)
+  try:
+    from boto3.s3.transfer import TransferConfig
+
+    client = _get_r2_client()
+    transfer = TransferConfig(
+      multipart_threshold=8 * 1024 * 1024,
+      multipart_chunksize=8 * 1024 * 1024,
+      max_concurrency=4,
+    )
+    client.upload_fileobj(
+      fileobj,
+      get_settings().r2_bucket_name,
+      key,
+      Config=transfer,
+      ExtraArgs={"ContentType": content_type},
+      Callback=progress_callback,
+    )
+    return True
+  except Exception:
+    logger.exception("R2 streamed media upload failed for %s", key)
+    return False
+
+
 def download_media_object(key: str) -> bytes | None:
   """Download a media object's bytes from R2, or None if unavailable."""
   if not _r2_enabled():

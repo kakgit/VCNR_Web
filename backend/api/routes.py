@@ -66,6 +66,7 @@ from backend.core.storage import (
   presign_media_upload,
   r2_enabled,
   upload_media_object,
+  upload_media_object_stream,
 )
 from backend.core.time_utils import app_now, is_app_time_reached, parse_app_datetime
 from backend import persistence
@@ -3803,10 +3804,25 @@ async def admin_upload_library_content(
   else:
     demo_store.set_movie_source_extension(movie_id, source_ext)
 
-  # Upload the raw MP4/MKV to Cloudflare R2 (not local Railway storage).
+  # Stream the raw MP4/MKV to Cloudflare R2 (not local Railway storage).
+  # Large files are automatically split into parallel multipart parts, so the
+  # entire file is never buffered in server memory.
   object_key = media_object_key(movie_id, "content", f"main{source_ext}")
-  data = await file.read()
-  upload_media_object(object_key, data, media_content_type(file.filename or ""))
+  try:
+    file.file.seek(0)
+  except (AttributeError, OSError):
+    pass
+  if r2_enabled():
+    uploaded = upload_media_object_stream(
+      object_key,
+      file.file,
+      media_content_type(file.filename or ""),
+    )
+    if not uploaded:
+      raise HTTPException(
+        status_code=502,
+        detail="Library video could not be uploaded to the R2 server right now. Please try again.",
+      )
 
   # Bump the asset-change tracker so the admin UI refreshes the content status.
   matched = persistence.register_movie_asset_change(db, movie_id, "content") if db else demo_store.register_movie_asset_change(movie_id, "content")

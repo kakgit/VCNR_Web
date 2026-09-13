@@ -317,6 +317,7 @@ const adminLibraryContentUploadForm = document.getElementById("adminLibraryConte
 const adminLibraryContentMovieId = document.getElementById("adminLibraryContentMovieId");
 const adminLibraryContentFile = document.getElementById("adminLibraryContentFile");
 const adminLibraryContentFileName = document.getElementById("adminLibraryContentFileName");
+const adminLibraryContentStatus = document.getElementById("adminLibraryContentStatus");
 const adminContentMovieId = document.getElementById("adminContentMovieId");
 const adminContentFiles = document.getElementById("adminContentFiles");
 const adminContentPassword = document.getElementById("adminContentPassword");
@@ -5251,6 +5252,7 @@ function openAdminLibraryContentUploadModal(movie) {
   if (adminHelper) {
     adminHelper.textContent = `Ready to upload a library video for \"${escapeHtml(selectedMovie?.title || movie.title)}\".`;
   }
+  loadAdminLibraryContentStatus();
 }
 
 function closeAdminLibraryContentUploadModal() {
@@ -5271,9 +5273,72 @@ function closeAdminLibraryContentUploadModal() {
     adminLibraryContentUploadPreview.classList.add("hidden");
     adminLibraryContentUploadPreview.textContent = "";
   }
+  if (adminLibraryContentStatus) {
+    adminLibraryContentStatus.classList.add("hidden");
+    adminLibraryContentStatus.innerHTML = "";
+  }
   if (adminHelper) {
     adminHelper.textContent = "";
   }
+}
+
+function loadAdminLibraryContentStatus() {
+  const statusEl = adminLibraryContentStatus;
+  if (!statusEl || !adminLibraryContentMovieId) {
+    return;
+  }
+  const movieId = adminLibraryContentMovieId.value.trim();
+  const movie = adminMovies.find((item) => item.id === movieId);
+  const sourceExt = String(movie?.sourceExtension || movie?.source_extension || "").trim().toLowerCase();
+  statusEl.classList.add("hidden");
+  statusEl.innerHTML = "";
+
+  if (!sourceExt) {
+    return;
+  }
+
+  const fileName = `main${sourceExt}`;
+  statusEl.classList.remove("hidden");
+  statusEl.classList.add("department-status");
+
+  const label = document.createElement("span");
+  label.textContent = `Existing library video: ${fileName}`;
+
+  const deleteButton = document.createElement("button");
+  deleteButton.type = "button";
+  deleteButton.className = "icon-btn danger";
+  deleteButton.title = "Delete library video";
+  deleteButton.setAttribute("aria-label", "Delete library video");
+  deleteButton.textContent = "\u{1F5D1}";
+
+  deleteButton.addEventListener("click", async () => {
+    if (!window.confirm(`Delete "${fileName}" from the R2 server?`)) {
+      return;
+    }
+    statusEl.textContent = "Deleting...";
+    try {
+      const response = await deleteAdminLibraryContentRemote(movieId);
+      adminHelper.className = "admin-helper success";
+      adminHelper.textContent = response.message;
+      loadAdminLibraryContentStatus();
+    } catch (error) {
+      adminHelper.className = "admin-helper danger";
+      adminHelper.textContent = error.message || "Failed to delete the library video.";
+      loadAdminLibraryContentStatus();
+    }
+  });
+
+  statusEl.appendChild(label);
+  statusEl.appendChild(deleteButton);
+}
+
+async function deleteAdminLibraryContentRemote(movieId) {
+  const response = await apiDeleteRequest(`/admin/movies/${encodeURIComponent(movieId)}/assets/library-content`);
+  const updatedMovie = normalizeMovie(response.item);
+  updateMovieCollections(updatedMovie);
+  renderAdminMovieList();
+  renderAdminArchiveMovieList();
+  return response;
 }
 
 window.openAdminContentUploadForMovie = function openAdminContentUploadForMovie(movieId) {
@@ -8207,6 +8272,12 @@ document.querySelectorAll("[data-admin-music-close]").forEach((button) => {
 document.querySelectorAll("[data-admin-content-close]").forEach((button) => {
   button.addEventListener("click", () => {
     closeAdminContentQualityUploadModal();
+  });
+});
+
+document.querySelectorAll("[data-admin-library-content-close]").forEach((button) => {
+  button.addEventListener("click", () => {
+    closeAdminLibraryContentUploadModal();
   });
 });
 

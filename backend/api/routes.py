@@ -3822,6 +3822,41 @@ async def admin_upload_library_content(
   )
 
 
+@router.delete("/admin/movies/{movie_id}/assets/library-content", response_model=AdminMovieActionResponse)
+def admin_delete_library_content(
+  movie_id: str,
+  db: Session | None = Depends(get_db),
+  _: dict[str, str] = Depends(require_admin),
+) -> AdminMovieActionResponse:
+  """Delete a library title's uploaded .mp4/.mkv video from Cloudflare R2 and clear the record."""
+  movie = _get_movie_or_404(db, movie_id)
+  source_ext = str(movie.get("source_extension") or "").strip().lower()
+
+  if source_ext in {".mp4", ".mkv"}:
+    delete_media_object(media_object_key(movie_id, "content", f"main{source_ext}"))
+
+  # Defensive cleanup: also remove any other library video object under the content prefix.
+  if r2_enabled():
+    for key in list_media_keys(f"{movie_id}/content/"):
+      if key.lower().endswith((".mp4", ".mkv")):
+        delete_media_object(key)
+
+  # Clear the source extension so the stream endpoint stops serving the deleted file.
+  if db:
+    movie_record = persistence.get_movie_by_id(db, movie_id)
+    if movie_record is not None:
+      movie_record.source_extension = None
+      persistence.save_movie(db, movie_record)
+  else:
+    demo_store.set_movie_source_extension(movie_id, None)
+
+  matched = _get_movie_or_404(db, movie_id)
+  return AdminMovieActionResponse(
+    item=_sanitize_movie_payload(matched),
+    message=f'Library video removed for "{movie.get("title", "")}".',
+  )
+
+
 @router.post("/admin/movies/{movie_id}/assets/content-package/presign")
 def admin_presign_movie_converted_content_file(
   movie_id: str,

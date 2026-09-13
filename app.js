@@ -318,7 +318,9 @@ const adminLibraryContentMovieId = document.getElementById("adminLibraryContentM
 const adminLibraryContentFile = document.getElementById("adminLibraryContentFile");
 const adminLibraryContentFileName = document.getElementById("adminLibraryContentFileName");
 const adminLibraryContentStatus = document.getElementById("adminLibraryContentStatus");
+const adminLibraryContentHlsStatus = document.getElementById("adminLibraryContentHlsStatus");
 const adminContentMovieId = document.getElementById("adminContentMovieId");
+let adminLibraryHlsPollTimer = null;
 const adminContentFiles = document.getElementById("adminContentFiles");
 const adminContentPassword = document.getElementById("adminContentPassword");
 const adminContentGeneratePasswordButton = document.getElementById("adminContentGeneratePasswordButton");
@@ -5253,11 +5255,27 @@ function openAdminLibraryContentUploadModal(movie) {
     adminHelper.textContent = `Ready to upload a library video for \"${escapeHtml(selectedMovie?.title || movie.title)}\".`;
   }
   loadAdminLibraryContentStatus();
+
+  // Poll the HLS segmentation status while the modal stays open.
+  if (adminLibraryHlsPollTimer) {
+    window.clearInterval(adminLibraryHlsPollTimer);
+  }
+  adminLibraryHlsPollTimer = window.setInterval(() => {
+    if (!adminLibraryContentUploadModal || adminLibraryContentUploadModal.classList.contains("hidden")) {
+      return;
+    }
+    refreshAdminLibraryContentHlsStatus();
+  }, 5000);
 }
 
 function closeAdminLibraryContentUploadModal() {
   if (!adminLibraryContentUploadModal || !adminLibraryContentMovieId) {
     return;
+  }
+
+  if (adminLibraryHlsPollTimer) {
+    window.clearInterval(adminLibraryHlsPollTimer);
+    adminLibraryHlsPollTimer = null;
   }
 
   adminLibraryContentUploadModal.classList.add("hidden");
@@ -5276,6 +5294,10 @@ function closeAdminLibraryContentUploadModal() {
   if (adminLibraryContentStatus) {
     adminLibraryContentStatus.classList.add("hidden");
     adminLibraryContentStatus.innerHTML = "";
+  }
+  if (adminLibraryContentHlsStatus) {
+    adminLibraryContentHlsStatus.classList.add("hidden");
+    adminLibraryContentHlsStatus.innerHTML = "";
   }
   if (adminHelper) {
     adminHelper.textContent = "";
@@ -5330,6 +5352,86 @@ function loadAdminLibraryContentStatus() {
 
   statusEl.appendChild(label);
   statusEl.appendChild(deleteButton);
+  refreshAdminLibraryContentHlsStatus();
+}
+
+async function refreshAdminLibraryContentHlsStatus() {
+  const hlsEl = adminLibraryContentHlsStatus;
+  const movieIdEl = adminLibraryContentMovieId;
+  if (!hlsEl || !movieIdEl) {
+    return;
+  }
+  const movieId = movieIdEl.value.trim();
+  if (!movieId) {
+    return;
+  }
+
+  let payload;
+  try {
+    payload = await apiRequest(`/admin/movies/${encodeURIComponent(movieId)}/assets/library-content/status`);
+  } catch (error) {
+    hlsEl.classList.add("hidden");
+    hlsEl.innerHTML = "";
+    return;
+  }
+
+  hlsEl.classList.add("hidden");
+  hlsEl.innerHTML = "";
+  if (!hlsEl.classList.contains("department-status")) {
+    hlsEl.classList.add("department-status");
+  }
+
+  const sourceExtension = String(payload?.source_extension || "").trim();
+  const status = String(payload?.status || "none");
+  if (status === "none" || !sourceExtension) {
+    return;
+  }
+
+  hlsEl.classList.remove("hidden");
+
+  if (status === "ready") {
+    const badge = document.createElement("span");
+    badge.style.color = "#16a34a";
+    badge.style.fontWeight = "600";
+    badge.textContent = "HLS streaming: Ready";
+    const detail = document.createElement("span");
+    detail.textContent = " Adaptive 720p / 480p — mobile viewers stream small segments.";
+    hlsEl.appendChild(badge);
+    hlsEl.appendChild(detail);
+    return;
+  }
+
+  const badge = document.createElement("span");
+  badge.style.color = "#d97706";
+  badge.style.fontWeight = "600";
+  badge.textContent = "HLS streaming: Processing…";
+  const detail = document.createElement("span");
+  detail.textContent = " Segments are being generated in the background (this can take a few minutes for large files).";
+  hlsEl.appendChild(badge);
+  hlsEl.appendChild(detail);
+
+  const retryButton = document.createElement("button");
+  retryButton.type = "button";
+  retryButton.className = "ghost-btn";
+  retryButton.textContent = "Generate HLS now";
+  retryButton.style.marginLeft = "8px";
+  retryButton.addEventListener("click", async () => {
+    retryButton.disabled = true;
+    retryButton.textContent = "Starting…";
+    try {
+      await apiRequest(`/admin/movies/${encodeURIComponent(movieId)}/assets/library-content/hls/build`, { method: "POST" });
+      adminHelper.className = "admin-helper success";
+      adminHelper.textContent = "HLS generation started in the background.";
+    } catch (error) {
+      adminHelper.className = "admin-helper danger";
+      adminHelper.textContent = error.message || "Failed to start HLS generation.";
+    } finally {
+      retryButton.disabled = false;
+      retryButton.textContent = "Generate HLS now";
+    }
+    refreshAdminLibraryContentHlsStatus();
+  });
+  hlsEl.appendChild(retryButton);
 }
 
 async function deleteAdminLibraryContentRemote(movieId) {
@@ -9255,7 +9357,10 @@ if (adminLibraryContentUploadForm) {
       }
       adminHelper.textContent = response.message;
       adminHelper.className = "admin-helper success";
-      closeAdminLibraryContentUploadModal();
+      if (adminLibraryContentUploadPreview) {
+        adminLibraryContentUploadPreview.textContent = "Upload complete. HLS segments are being generated in the background — this screen updates automatically.";
+      }
+      loadAdminLibraryContentStatus();
     } catch (error) {
       adminHelper.className = "admin-helper danger";
       adminHelper.textContent = error.message || "Library content upload failed.";

@@ -3892,6 +3892,44 @@ def admin_delete_library_content(
   )
 
 
+@router.get("/admin/movies/{movie_id}/assets/library-content/status")
+def admin_library_content_status(
+  movie_id: str,
+  db: Session | None = Depends(get_db),
+  _: dict[str, str] = Depends(require_admin),
+) -> dict:
+  """Report the library-content state for the Upload Library Video modal.
+
+  ``status`` is one of:
+    * ``none``       - no library video uploaded yet,
+    * ``ready``      - raw file uploaded AND adaptive HLS built,
+    * ``processing`` - raw file uploaded, HLS segmentation still running/failed.
+  """
+  movie = _get_movie_or_404(db, movie_id)
+  source_ext = str(movie.get("source_extension") or "").strip().lower()
+  if source_ext not in {".mp4", ".mkv"}:
+    return {"status": "none", "source_extension": None}
+
+  hls_ready = hls_lib.library_hls_ready(movie_id)
+  return {"status": "ready" if hls_ready else "processing", "source_extension": source_ext}
+
+
+@router.post("/admin/movies/{movie_id}/assets/library-content/hls/build")
+def admin_library_content_hls_build(
+  movie_id: str,
+  db: Session | None = Depends(get_db),
+  _: dict[str, str] = Depends(require_admin),
+  background_tasks: BackgroundTasks = BackgroundTasks(),
+) -> dict:
+  """(Re)start the background HLS segmentation job for a library title."""
+  movie = _get_movie_or_404(db, movie_id)
+  source_ext = str(movie.get("source_extension") or "").strip().lower()
+  if source_ext not in {".mp4", ".mkv"}:
+    raise HTTPException(status_code=400, detail="Upload a library video first before generating HLS.")
+  background_tasks.add_task(hls_lib.build_library_hls, movie_id)
+  return {"status": "processing", "message": "HLS generation started in the background."}
+
+
 @router.post("/admin/movies/{movie_id}/assets/content-package/presign")
 def admin_presign_movie_converted_content_file(
   movie_id: str,

@@ -277,6 +277,7 @@ def media_content_type(filename: str) -> str:
     ".webp": "image/webp",
     ".gif": "image/gif",
     ".mp4": "video/mp4",
+    ".mkv": "video/x-matroska",
     ".webm": "video/webm",
     ".m4v": "video/x-m4v",
     ".mov": "video/quicktime",

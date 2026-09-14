@@ -4163,19 +4163,10 @@ def stream_movie_content(
   if movie is None:
     raise HTTPException(status_code=404, detail="Movie not found.")
 
-  # Serve the adaptive HLS manifest when the background segmentation finished.
-  if hls_lib.library_hls_ready(movie_id):
-    manifest_data = download_media_object(hls_lib.library_hls_manifest_key(movie_id))
-    if manifest_data is not None:
-      manifest_text = manifest_data.decode("utf-8", errors="replace")
-      auth_token = token or _extract_auth_token(request) or ""
-      rewritten = hls_lib.rewrite_hls_manifest(manifest_text, movie_id, str(request.base_url), auth_token) if auth_token else manifest_text
-      return Response(
-        content=rewritten,
-        media_type="application/vnd.apple.mpegurl",
-        headers={"Cache-Control": "no-cache"},
-      )
-
+  # Prefer serving the raw .mp4/.mkv directly so viewers get a single progressive
+  # file without going through HLS. HLS (built in the background after upload) is
+  # still available as a fallback when the raw file is missing, but the default
+  # library-playback path is the simple direct file the mobile app expects.
   source_ext = str(movie.get("source_extension") or "").strip().lower()
   if source_ext not in {".mp4", ".mkv"}:
     raise HTTPException(status_code=400, detail="This title does not have a direct-play library video.")
@@ -4224,6 +4215,21 @@ def stream_movie_content(
       "Cache-Control": "no-cache",
     },
   )
+
+  # Adaptive HLS fallback when the raw file is not available but the background
+  # segmentation finished: serve the HLS master playlist whose children point at
+  # the authenticated ``/movies/{id}/content/hls/...`` endpoints.
+  if hls_lib.library_hls_ready(movie_id):
+    manifest_data = download_media_object(hls_lib.library_hls_manifest_key(movie_id))
+    if manifest_data is not None:
+      manifest_text = manifest_data.decode("utf-8", errors="replace")
+      auth_token = token or _extract_auth_token(request) or ""
+      rewritten = hls_lib.rewrite_hls_manifest(manifest_text, movie_id, str(request.base_url), auth_token) if auth_token else manifest_text
+      return Response(
+        content=rewritten,
+        media_type="application/vnd.apple.mpegurl",
+        headers={"Cache-Control": "no-cache"},
+      )
 
 
 def _stream_file_bytes(path: Path, chunk_size: int = 1024 * 1024):

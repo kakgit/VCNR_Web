@@ -15,6 +15,7 @@ from backend.core.push import (
   normalize_push_token,
   send_push_messages_async,
 )
+from backend.core.catalogue import catalogue_view, pricing_entries, title_origin
 from backend.core.storage import list_media_keys, media_public_url, r2_enabled
 from backend.core.time_utils import is_app_time_reached, parse_app_datetime
 from backend.data.demo_store import ADMIN_STATE, MOVIES, PUBLISH_QUEUE, USERS
@@ -133,6 +134,8 @@ LEGACY_DEMO_USER_EMAILS = {
 }
 
 MOVIE_RECORD_FIELDS = {
+  "catalog_origin",
+  "library_pricing_options",
   "id",
   "archived",
   "stage",
@@ -347,6 +350,10 @@ def _derive_default_online_stars(entries: list[dict] | None) -> int:
   return min(int(item["stars_required"]) for item in normalized)
 
 
+def _is_buy_now_active(movie) -> bool:
+  return bool(getattr(movie, "buy_now_enabled", False) or getattr(movie, "stage", None) == "released")
+
+
 def _load_cast_credits(raw_value: str | None) -> list[dict]:
   return _normalize_cast_credit_entries(_json_load(raw_value, []))
 
@@ -358,6 +365,8 @@ def _dump_cast_credits(entries: list[dict] | None) -> str | None:
 
 def _movie_record_payload(payload: dict) -> dict:
   normalized = {key: value for key, value in deepcopy(payload).items() if key in MOVIE_RECORD_FIELDS}
+  if "library_pricing_options" in normalized:
+    normalized["library_pricing_options"] = json.dumps(pricing_entries(normalized["library_pricing_options"]))
   if "online_pricing_options" in normalized:
     normalized["online_pricing_options"] = _dump_online_pricing_options(normalized.get("online_pricing_options"))
   return normalized
@@ -445,6 +454,8 @@ def _capture_movie_snapshot(movie: MovieRecord) -> dict:
       "id": movie.id,
       "archived": movie.archived,
       "stage": movie.stage,
+      "catalog_origin": movie.catalog_origin,
+      "library_pricing_options": pricing_entries(movie.library_pricing_options),
       "title_category": movie.title_category,
       "title": movie.title,
       "title_caption": movie.title_caption,
@@ -550,6 +561,7 @@ def _capture_movie_asset_snapshot(movie_id: str) -> dict[str, list[str]]:
 
 def _movie_snapshot_to_dict(snapshot: dict, approval_status: str = "published") -> dict:
   payload = _movie_record_payload(snapshot)
+  payload["library_pricing_options"] = pricing_entries(snapshot.get("library_pricing_options"))
   payload["cast_credits"] = _normalize_cast_credit_entries(snapshot.get("cast_credits", []))
   payload["online_pricing_options"] = _normalize_online_pricing_options(snapshot.get("online_pricing_options", []))
   payload.setdefault("id", "")
@@ -678,6 +690,8 @@ def _movie_to_dict(
     "id": movie.id,
     "archived": movie.archived,
     "stage": movie.stage,
+    "catalog_origin": movie.catalog_origin or title_origin({"stage": movie.stage}),
+    "library_pricing_options": pricing_entries(movie.library_pricing_options),
     "approval_status": approval_status,
     "approval_status_label": _approval_status_label(approval_status),
     "requires_super_admin_approval": approval_status in {"pending_admin_review", "pending_super_admin_approval", "changes_requested"},
@@ -1674,13 +1688,17 @@ def list_movies(
   query = session.query(MovieRecord)
   if not include_archived:
     query = query.filter(MovieRecord.archived.is_(False))
-  if stage:
+  if stage and (include_archived or prefer_pending):
     query = query.filter(MovieRecord.stage == stage)
   movies = query.order_by(MovieRecord.title.asc()).all()
   _sync_live_release_entitlements(session, movies)
   items = _movie_list_to_dicts(session, movies, prefer_pending=prefer_pending, viewer_user_id=viewer_user_id)
   if not include_archived:
     items = [item for item in items if _is_viewer_visible_status(item["approval_status"])]
+  if not include_archived and not prefer_pending:
+    items = [catalogue_view(item) for item in items]
+    if stage:
+      items = [item for item in items if item["stage"] == stage]
   return items
 
 
@@ -1871,6 +1889,7 @@ def create_movie(session: Session, payload: dict) -> dict:
   cast_credits = _normalize_cast_credit_entries(payload.get("cast_credits", []))
   payload = _movie_record_payload(payload)
   payload.setdefault("archived", False)
+  payload["catalog_origin"] = title_origin(payload)
   payload["pricing_snapshot"] = _current_star_price_snapshot(session)
   movie = MovieRecord(**payload)
   session.add(movie)
@@ -1898,6 +1917,7 @@ def update_movie_interest(
   user_id: str | None = None,
   wish_mode: str | None = None,
   quality_code: str | None = None,
+  ticket_count: int | None = None,
 ) -> tuple[dict, bool] | None:
   ensure_seeded(session)
   movie = session.get(MovieRecord, movie_id)
@@ -1984,7 +2004,7 @@ def update_movie_interest(
       if not movie.reserve_enabled:
         raise ValueError("Reserve Now is not active for this title yet.")
     elif kind == "buy":
-      if not movie.buy_now_enabled:
+      if not _is_buy_now_active(movie):
         raise ValueError("Buy Now is not active for this title yet.")
     else:
       raise ValueError("Unsupported title action.")
@@ -1995,9 +2015,13 @@ def update_movie_interest(
       session.add(wallet)
       session.flush()
 
-    reserve_stars = movie.stars_required_theatre if reserve_mode == "theatre" else (movie.reserve_star_price or movie.stars_required)
-    if reserve_mode == "online" and selected_quality:
+    if reserve_mode == "theatre":
+      normalized_ticket_count = max(1, min(10, int(ticket_count or 1)))
+      reserve_stars = int(movie.stars_required_theatre or movie.reserve_star_price or movie.stars_required or 0) * normalized_ticket_count
+    elif reserve_mode == "online" and selected_quality:
       reserve_stars = int(selected_quality["stars_required"])
+    else:
+      reserve_stars = int(movie.reserve_star_price or movie.stars_required or 0)
 
     if kind == "reserve" and reserve_mode == "online" and selected_quality:
       active_online_reservations = (
@@ -2375,6 +2399,18 @@ def update_movie_pricing_config(session: Session, movie_id: str, payload: dict) 
   if movie is None:
     return None
 
+  direct_prices = payload.get("library_pricing_options")
+  if direct_prices is not None:
+    if title_origin({"stage": movie.stage, "catalog_origin": movie.catalog_origin}) != "library":
+      raise ValueError("Upcoming-origin Library titles derive Disc prices from their Star prices.")
+    change_request, pending_snapshot = _prepare_movie_change_request(session, movie, status="pending_super_admin_approval")
+    movie.library_pricing_options = json.dumps(direct_prices)
+    pending_snapshot["library_pricing_options"] = direct_prices
+    _save_pending_movie_snapshot(change_request, pending_snapshot)
+    approval_status = _set_movie_approval_status(session, movie, "pending_super_admin_approval")
+    session.commit()
+    return _movie_snapshot_to_dict(pending_snapshot, approval_status)
+
   options = _normalize_online_pricing_options(payload.get("online_pricing_options", []))
   default_online_stars = _derive_default_online_stars(options)
   theatre_stars = int(payload.get("stars_required_theatre") or 3)
@@ -2428,6 +2464,10 @@ def publish_movie(session: Session, movie_id: str, release_date: str) -> dict | 
   movie.stage_label = "New Release"
   movie.release_date = release_date
   movie.countdown = f"Released on {release_date}"
+  movie.buy_now_enabled = True
+  linked_title = _get_linked_title_by_movie_id(session, movie.id)
+  if linked_title is not None:
+    linked_title.buy_now_enabled = True
   existing_request = _get_movie_change_request(session, movie.id)
   if existing_request is not None:
     session.delete(existing_request)
@@ -2683,6 +2723,72 @@ def update_user_access(session: Session, user_id: str, name: str, role: str, sta
   session.commit()
   session.refresh(user)
   return _user_to_dict(user, wallet)
+
+
+def transfer_stars(session: Session, sender_id: str, recipient_email: str, stars: int) -> dict:
+  """Share stars: deduct from the sender's wallet and credit the recipient account."""
+  ensure_seeded(session)
+  amount = int(stars)
+  if amount <= 0:
+    raise ValueError("Choose at least 1 star to share.")
+  sender = session.get(UserRecord, sender_id)
+  if sender is None:
+    raise ValueError("Your account could not be found. Please sign in again.")
+  recipient = (
+    session.query(UserRecord)
+    .filter(UserRecord.email.ilike(recipient_email.strip()))
+    .first()
+  )
+  if recipient is None:
+    raise ValueError("No Cine Vault account uses that email address.")
+  if recipient.id == sender.id:
+    raise ValueError("Pick a different account — you cannot share stars with yourself.")
+  sender_wallet = session.query(WalletRecord).filter(WalletRecord.user_id == sender.id).first()
+  if sender_wallet is None:
+    sender_wallet = WalletRecord(user_id=sender.id, available_stars=0, blocked_stars=0, disks=0)
+    session.add(sender_wallet)
+    session.flush()
+  if int(sender_wallet.available_stars or 0) < amount:
+    raise ValueError(f"Not enough stars: your balance is {sender_wallet.available_stars}.")
+  recipient_wallet = session.query(WalletRecord).filter(WalletRecord.user_id == recipient.id).first()
+  if recipient_wallet is None:
+    recipient_wallet = WalletRecord(user_id=recipient.id, available_stars=0, blocked_stars=0, disks=0)
+    session.add(recipient_wallet)
+    session.flush()
+  sender_wallet.available_stars = int(sender_wallet.available_stars or 0) - amount
+  recipient_wallet.available_stars = int(recipient_wallet.available_stars or 0) + amount
+  # keep legacy points in sync with the wallet until points is fully removed from the model
+  sender.points = sender_wallet.available_stars * 100
+  recipient.points = recipient_wallet.available_stars * 100
+  session.commit()
+  session.refresh(sender)
+  session.refresh(recipient)
+  return {
+    "sender": _user_to_dict(sender, sender_wallet),
+    "recipient_name": recipient.name or recipient.email,
+  }
+
+
+def purchase_stars(session: Session, user_id: str, stars: int, payment_method: str, payment_reference: str | None = None) -> dict:
+  """Credit stars to the signed-in viewer's wallet after a (mock) payment."""
+  ensure_seeded(session)
+  amount = int(stars)
+  if amount <= 0:
+    raise ValueError("Choose at least 1 star to buy.")
+  user = session.get(UserRecord, user_id)
+  if user is None:
+    raise ValueError("Your account could not be found. Please sign in again.")
+  wallet = session.query(WalletRecord).filter(WalletRecord.user_id == user.id).first()
+  if wallet is None:
+    wallet = WalletRecord(user_id=user.id, available_stars=0, blocked_stars=0, disks=0)
+    session.add(wallet)
+    session.flush()
+  wallet.available_stars = int(wallet.available_stars or 0) + amount
+  user.points = int(wallet.available_stars or 0) * 100
+  session.commit()
+  session.refresh(user)
+  session.refresh(wallet)
+  return {"user": _user_to_dict(user, wallet)}
 
 
 def authenticate_user(session: Session, email: str, password: str) -> dict | None:

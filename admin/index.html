@@ -466,9 +466,17 @@
               <span>Manage Categories</span>
               <b id="adminCategoriesCount">3</b>
             </button>
-            <button type="button" class="admin-nav-link" data-admin-panel-target="library">
-              <span>Manage Library</span>
+            <button type="button" class="admin-nav-link" data-admin-panel-target="titles-upcoming" id="adminTitlesNavLink">
+              <span>Manage Titles</span>
               <b id="adminLibraryCount">0</b>
+            </button>
+            <button type="button" class="admin-nav-link admin-nav-sub-link" data-admin-panel-target="titles-upcoming" id="adminUpcomingTitlesNavLink">
+              <span>Upcoming</span>
+              <b id="adminUpcomingTitlesCount">0</b>
+            </button>
+            <button type="button" class="admin-nav-link admin-nav-sub-link" data-admin-panel-target="titles-library" id="adminLibraryTitlesNavLink">
+              <span>Library</span>
+              <b id="adminLibraryTitlesCount">0</b>
             </button>
             <button type="button" class="admin-nav-link" data-admin-panel-target="delivery-queue" id="adminDeliveryQueueNavLink">
               <span>Delivery Queue</span>
@@ -690,19 +698,14 @@
 
           </section>
 
-          <section class="admin-panel" data-admin-panel-view="library">
+          <section class="admin-panel" data-admin-panel-view="titles-upcoming">
             <article class="workspace-panel admin-panel-card">
-              <p class="section-kicker">Manage Library</p>
+              <p class="section-kicker">Upcoming</p>
+              <h2>Upcoming titles only</h2>
               <div class="admin-list-header admin-list-header-tools-only">
                 <div></div>
                 <div class="admin-library-tools">
-                  <input id="adminLibrarySearch" class="admin-search-input" type="search" placeholder="Search titles...">
-                  <select id="adminLibraryStage" class="select-input admin-toolbar-select">
-                    <option value="all">All Stages</option>
-                    <option value="upcoming">Upcoming</option>
-                    <option value="released">Released</option>
-                    <option value="library">Library</option>
-                  </select>
+                  <input id="adminLibrarySearch" class="admin-search-input" type="search" placeholder="Search upcoming titles...">
                   <select id="adminLibrarySort" class="select-input admin-toolbar-select">
                     <option value="title-asc">A-Z Title</option>
                     <option value="title-desc">Z-A Title</option>
@@ -712,7 +715,7 @@
                     <option value="wishCount-desc">Highest Wish Count</option>
                     <option value="reserveCount-desc">Highest Reserve Count</option>
                   </select>
-                  <button type="button" class="primary-btn" id="adminAddLibraryButton">Add New Title</button>
+                  <button type="button" class="primary-btn" id="adminAddLibraryButton" data-admin-title-mode="upcoming">Add New Upcoming Title</button>
                 </div>
               </div>
               <div id="adminMovieList" class="admin-movie-list"></div>
@@ -745,6 +748,35 @@
               <p class="section-kicker">Review Queue</p>
               <div id="adminReviewList" class="queue-list"></div>
             </article>
+          </section>
+
+          <section class="admin-panel" data-admin-panel-view="titles-library">
+            <article class="workspace-panel admin-panel-card">
+              <p class="section-kicker">Library</p>
+              <h2>Library titles only</h2>
+              <div class="admin-list-header admin-list-header-tools-only">
+                <div></div>
+                <div class="admin-library-tools">
+                  <input id="adminLibraryTitleSearch" class="admin-search-input" type="search" placeholder="Search library titles...">
+                  <select id="adminLibraryTitleSort" class="select-input admin-toolbar-select">
+                    <option value="title-asc">A-Z Title</option>
+                    <option value="title-desc">Z-A Title</option>
+                    <option value="releaseDate-desc">Newest Release</option>
+                    <option value="releaseDate-asc">Oldest Release</option>
+                  </select>
+                  <button type="button" class="primary-btn" id="adminAddLibraryTitleButton" data-admin-title-mode="library">Add New Library Title</button>
+                </div>
+              </div>
+              <div id="adminLibraryTitleList" class="admin-movie-list"></div>
+            </article>
+
+            <div class="admin-summary-grid">
+              <article class="admin-summary-card">
+                <span>Library Titles</span>
+                <strong id="adminLibraryTitlesTotal">0</strong>
+                <p>Titles published in the library section for ad-supported streaming and discs unlock.</p>
+              </article>
+            </div>
           </section>
 
           <section class="admin-panel" data-admin-panel-view="delivery-queue">
@@ -943,7 +975,7 @@
       <div class="admin-modal-header">
         <div>
           <p class="section-kicker">Manage Title</p>
-          <h2 id="adminLibraryModalTitle">Add New Title</h2>
+          <h2 id="adminLibraryModalTitle">Add New Upcoming Title</h2>
         </div>
         <button type="button" class="icon-btn" data-admin-library-close aria-label="Close dialog">x</button>
       </div>
@@ -966,7 +998,7 @@
             <span>Title Caption</span>
             <input id="adminLibraryCaption" type="text" placeholder="Enter title caption">
           </label>
-          <label class="field">
+          <label class="field hidden" id="adminLibraryStageField">
             <span>Stage</span>
             <select id="adminLibraryMovieStage" class="select-input">
               <option value="upcoming">Upcoming</option>
@@ -975,7 +1007,7 @@
             </select>
           </label>
           <label class="field">
-            <span>Expected date</span>
+            <span id="adminLibraryDateLabel">Expected date</span>
             <input id="adminLibraryExpectedDate" type="date" placeholder="DD-MM-YYYY">
           </label>
           <div class="field field-full admin-library-story-row">
@@ -1020,7 +1052,7 @@
         <p id="adminPricingTargetsCopy" class="helper-text">Set online quality tiers, theatre stars, and the total target stars for this title.</p>
         <div class="admin-user-editor-grid">
           <div class="field field-full">
-            <span>Stars Required - Online</span>
+            <span id="adminPricingOnlineHeading">Stars Required - Online</span>
             <div id="adminPricingOnlineRows" class="admin-pricing-rows"></div>
             <div class="admin-cast-credits-actions">
               <button type="button" class="ghost-btn" id="adminPricingAddOnlineRowButton">Add Row</button>

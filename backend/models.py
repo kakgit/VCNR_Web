@@ -16,6 +16,9 @@ class MovieRecord(Base):
   id: Mapped[str] = mapped_column(String(120), primary_key=True)
   archived: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
   stage: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+  catalog_origin: Mapped[str | None] = mapped_column(String(20), nullable=True)
+  library_pricing_options: Mapped[str | None] = mapped_column(Text, nullable=True)
+
   title_category: Mapped[str | None] = mapped_column(String(120), nullable=True)
   title: Mapped[str] = mapped_column(String(255), nullable=False)
   title_caption: Mapped[str | None] = mapped_column(String(255), nullable=True)

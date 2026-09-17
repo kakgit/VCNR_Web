@@ -77,6 +77,47 @@ class PushDeviceResponse(BaseModel):
   message: str
 
 
+class AdvertisementRecipientInput(BaseModel):
+  id: str | None = Field(default=None, max_length=160)
+  name: str | None = Field(default=None, max_length=160)
+  email: str | None = Field(default=None, max_length=255)
+  phone: str | None = Field(default=None, max_length=40)
+  method: str | None = Field(default=None, max_length=20)
+
+
+class AdvertisementPasscodeEntry(BaseModel):
+  code: str
+  qr_payload: str
+  qr_data_url: str
+
+
+class AdvertisementDeliveryRequest(BaseModel):
+  brand_name: str = Field(min_length=1, max_length=160)
+  brand_email: str = Field(min_length=3, max_length=255)
+  brand_phone: str = Field(default="", max_length=40)
+  logo_name: str | None = Field(default=None, max_length=255)
+  logo_data_url: str | None = Field(default=None, max_length=8_000_000)
+  movie_id: str = Field(min_length=1, max_length=200)
+  movie_title: str = Field(min_length=1, max_length=255)
+  movie_quality_code: str | None = Field(default=None, max_length=40)
+  movie_quality_label: str | None = Field(default=None, max_length=80)
+  recipient: AdvertisementRecipientInput | None = None
+  submission_id: str | None = Field(default=None, max_length=120)
+  passcode_count: int = Field(default=1, ge=1, le=200)
+  sponsor_delivery_email: str | None = Field(default=None, max_length=255)
+
+
+class AdvertisementDeliveryResponse(BaseModel):
+  status: str
+  message: str
+  qr_payload: str
+  qr_data_url: str
+  mail_sent: bool
+  detail: str | None = None
+  list_mail_sent: bool = False
+  passcodes: list[AdvertisementPasscodeEntry] = Field(default_factory=list)
+
+
 class ViewerNotificationResponse(BaseModel):
   id: int
   movie_id: str
@@ -95,7 +136,28 @@ class OnlinePricingOptionResponse(BaseModel):
   sort_order: int = 0
 
 
+class LibraryPricingOption(BaseModel):
+  quality_code: str = Field(min_length=2, max_length=40)
+  quality_label: str = Field(min_length=2, max_length=80)
+  discs_required: int = Field(ge=1, le=100000000)
+  sort_order: int = Field(default=0, ge=0)
+
+
+class EffectivePricingOption(BaseModel):
+  quality_code: str
+  quality_label: str
+  currency: str = Field(pattern="^(stars|discs)$")
+  amount: int = Field(ge=1)
+  sort_order: int = 0
+
+
 class MovieResponse(BaseModel):
+  catalog_origin: str | None = None
+  library_pricing_options: list[LibraryPricingOption] = []
+  effective_pricing_options: list[EffectivePricingOption] = []
+  library_price_source: str | None = None
+  library_price_percent: int | None = None
+  library_available_at: str | None = None
   id: str
   archived: bool = False
   stage: str
@@ -243,6 +305,38 @@ class MovieInterestRequest(BaseModel):
   kind: str = Field(pattern="^(wish|reserve|buy)$")
   wish_mode: str | None = Field(default=None, pattern="^(online|theatre)$")
   quality_code: str | None = None
+  ticket_count: int | None = Field(default=None, ge=1, le=10)
+
+
+class MovieGiftRequest(BaseModel):
+  recipient_email: str = Field(min_length=5, max_length=254)
+  recipient_phone: str = Field(min_length=7, max_length=20)
+  gift_message: str | None = Field(default=None, max_length=500)
+  quality_code: str | None = None
+
+
+class StarTransferRequest(BaseModel):
+  recipient_email: str = Field(min_length=5, max_length=254)
+  stars: int = Field(ge=1, le=100000)
+
+
+class StarTransferResponse(BaseModel):
+  message: str
+  star_balance: int
+  recipient_name: str
+
+
+class StarPurchaseRequest(BaseModel):
+  stars: int = Field(ge=1, le=100000)
+  payment_method: str = Field(pattern="^(card|upi|wallet|netbanking)$")
+  payment_reference: str | None = Field(default=None, max_length=120)
+
+
+class StarPurchaseResponse(BaseModel):
+  message: str
+  star_balance: int
+  stars_purchased: int
+  payment_reference: str | None = None
 
 
 class MovieInterestResponse(BaseModel):
@@ -709,11 +803,12 @@ class AdminMovieCreateRequest(BaseModel):
 class OnlinePricingOptionRequest(BaseModel):
   quality_code: str = Field(min_length=2, max_length=40)
   quality_label: str = Field(min_length=2, max_length=80)
-  stars_required: int = Field(ge=1, le=10)
+  stars_required: int = Field(ge=1, le=20)
   sort_order: int = Field(default=0, ge=0)
 
 
 class AdminMoviePricingConfigRequest(BaseModel):
+  library_pricing_options: list[LibraryPricingOption] | None = None
   online_pricing_options: list[OnlinePricingOptionRequest] = []
   stars_required_theatre: int = Field(default=3, ge=1, le=10)
   expected_stars: int = Field(default=0, ge=0)

@@ -18,8 +18,8 @@ import urllib.parse
 import urllib.request
 import zipfile
 
-from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, Header, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse, RedirectResponse, Response, StreamingResponse
 import uuid
 from starlette.background import BackgroundTask
 
@@ -57,7 +57,7 @@ from backend.core.storage import (
   delete_movie_prefix,
   download_media_object,
   list_media_keys,
-  media_download_url,
+  media_content_type,
   media_object_exists,
   media_object_key,
   media_public_url,
@@ -65,7 +65,10 @@ from backend.core.storage import (
   presign_media_upload,
   r2_enabled,
   upload_media_object,
+  upload_media_object_stream,
+  verified_media_download_url,
 )
+from backend.core import hls as hls_lib
 from backend.core.time_utils import app_now, is_app_time_reached, parse_app_datetime
 from backend import persistence
 from backend.data import demo_store
@@ -124,6 +127,8 @@ from backend.schemas import (
   AdminMovieUpdateRequest,
   AdminMovieActionResponse,
   AdminMovieListResponse,
+  AdminCreatorAssignRequest,
+  AdminCreatorListResponse,
   CastImageLookupRequest,
   ContentQualityListResponse,
   ContentQualityResponse,
@@ -139,6 +144,9 @@ from backend.schemas import (
   TeaserLinksUpdateRequest,
   AdminUserCreateRequest,
   MovieDetailResponse,
+  MovieEngagementAckResponse,
+  MovieEngagementEventRequest,
+  MovieEngagementStatsResponse,
   PushDeviceRegisterRequest,
   PushDeviceResponse,
   PushDeviceUnregisterRequest,
@@ -351,13 +359,20 @@ def _download_cast_image(source_url: str, timeout: float = 30.0) -> bytes | None
 
 def _movie_content_qualities(movie: dict) -> list[dict]:
   options = movie.get("online_pricing_options") or []
+  library_subtype = movie_library_subtype(movie)
+  is_free_library = library_subtype == "free"
   qualities: list[dict] = []
   for index, item in enumerate(options, start=1):
     quality_code = _normalize_quality_code(str(item.get("quality_code") or ""))
     quality_label = str(item.get("quality_label") or "").strip()
     stars_required = int(item.get("stars_required") or 0)
     sort_order = int(item.get("sort_order") or index)
-    if not quality_code or not quality_label or stars_required <= 0:
+    if not quality_code or not quality_label:
+      continue
+    # Free Library titles keep their chosen qualities at 0 stars, so the content
+    # pipeline must accept those tiers for package validation and the viewer
+    # quality list instead of dropping them.
+    if not is_free_library and stars_required <= 0:
       continue
     qualities.append(
       {
@@ -403,6 +418,17 @@ def _get_movie_or_404(db: Session | None, movie_id: str) -> dict:
   if matched is None:
     raise HTTPException(status_code=404, detail="Movie not found.")
   return matched
+
+
+def _extract_auth_token(request: Request) -> str | None:
+  """Return the raw session token from the Authorization Bearer header, if any."""
+  authorization = request.headers.get("authorization") or request.headers.get("Authorization")
+  if not authorization:
+    return None
+  scheme, _, value = authorization.partition(" ")
+  if scheme.lower() == "bearer" and value:
+    return value
+  return None
 
 
 def _relative_media_path(file_path: Path) -> str:
@@ -2447,6 +2473,36 @@ def require_admin(current_user: dict[str, str] = Depends(get_current_user)) -> d
   return current_user
 
 
+def require_admin_or_creator(current_user: dict[str, str] = Depends(get_current_user)) -> dict[str, str]:
+  # Creators manage the titles assigned to them inside the admin panel.
+  if current_user["role"] not in {"admin", "super_admin", "creator"}:
+    raise HTTPException(status_code=403, detail="Admin or creator access is required.")
+  return current_user
+
+
+def _ensure_creator_owns_movie(current_user: dict[str, str], movie_id: str, db: Session | None) -> None:
+  if current_user["role"] != "creator":
+    return
+  if current_user["id"] not in (
+    persistence.get_movie_creator_ids(db, movie_id) if db else demo_store.get_movie_creator_ids(movie_id)
+  ):
+    raise HTTPException(status_code=403, detail="This title is not assigned to you.")
+
+
+def _viewer_can_view_movie_statistics(current_user: dict[str, str] | None, movie_id: str, db: Session | None) -> bool:
+  """Super Admins see every title; creators see only titles assigned to them."""
+  if not current_user:
+    return False
+  role = str(current_user.get("role") or "").strip().lower()
+  if role == "super_admin":
+    return True
+  if role == "creator":
+    return current_user["id"] in (
+      persistence.get_movie_creator_ids(db, movie_id) if db else demo_store.get_movie_creator_ids(movie_id)
+    )
+  return False
+
+
 def get_optional_current_user(authorization: str | None = Header(default=None)) -> dict[str, str] | None:
   if not authorization:
     return None
@@ -2575,6 +2631,16 @@ def get_movie_details(
   if matched is None or matched.get("archived"):
     raise HTTPException(status_code=404, detail="Movie not found.")
 
+  # Real viewer-activity statistics ride on the details payload, but only for
+  # super admins and the creators assigned to this title (same gate as the
+  # Statistics button in the viewer apps).
+  engagement_payload = None
+  if _viewer_can_view_movie_statistics(current_user, movie_id, db):
+    engagement_summary = (
+      persistence.get_movie_engagement_summary(db, movie_id) if db else demo_store.get_movie_engagement_summary(movie_id)
+    )
+    engagement_payload = MovieEngagementStatsResponse(**engagement_summary)
+
   return MovieDetailResponse(
     item=_sanitize_movie_payload(matched),
     posters=[MediaAssetResponse(**item) for item in _list_media_assets(movie_id, "posters")],
@@ -2582,6 +2648,31 @@ def get_movie_details(
     gallery=[MediaAssetResponse(**item) for item in _list_media_assets(movie_id, "gallery")],
     music=[MediaAssetResponse(**item) for item in _list_media_assets(movie_id, "music")],
     content=[MediaAssetResponse(**item) for item in _list_media_assets(movie_id, "content")],
+    engagement=engagement_payload,
+  )
+
+
+@router.post("/movies/{movie_id}/engagement", response_model=MovieEngagementAckResponse)
+def record_movie_engagement(
+  movie_id: str,
+  payload: MovieEngagementEventRequest,
+  db: Session | None = Depends(get_db),
+  current_user: dict[str, str] | None = Depends(get_optional_current_user),
+) -> MovieEngagementAckResponse:
+  """Record one viewer engagement event (detail page open, poster/teaser/gallery/music view)."""
+  try:
+    recorded = (
+      persistence.record_movie_engagement(db, movie_id, payload.kind, current_user["id"] if current_user else None)
+      if db
+      else demo_store.record_movie_engagement(movie_id, payload.kind, current_user["id"] if current_user else None)
+    )
+  except ValueError as error:
+    raise HTTPException(status_code=400, detail=str(error)) from error
+  if not recorded:
+    raise HTTPException(status_code=404, detail="Movie not found.")
+  return MovieEngagementAckResponse(
+    message="View recorded.",
+    kind=payload.kind,
   )
 
 
@@ -3106,7 +3197,7 @@ def admin_update_star_pricing(
 def admin_list_taxonomy(
   kind: str,
   db: Session | None = Depends(get_db),
-  _: dict[str, str] = Depends(require_admin),
+  _: dict[str, str] = Depends(require_admin_or_creator),
 ) -> TaxonomyListResponse:
   kind = validate_taxonomy_kind(kind)
   if db is None:
@@ -3222,9 +3313,16 @@ def admin_cast_image_lookup(
 @router.get("/admin/movies", response_model=AdminMovieListResponse)
 def admin_movies(
   db: Session | None = Depends(get_db),
-  _: dict[str, str] = Depends(require_admin),
+  current_user: dict[str, str] = Depends(require_admin_or_creator),
 ) -> AdminMovieListResponse:
   items = persistence.list_movies(db, include_archived=True, prefer_pending=True) if db else demo_store.list_movies(include_archived=True, prefer_pending=True)
+  # Creators only see the titles assigned to them.
+  if current_user["role"] == "creator":
+    user_id = current_user["id"]
+    items = [
+      item for item in items
+      if (user_id in (item.get("creator_ids") or [])) or item.get("creator_id") == user_id
+    ]
   return AdminMovieListResponse(items=_sanitize_movie_payloads(items))
 
 
@@ -3234,6 +3332,7 @@ def admin_create_movie(
   db: Session | None = Depends(get_db),
   _: dict[str, str] = Depends(require_admin),
 ) -> AdminMovieActionResponse:
+  is_library = str(payload.stage or "").strip().lower() in {"library", "library_free", "library_paid"}
   slug_base = payload.title.lower().replace("&", "and")
   movie_id = "-".join(filter(None, ["".join(character if character.isalnum() else "-" for character in slug_base).strip("-"), "admin"]))
   total_movies = len(persistence.list_movies(db, include_archived=True) if db else demo_store.list_movies(include_archived=True))
@@ -3246,15 +3345,19 @@ def admin_create_movie(
     "poster": None,
     "genre": payload.genre,
     "cast_credits": [item.model_dump() for item in payload.cast_credits],
-    "stars_required": payload.stars_required,
-    "stars_required_theatre": payload.stars_required_theatre,
-    "expected_stars": payload.expected_stars,
-    "stage_label": "Upcoming" if payload.stage == "upcoming" else "New Release" if payload.stage == "released" else "Old Movies",
-    "countdown": "Release date to be confirmed" if payload.stage == "upcoming" else "Now showing" if payload.stage == "released" else "Library title",
-    "release_date": payload.release_date or "TBA",
+    "stars_required": 0 if is_library else payload.stars_required,
+    "stars_required_theatre": 0 if is_library else payload.stars_required_theatre,
+    "expected_stars": 0 if is_library else payload.expected_stars,
+    "reserve_enabled": False,
+    "buy_now_enabled": False,
+    "release_decision": "approved" if is_library else "pending",
+    "stage_label": "Upcoming" if payload.stage == "upcoming" else "New Release" if payload.stage == "released" else "Library",
+    "countdown": "Release date to be confirmed" if payload.stage == "upcoming" else "Now showing" if payload.stage == "released" else "Library title - play directly",
+    "release_date": "" if is_library else payload.release_date or "TBA",
     "description": payload.story_line,
     "budget": "TBD",
-    "expected_revenue": f"{payload.expected_stars} stars",
+    "expected_revenue": "0 stars",
+    "source_extension": payload.source_extension,
     "wish_count": 0,
     "reserve_count": 0,
     "revenue": "$0K",
@@ -3262,11 +3365,73 @@ def admin_create_movie(
     "music": "Music upload pending",
     "reward_bonus": "+0 pts",
   }
+  # Validate requested creator assignments up front so an unknown creator id
+  # fails before a title record is created. Library titles skip creator assignment
+  # (they are direct-play, no creator workspace).
+  if not is_library and payload.creator_ids:
+    creator_options = persistence.list_creators(db) if db else demo_store.list_creators()
+    valid_ids = {option["id"] for option in creator_options}
+    unknown = [cid for cid in payload.creator_ids if cid not in valid_ids]
+    if unknown:
+      raise HTTPException(status_code=400, detail="One or more selected creator accounts were not found.")
+
   movie = persistence.create_movie(db, movie_payload) if db else demo_store.create_movie(movie_payload)
+  # Library titles are direct-play and do not require creator assignment.
+  if not is_library and payload.creator_ids:
+    try:
+      movie = (
+        persistence.set_movie_creators(db, movie["id"], payload.creator_ids)
+        if db
+        else demo_store.set_movie_creators(movie["id"], payload.creator_ids)
+      )
+    except (LookupError, ValueError) as error:
+      raise HTTPException(status_code=400, detail=str(error)) from error
   return AdminMovieActionResponse(
     item=_sanitize_movie_payload(movie),
-    message=f'"{movie["title"]}" created in {movie["stage_label"]} and sent for Super Admin approval.',
+    message=(
+      f'"{movie["title"]}" created in {movie["stage_label"]} and is now live in the Library.' 
+      if is_library
+      else f'"{movie["title"]}" created in {movie["stage_label"]} and sent for Super Admin approval.'
+    ),
   )
+
+
+@router.get("/admin/creators", response_model=AdminCreatorListResponse)
+def admin_list_creators(
+  db: Session | None = Depends(get_db),
+  _: dict[str, str] = Depends(require_admin_or_creator),
+) -> AdminCreatorListResponse:
+  items = persistence.list_creators(db) if db else demo_store.list_creators()
+  return AdminCreatorListResponse(items=items)
+
+
+@router.post("/admin/movies/{movie_id}/creator", response_model=AdminMovieActionResponse)
+def admin_set_movie_creators(
+  movie_id: str,
+  payload: AdminCreatorAssignRequest,
+  db: Session | None = Depends(get_db),
+  _: dict[str, str] = Depends(require_admin),
+) -> AdminMovieActionResponse:
+  creator_options = persistence.list_creators(db) if db else demo_store.list_creators()
+  valid_ids = {option["id"] for option in creator_options}
+  unknown = [cid for cid in payload.creator_ids if cid not in valid_ids]
+  if unknown:
+    raise HTTPException(status_code=400, detail="One or more selected creator accounts were not found.")
+  try:
+    if db:
+      movie = persistence.set_movie_creators(db, movie_id, payload.creator_ids)
+    else:
+      movie = demo_store.set_movie_creators(movie_id, payload.creator_ids)
+  except LookupError as error:
+    raise HTTPException(status_code=404, detail=str(error)) from error
+  except ValueError as error:
+    raise HTTPException(status_code=400, detail=str(error)) from error
+
+  if payload.creator_ids:
+    message = f'{len(payload.creator_ids)} creator(s) assigned to "{movie["title"]}".'
+  else:
+    message = f'Creator assignment removed from "{movie["title"]}".'
+  return AdminMovieActionResponse(item=_sanitize_movie_payload(movie), message=message)
 
 
 @router.post("/admin/movies/{movie_id}/publish", response_model=AdminMovieActionResponse)
@@ -3625,6 +3790,159 @@ async def admin_upload_movie_converted_content_package(
   )
 
 
+@router.post("/admin/movies/{movie_id}/assets/library-content", response_model=AdminMovieActionResponse)
+async def admin_upload_library_content(
+  movie_id: str,
+  file: UploadFile = File(...),
+  db: Session | None = Depends(get_db),
+  _: dict[str, str] = Depends(require_admin),
+  background_tasks: BackgroundTasks = BackgroundTasks(),
+) -> AdminMovieActionResponse:
+  """Upload a raw .mp4 or .mkv file for a library title. No encryption, no VCNR packaging.
+  The file is uploaded to Cloudflare R2 and served directly by the
+  ``/movies/{movie_id}/content/stream`` endpoint via presigned URL or proxy.
+  """
+  movie = _get_movie_or_404(db, movie_id)
+  source_ext = Path(file.filename or "").suffix.lower()
+  if source_ext not in {".mp4", ".mkv"}:
+    raise HTTPException(status_code=400, detail="Library content must be .mp4 or .mkv.")
+
+  # Persist the source extension on the movie record so the stream endpoint knows
+  # which format to serve.
+  if db:
+    movie_record = persistence.get_movie_by_id(db, movie_id)
+    if movie_record is not None:
+      movie_record.source_extension = source_ext
+      persistence.save_movie(db, movie_record)
+  else:
+    demo_store.set_movie_source_extension(movie_id, source_ext)
+
+  # Stream the raw MP4/MKV to Cloudflare R2 (not local Railway storage).
+  # Large files are automatically split into parallel multipart parts, so the
+  # entire file is never buffered in server memory.
+  object_key = media_object_key(movie_id, "content", f"main{source_ext}")
+  try:
+    file.file.seek(0)
+  except (AttributeError, OSError):
+    pass
+  if r2_enabled():
+    uploaded = upload_media_object_stream(
+      object_key,
+      file.file,
+      media_content_type(file.filename or ""),
+    )
+    if not uploaded:
+      raise HTTPException(
+        status_code=502,
+        detail="Library video could not be uploaded to the R2 server right now. Please try again.",
+      )
+    # Segment the raw video into adaptive HLS (720p/480p) in the background so
+    # viewers stream small chunks from R2 instead of one large progressive file.
+    background_tasks.add_task(hls_lib.build_library_hls, movie_id)
+
+  # Bump the asset-change tracker so the admin UI refreshes the content status.
+  matched = persistence.register_movie_asset_change(db, movie_id, "content") if db else demo_store.register_movie_asset_change(movie_id, "content")
+  if matched is None:
+    raise HTTPException(status_code=404, detail="Movie not found.")
+
+  return AdminMovieActionResponse(
+    item=_sanitize_movie_payload(matched),
+    message=(
+      f'Library video "{file.filename}" uploaded for "{matched["title"]}". '
+      "Upload future start time was reset."
+    ),
+  )
+
+
+@router.delete("/admin/movies/{movie_id}/assets/library-content", response_model=AdminMovieActionResponse)
+def admin_delete_library_content(
+  movie_id: str,
+  db: Session | None = Depends(get_db),
+  _: dict[str, str] = Depends(require_admin),
+) -> AdminMovieActionResponse:
+  """Delete a library title's uploaded .mp4/.mkv video from Cloudflare R2 and clear the record."""
+  movie = _get_movie_or_404(db, movie_id)
+  source_ext = str(movie.get("source_extension") or "").strip().lower()
+
+  if source_ext in {".mp4", ".mkv"}:
+    delete_media_object(media_object_key(movie_id, "content", f"main{source_ext}"))
+
+  # Defensive cleanup: also remove any other library video object under the content prefix.
+  if r2_enabled():
+    for key in list_media_keys(f"{movie_id}/content/"):
+      if key.lower().endswith((".mp4", ".mkv")):
+        delete_media_object(key)
+
+  # Remove any generated adaptive HLS segments + playlists.
+  hls_lib.delete_library_hls(movie_id)
+
+  # Clear the source extension so the stream endpoint stops serving the deleted file.
+  if db:
+    movie_record = persistence.get_movie_by_id(db, movie_id)
+    if movie_record is not None:
+      movie_record.source_extension = None
+      persistence.save_movie(db, movie_record)
+  else:
+    demo_store.set_movie_source_extension(movie_id, None)
+
+  matched = _get_movie_or_404(db, movie_id)
+  return AdminMovieActionResponse(
+    item=_sanitize_movie_payload(matched),
+    message=f'Library video removed for "{movie.get("title", "")}".',
+  )
+
+
+@router.get("/admin/movies/{movie_id}/assets/library-content/status")
+def admin_library_content_status(
+  movie_id: str,
+  db: Session | None = Depends(get_db),
+  _: dict[str, str] = Depends(require_admin),
+) -> dict:
+  """Report the library-content state for the Upload Library Video modal.
+
+  ``status`` is one of:
+    * ``none``       - no library video uploaded yet,
+    * ``ready``      - raw file uploaded AND adaptive HLS built,
+    * ``processing`` - raw file uploaded, HLS segmentation still running/failed.
+  """
+  movie = _get_movie_or_404(db, movie_id)
+  source_ext = str(movie.get("source_extension") or "").strip().lower()
+  if source_ext not in {".mp4", ".mkv"}:
+    return {"status": "none", "source_extension": None, "message": ""}
+
+  hls_state = hls_lib.library_hls_status(movie_id)
+  state = hls_state.get("state")
+  if state == "ready":
+    return {"status": "ready", "source_extension": source_ext, "message": ""}
+  if state == "failed":
+    return {
+      "status": "failed",
+      "source_extension": source_ext,
+      "message": hls_state.get("detail") or "HLS generation failed on the server.",
+    }
+  return {
+    "status": "processing",
+    "source_extension": source_ext,
+    "message": hls_state.get("detail") or "HLS segments are being generated in the background.",
+  }
+
+
+@router.post("/admin/movies/{movie_id}/assets/library-content/hls/build")
+def admin_library_content_hls_build(
+  movie_id: str,
+  db: Session | None = Depends(get_db),
+  _: dict[str, str] = Depends(require_admin),
+  background_tasks: BackgroundTasks = BackgroundTasks(),
+) -> dict:
+  """(Re)start the background HLS segmentation job for a library title."""
+  movie = _get_movie_or_404(db, movie_id)
+  source_ext = str(movie.get("source_extension") or "").strip().lower()
+  if source_ext not in {".mp4", ".mkv"}:
+    raise HTTPException(status_code=400, detail="Upload a library video first before generating HLS.")
+  background_tasks.add_task(hls_lib.build_library_hls, movie_id)
+  return {"status": "processing", "message": "HLS generation started in the background."}
+
+
 @router.post("/admin/movies/{movie_id}/assets/content-package/presign")
 def admin_presign_movie_converted_content_file(
   movie_id: str,
@@ -3805,6 +4123,181 @@ def get_movie_content_manifest(
     raise HTTPException(status_code=403, detail="Content download is not available yet.")
 
   return _viewer_content_manifest_payload(manifest)
+
+
+@router.get("/movies/{movie_id}/content/stream")
+def stream_movie_content(
+  movie_id: str,
+  request: Request,
+  db: Session | None = Depends(get_db),
+  token: str | None = None,
+) -> StreamingResponse:
+  """Stream a library title's content.
+
+  When adaptive HLS is ready (built in the background after upload), this
+  returns the HLS master playlist whose children point at the authenticated
+  ``/movies/{id}/content/hls/...`` endpoints, so viewers stream small ~6-second
+  segments directly from Cloudflare R2.  Otherwise it falls back to serving the
+  raw .mp4/.mkv file via presigned URL (or proxied bytes).
+
+  The player apps stream through an in-app <video>/expo-video element that cannot
+  attach an Authorization header, so the signed-in ``token`` query parameter is
+  accepted as a fallback for the Bearer header (and embedded into the rewritten
+  HLS segment URIs).
+  """
+  # Authenticate the same way the HLS segment endpoint does: Bearer header (for
+  # the HTTP API / browser players) or the trusted in-app ``token`` query fallback
+  # (for expo-video / native players that cannot set request headers).
+  session_token = token or _extract_auth_token(request)
+  if not session_token:
+    raise HTTPException(status_code=401, detail="Sign in is required.")
+  session = session_auth.get_session(session_token)
+  if session is None:
+    raise HTTPException(status_code=401, detail="Your session has expired. Please sign in again.")
+  if session.status != "active":
+    raise HTTPException(status_code=403, detail="This account is not active.")
+  current_user = session.to_user()
+  viewer_id = current_user["id"]
+  movie_items = persistence.list_movies(db, include_archived=True, viewer_user_id=viewer_id) if db else demo_store.list_movies(include_archived=True, viewer_user_id=viewer_id)
+  movie = next((item for item in movie_items if item["id"] == movie_id), None)
+  if movie is None:
+    raise HTTPException(status_code=404, detail="Movie not found.")
+
+  # Prefer serving the raw .mp4/.mkv directly so viewers get a single progressive
+  # file without going through HLS. HLS (built in the background after upload) is
+  # still available as a fallback when the raw file is missing, but the default
+  # library-playback path is the simple direct file the mobile app expects.
+  source_ext = str(movie.get("source_extension") or "").strip().lower()
+  if source_ext not in {".mp4", ".mkv"}:
+    raise HTTPException(status_code=400, detail="This title does not have a direct-play library video.")
+
+  # Resolve the file on Cloudflare R2.
+  object_key = media_object_key(movie_id, "content", f"main{source_ext}")
+  if not media_object_exists(object_key):
+    # Fallback: try alternate extension and any file under the content prefix.
+    alt_ext = ".mkv" if source_ext == ".mp4" else ".mp4"
+    alt_key = media_object_key(movie_id, "content", f"main{alt_ext}")
+    if media_object_exists(alt_key):
+      object_key = alt_key
+      source_ext = alt_ext
+    else:
+      found = next(
+        (key for key in list_media_keys(f"{movie_id}/content/") if key.lower().endswith((".mp4", ".mkv"))),
+        None,
+      )
+      if found is None:
+        raise HTTPException(status_code=404, detail="Library video file not found.")
+      object_key = found
+      source_ext = Path(found).suffix.lower()
+
+  # Prefer a public URL (verified to actually serve the object) or a presigned
+  # GET so the browser/player streams directly from R2. A stale public base
+  # (bucket public read disabled) must never reach the player — it answers
+  # Cloudflare's "Is this your bucket?" 404 page and the player stalls at
+  # 00:00, so verified_media_download_url falls back to a presigned URL.
+  download_url = verified_media_download_url(object_key)
+  if download_url and download_url.startswith("http"):
+    from fastapi.responses import RedirectResponse
+    return RedirectResponse(url=download_url, status_code=307)
+
+  # Fallback: stream the bytes from R2 through the API.
+  data = download_media_object(object_key)
+  if data is None:
+    raise HTTPException(status_code=404, detail="Library video file not found.")
+
+  filename = f"main{source_ext}"
+  media_type = "video/mp4" if source_ext == ".mp4" else "video/x-matroska"
+  return StreamingResponse(
+    iter([data]),
+    media_type=media_type,
+    headers={
+      "Content-Disposition": f"inline; filename=\"{filename}\"",
+      "Cache-Control": "no-cache",
+    },
+  )
+
+  # Adaptive HLS fallback when the raw file is not available but the background
+  # segmentation finished: serve the HLS master playlist whose children point at
+  # the authenticated ``/movies/{id}/content/hls/...`` endpoints.
+  if hls_lib.library_hls_ready(movie_id):
+    manifest_data = download_media_object(hls_lib.library_hls_manifest_key(movie_id))
+    if manifest_data is not None:
+      manifest_text = manifest_data.decode("utf-8", errors="replace")
+      auth_token = token or _extract_auth_token(request) or ""
+      rewritten = hls_lib.rewrite_hls_manifest(manifest_text, movie_id, str(request.base_url), auth_token) if auth_token else manifest_text
+      return Response(
+        content=rewritten,
+        media_type="application/vnd.apple.mpegurl",
+        headers={"Cache-Control": "no-cache"},
+      )
+
+
+def _stream_file_bytes(path: Path, chunk_size: int = 1024 * 1024):
+  with path.open("rb") as fh:
+    while True:
+      piece = fh.read(chunk_size)
+      if not piece:
+        break
+      yield piece
+
+
+@router.get("/movies/{movie_id}/content/hls/{filename}")
+def stream_library_hls_file(
+  movie_id: str,
+  filename: str,
+  request: Request,
+  token: str | None = None,
+) -> Response:
+  """Serve a library title's HLS playlist or segment.
+
+  Playlists are re-served with every child URI rewritten to this authenticated
+  endpoint (embedding the session ``token``), so hls.js / native HLS players
+  fetch segments through short-lived presigned R2 URLs without leaking the raw
+  library video.
+  """
+  # Authenticate exactly like the main /content/stream endpoint: Bearer header
+  # or the trusted in-app ``token`` query fallback.
+  session_token = token or _extract_auth_token(request)
+  if session_token:
+    session = session_auth.get_session(session_token)
+    if session is None or session.status != "active":
+      raise HTTPException(status_code=401, detail="Your session has expired. Please sign in again.")
+  else:
+    raise HTTPException(status_code=401, detail="Sign in is required.")
+
+  safe_name = Path(filename).name
+  if not safe_name or safe_name != filename:
+    raise HTTPException(status_code=400, detail="Invalid HLS file name.")
+
+  key = f"{hls_lib.library_hls_prefix(movie_id)}{safe_name}"
+  if not media_object_exists(key):
+    raise HTTPException(status_code=404, detail="HLS file not found.")
+
+  if safe_name.endswith(".m3u8"):
+    data = download_media_object(key)
+    if data is None:
+      raise HTTPException(status_code=404, detail="HLS playlist not found.")
+    manifest_text = data.decode("utf-8", errors="replace")
+    rewritten = hls_lib.rewrite_hls_manifest(manifest_text, movie_id, str(request.base_url), session_token)
+    return Response(
+      content=rewritten,
+      media_type="application/vnd.apple.mpegurl",
+      headers={"Cache-Control": "no-cache"},
+    )
+
+  # Segment: redirect to R2 through a verified URL (public HEAD-checked first,
+  # then presigned GET), or proxy the bytes when neither URL is available.
+  segment_url = verified_media_download_url(key)
+  if segment_url and segment_url.startswith("http"):
+    return RedirectResponse(url=segment_url, status_code=307)
+  segment_data = download_media_object(key)
+  if segment_data is None:
+    raise HTTPException(status_code=404, detail="HLS segment not found.")
+  return StreamingResponse(
+    iter([segment_data]),
+    media_type="video/mp2t",
+    headers={"Cache-Control": "no-cache"},
+  )
 
 
 @router.get("/movies/{movie_id}/delivery/status", response_model=DeliveryStatusResponse)
@@ -6352,8 +6845,9 @@ def admin_update_movie_stage(
   movie_id: str,
   payload: StageUpdateRequest,
   db: Session | None = Depends(get_db),
-  _: dict[str, str] = Depends(require_admin),
+  current_user: dict[str, str] = Depends(require_admin_or_creator),
 ) -> AdminMovieActionResponse:
+  _ensure_creator_owns_movie(current_user, movie_id, db)
   movie = persistence.update_movie_stage(db, movie_id, payload.stage) if db else demo_store.update_movie_stage(movie_id, payload.stage)
   if movie is None:
     raise HTTPException(status_code=404, detail="Movie not found.")
@@ -6369,9 +6863,17 @@ def admin_update_movie_details(
   movie_id: str,
   payload: AdminMovieUpdateRequest,
   db: Session | None = Depends(get_db),
-  _: dict[str, str] = Depends(require_admin),
+  current_user: dict[str, str] = Depends(require_admin_or_creator),
 ) -> AdminMovieActionResponse:
-  movie = persistence.update_movie_details(db, movie_id, payload.model_dump()) if db else demo_store.update_movie_details(movie_id, payload.model_dump())
+  _ensure_creator_owns_movie(current_user, movie_id, db)
+  # exclude_unset keeps "creator_ids" absent when the client omitted it, so a
+  # plain "Edit Title" save preserves the current creator assignment (an
+  # explicitly sent empty list still clears it, and a non-empty list reassigns).
+  payload_dict = payload.model_dump(exclude_unset=True)
+  # Creators edit their assigned titles but never reassign the creator.
+  if current_user["role"] == "creator":
+    payload_dict.pop("creator_ids", None)
+  movie = persistence.update_movie_details(db, movie_id, payload_dict) if db else demo_store.update_movie_details(movie_id, payload_dict)
   if movie is None:
     raise HTTPException(status_code=404, detail="Movie not found.")
 
@@ -6483,7 +6985,17 @@ def admin_delete_movie(
   _: dict[str, str] = Depends(require_admin),
 ) -> dict:
   movie = _get_movie_or_404(db, movie_id)
-  deleted_movie = persistence.delete_movie_permanently(db, movie_id) if db else demo_store.delete_movie_permanently(movie_id)
+  
+  # Log the deletion attempt for debugging
+  print(f"[DEBUG] Deleting movie permanently: {movie_id} (title: {movie.get('title', 'Unknown')})")
+  
+  if db:
+    print(f"[DEBUG] Using persistence layer for movie deletion")
+    deleted_movie = persistence.delete_movie_permanently(db, movie_id)
+  else:
+    print(f"[DEBUG] Using demo_store layer for movie deletion")
+    deleted_movie = demo_store.delete_movie_permanently(movie_id)
+  
   if deleted_movie is None:
     raise HTTPException(status_code=404, detail="Movie not found.")
 

@@ -29,12 +29,23 @@ def pricing_entries(value) -> list[dict]:
   return deepcopy(value) if isinstance(value, list) else []
 
 
+def normalize_stage(stage) -> str:
+  return str(stage or "").strip().lower().replace(" ", "_").replace("-", "_")
+
+
+def is_library_stage(stage) -> bool:
+  """Library covers the plain stage plus the Free/Paid variants."""
+
+  value = normalize_stage(stage)
+  return value == "library" or value.startswith("library_")
+
+
 def title_origin(movie: dict) -> str:
   origin = movie.get("catalog_origin")
   if origin in {"upcoming", "library"}:
     return origin
   # Existing library records are direct uploads unless explicitly classified.
-  return "library" if movie.get("stage") == "library" else "upcoming"
+  return "library" if is_library_stage(movie.get("stage")) else "upcoming"
 
 
 def catalogue_view(movie: dict, now: datetime | None = None) -> dict:
@@ -55,15 +66,17 @@ def catalogue_view(movie: dict, now: datetime | None = None) -> dict:
   item["library_available_at"] = add_calendar_months(release, 1).isoformat() if release and origin == "upcoming" else None
   stage = item.get("stage", "upcoming")
   if origin == "library":
-    stage = "library"
+    # Keep the Free/Paid variants intact so the existing Library sections split correctly.
+    stage = stage or "library"
   elif release:
     stage = "upcoming" if current < release else "released" if current < add_calendar_months(release, 1) else "library"
   item["stage"] = stage
-  item["stage_label"] = {"upcoming": "Upcoming", "released": "New Release", "library": "Library"}.get(stage, stage)
+  if normalize_stage(stage) in {"upcoming", "released", "library"}:
+    item["stage_label"] = {"upcoming": "Upcoming", "released": "New Release", "library": "Library"}[normalize_stage(stage)]
   item["effective_pricing_options"] = []
   item["library_price_percent"] = None
   options = pricing_entries(item.get("online_pricing_options"))
-  if stage != "library":
+  if not is_library_stage(stage):
     item["effective_pricing_options"] = [dict(option, currency="stars", amount=option["stars_required"]) for option in options]
   elif origin == "library":
     item["effective_pricing_options"] = [dict(option, currency="discs", amount=option["discs_required"]) for option in item["library_pricing_options"]]

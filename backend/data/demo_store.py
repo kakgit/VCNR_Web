@@ -28,6 +28,7 @@ MOVIES = []
 MOVIE_CHANGE_REQUESTS: dict[str, dict] = {}
 MOVIE_WISHES: list[dict] = []
 MOVIE_RESERVATIONS: list[dict] = []
+MOVIE_ENGAGEMENT_EVENTS: list[dict] = []
 DEFAULT_STAR_PRICE_SETTINGS = {
   "price_inr": 50,
   "price_usd": 0.0,
@@ -42,7 +43,7 @@ def _approval_label(status: str) -> str:
   return APPROVAL_STATUS_LABELS.get(status, status.replace("_", " ").title())
 
 
-def _normalize_online_pricing_options(entries) -> list[dict]:
+def _normalize_online_pricing_options(entries, allow_zero_stars: bool = False) -> list[dict]:
   normalized: list[dict] = []
   if isinstance(entries, str):
     try:
@@ -59,7 +60,11 @@ def _normalize_online_pricing_options(entries) -> list[dict]:
     quality_label = str(item.get("quality_label") or "").strip()
     stars_required = int(item.get("stars_required") or 0)
     sort_order = int(item.get("sort_order", index) or index)
-    if not quality_code or not quality_label or stars_required <= 0 or quality_code in seen_codes:
+    if not quality_code or not quality_label or quality_code in seen_codes:
+      continue
+    # Tiers below 1 star are only meaningful for free Library titles, where the
+    # chosen qualities are kept at 0 stars so the admin selection round-trips.
+    if not allow_zero_stars and stars_required <= 0:
       continue
     seen_codes.add(quality_code)
     normalized.append({
@@ -89,10 +94,23 @@ def _decorate_movie(movie: dict, viewer_wish_kind: str | None = None) -> dict:
   item["approval_status"] = approval_status
   item["approval_status_label"] = _approval_label(approval_status)
   item["requires_super_admin_approval"] = approval_status in {"pending_admin_review", "pending_super_admin_approval", "changes_requested"}
+  # Keep library_subtype in sync with the raw stage so clients never have to
+  # guess the Free/Paid split when the stage is stored in raw form.
+  stage_value = str(item.get("stage", "")).strip().lower()
+  subtype_value = str(item.get("library_subtype") or "").strip().lower()
+  if stage_value == "library_free":
+    item["library_subtype"] = "free"
+  elif stage_value == "library_paid":
+    item["library_subtype"] = "paid"
+  elif stage_value == "library" and subtype_value not in {"free", "paid"}:
+    item["library_subtype"] = "free"
   item.setdefault("wish_online_count", item.get("wish_count", 0))
   item.setdefault("wish_theatre_count", 0)
   item.setdefault("cast_credits", [])
   item.setdefault("online_pricing_options", [])
+  # Demo movies store a single legacy creator_id; mirror the DB payload shape
+  # so clients can gate creator-only features on the assignment list.
+  item.setdefault("creator_ids", [item["creator_id"]] if item.get("creator_id") else [])
   item["viewer_wish_kind"] = viewer_wish_kind
   return item
 
@@ -427,10 +445,28 @@ def create_movie(movie: dict) -> dict:
   movie.setdefault("library_pricing_options", [])
   movie.setdefault("archived", False)
   movie.setdefault("approval_status", "pending_super_admin_approval")
-  movie["online_pricing_options"] = _normalize_online_pricing_options(movie.get("online_pricing_options", []))
-  movie["stars_required"] = _derive_default_online_stars(movie["online_pricing_options"])
-  movie.setdefault("stars_required_theatre", 3)
-  movie.setdefault("pricing_snapshot", deepcopy(ADMIN_STATE.get("star_price_settings", DEFAULT_STAR_PRICE_SETTINGS)))
+  is_library = str(movie.get("stage", "")).strip().lower() in {"library", "library_free", "library_paid"}
+  raw_stage = str(movie.get("stage", "")).strip().lower()
+  # Free Library titles keep 0-star quality tiers, so normalization must not
+  # drop them at creation time.
+  allow_zero = raw_stage in {"library", "library_free"} and str(movie.get("library_subtype") or "").lower() != "paid"
+  movie["online_pricing_options"] = _normalize_online_pricing_options(movie.get("online_pricing_options", []), allow_zero_stars=allow_zero)
+  is_library = raw_stage in {"library", "library_free", "library_paid"}
+  if is_library:
+    paid = raw_stage == "library_paid" or str(movie.get("library_subtype") or "").strip().lower() == "paid"
+    movie["stage_label"] = "Library - Paid" if paid else "Library - Free"
+    movie["stars_required"] = 0
+    movie["stars_required_theatre"] = 0
+    movie["expected_stars"] = 0
+    movie["reserve_enabled"] = False
+    movie["buy_now_enabled"] = False
+    movie["release_decision"] = "approved"
+    movie["approval_status"] = "approved"
+    movie["playback_requires_subscription"] = False
+  else:
+    movie["stars_required"] = _derive_default_online_stars(movie["online_pricing_options"])
+    movie.setdefault("stars_required_theatre", 3)
+    movie.setdefault("pricing_snapshot", deepcopy(ADMIN_STATE.get("star_price_settings", DEFAULT_STAR_PRICE_SETTINGS)))
   MOVIES.insert(0, deepcopy(movie))
   _prepare_movie_change_request(movie, is_new_title=True)
   return _pending_or_live(movie, prefer_pending=True)
@@ -637,10 +673,38 @@ def update_movie_stage(movie_id: str, stage: str) -> dict | None:
   for movie in MOVIES:
     if movie["id"] != movie_id:
       continue
+    # Normalize stage: "library_free"/"library_paid" collapse to "library" + subtype.
+    raw = str(stage or "").strip().lower().replace(" ", "_").replace("-", "_")
+    if raw == "library_free":
+      canonical_stage, library_subtype = "library", "free"
+    elif raw == "library_paid":
+      canonical_stage, library_subtype = "library", "paid"
+    else:
+      canonical_stage, library_subtype = raw, None
     request = _prepare_movie_change_request(movie)
-    request["pending"]["stage"] = stage
-    request["pending"]["stage_label"] = "Upcoming" if stage == "upcoming" else "New Release" if stage == "released" else "Old Movies"
-    if not movie.get("archived"):
+    request["pending"]["stage"] = canonical_stage
+    request["pending"]["library_subtype"] = library_subtype
+    request["pending"]["stage_label"] = "Upcoming" if canonical_stage == "upcoming" else "New Release" if canonical_stage == "released" else "Library - Paid" if library_subtype == "paid" else "Library - Free"
+    request["pending"]["countdown"] = (
+      "Release date to be confirmed"
+      if canonical_stage == "upcoming"
+      else "Now showing"
+      if canonical_stage == "released"
+      else "Library title - play directly"
+    )
+    becoming_library = canonical_stage == "library"
+    if becoming_library:
+      # Library titles are direct-play: no stars/pricing, no release date, live.
+      request["pending"]["stars_required"] = 0
+      request["pending"]["stars_required_theatre"] = 0
+      request["pending"]["expected_stars"] = 0
+      request["pending"]["reserve_enabled"] = False
+      request["pending"]["buy_now_enabled"] = False
+      request["pending"]["release_decision"] = "approved"
+      request["pending"]["playback_requires_subscription"] = False
+      request["pending"]["release_date"] = ""
+      movie["approval_status"] = "approved"
+    if not movie.get("archived") and not becoming_library:
       _update_movie_approval_status(movie, "pending_super_admin_approval")
     return _pending_or_live(movie, prefer_pending=True)
   return None
@@ -706,14 +770,51 @@ def restore_movie(movie_id: str) -> dict | None:
 
 
 def delete_movie_permanently(movie_id: str) -> dict | None:
+  # First find and remove the movie from MOVIES
+  movie_to_delete = None
+  movie_index = -1
   for index, movie in enumerate(MOVIES):
-    if movie["id"] != movie_id:
-      continue
-    deleted_movie = _decorate_movie(movie)
-    MOVIE_CHANGE_REQUESTS.pop(movie_id, None)
-    del MOVIES[index]
-    return deleted_movie
-  return None
+    if movie["id"] == movie_id:
+      movie_to_delete = movie
+      movie_index = index
+      break
+  
+  if movie_to_delete is None:
+    return None
+  
+  # Clean up related records (similar to persistence.delete_movie_permanently)
+  MOVIE_CHANGE_REQUESTS.pop(movie_id, None)
+  # Clean up wishes for this movie
+  global MOVIE_WISHES
+  MOVIE_WISHES[:] = [w for w in MOVIE_WISHES if w.get("movie_id") != movie_id]
+  
+  # Clean up reservations for this movie  
+  global MOVIE_RESERVATIONS
+  MOVIE_RESERVATIONS[:] = [r for r in MOVIE_RESERVATIONS if r.get("movie_id") != movie_id]
+  
+  # Clean up engagement events for this movie
+  global MOVIE_ENGAGEMENT_EVENTS
+  MOVIE_ENGAGEMENT_EVENTS[:] = [e for e in MOVIE_ENGAGEMENT_EVENTS if e.get("movie_id") != movie_id]
+  
+  # Clean up notifications related to this movie
+  global MOVIE_NOTIFICATIONS
+  MOVIE_NOTIFICATIONS[:] = [n for n in MOVIE_NOTIFICATIONS if n.get("movie_id") != movie_id]
+  
+  # Clean up change requests for this movie (already done above)
+  
+  # Clean up any other references in demo store
+  # For now, we'll just remove the movie from the main list
+  # Note: In a full implementation, we would also clean up:
+  # - MOVIE_CREATOR records (if they exist in demo store)
+  # - Any other foreign key references in demo data structures
+  
+  deleted_movie = _decorate_movie(movie_to_delete)
+  del MOVIES[movie_index]
+  return deleted_movie
+
+# Ensure MovieCreatorRecord cleanup is also handled in demo store
+# This should mirror the persistence.delete_movie_permanently logic
+# but for the in-memory demo store
 
 
 def update_movie_details(movie_id: str, payload: dict) -> dict | None:
@@ -735,10 +836,143 @@ def update_movie_details(movie_id: str, payload: dict) -> dict | None:
     request["pending"]["expected_revenue"] = f'{request["pending"]["expected_stars"]} stars'
     if payload.get("release_date"):
       request["pending"]["release_date"] = payload["release_date"]
+    # Creator assignment: only when the caller explicitly sent the field.
+    if "creator_id" in payload:
+      request["pending"]["creator_id"] = payload.get("creator_id") or None
     if not movie.get("archived"):
       _update_movie_approval_status(movie, "pending_super_admin_approval")
     return _pending_or_live(movie, prefer_pending=True)
   return None
+
+
+def set_movie_source_extension(movie_id: str, source_extension: str | None) -> dict | None:
+  for movie in MOVIES:
+    if movie["id"] == movie_id:
+      movie["source_extension"] = source_extension
+      return _decorate_movie(movie, viewer_wish_kind=None)
+  return None
+
+
+def register_movie_asset_change(movie_id: str, kind: str) -> dict | None:
+  """Record an asset change so the admin UI refreshes the content status.
+
+  Demo-store variant: simply marks the movie as pending approval and returns
+  the decorated record. No change-request/pending-snapshot machinery is used.
+  """
+  for movie in MOVIES:
+    if movie["id"] == movie_id:
+      movie["approval_status"] = "pending_super_admin_approval"
+      if kind == "content":
+        movie["content_status"] = "uploaded"
+      return _decorate_movie(movie, viewer_wish_kind=None)
+  return None
+
+
+def list_creators() -> list[dict]:
+  return [
+    {"id": user["id"], "name": user["name"], "email": user["email"]}
+    for user in USERS
+    if user.get("role") == "creator"
+  ]
+
+
+def list_movies_for_creator(user_id: str) -> list[dict]:
+  def is_assigned(movie: dict) -> bool:
+    creator_ids = movie.get("creator_ids")
+    if isinstance(creator_ids, list) and creator_ids:
+      return user_id in creator_ids
+    return movie.get("creator_id") == user_id
+  return [_decorate_movie(movie, viewer_wish_kind=None) for movie in MOVIES if is_assigned(movie)]
+
+
+def get_movie_creator_id(movie_id: str) -> str | None:
+  for movie in MOVIES:
+    if movie["id"] == movie_id:
+      return movie.get("creator_id")
+  return None
+
+
+def get_movie_creator_ids(movie_id: str) -> list[str]:
+  """All creator user ids assigned to a title (assignment gate for creator-only features)."""
+  for movie in MOVIES:
+    if movie["id"] == movie_id:
+      creator_ids = movie.get("creator_ids")
+      if isinstance(creator_ids, list) and creator_ids:
+        return [str(value) for value in creator_ids if value]
+      creator_id = movie.get("creator_id")
+      return [str(creator_id)] if creator_id else []
+  return []
+
+
+ENGAGEMENT_EVENT_KINDS = ("detail", "poster", "teaser", "gallery", "music")
+
+
+def record_movie_engagement(movie_id: str, event_kind: str, user_id: str | None = None) -> bool:
+  """Append one viewer engagement event (detail/poster/teaser/gallery/music view)."""
+  if event_kind not in ENGAGEMENT_EVENT_KINDS:
+    raise ValueError("Unsupported engagement kind.")
+  for movie in MOVIES:
+    if movie["id"] == movie_id:
+      if movie.get("archived", False):
+        return False
+      MOVIE_ENGAGEMENT_EVENTS.append(
+        {
+          "movie_id": movie_id,
+          "user_id": user_id,
+          "event_kind": event_kind,
+          "created_at": datetime.utcnow().isoformat(timespec="minutes"),
+        }
+      )
+      return True
+  return False
+
+
+def get_movie_engagement_summary(movie_id: str) -> dict:
+  """Aggregate engagement counts for a title, grouped by event kind."""
+  summary = {
+    "detail_views": 0,
+    "poster_views": 0,
+    "teaser_views": 0,
+    "gallery_views": 0,
+    "music_views": 0,
+    "total_views": 0,
+    "unique_viewers": 0,
+  }
+  viewer_ids: set[str] = set()
+  for event in MOVIE_ENGAGEMENT_EVENTS:
+    if event["movie_id"] != movie_id:
+      continue
+    key = f"{event['event_kind']}_views"
+    if key in summary:
+      summary[key] += 1
+    if event.get("user_id"):
+      viewer_ids.add(str(event["user_id"]))
+  summary["total_views"] = sum(summary[key] for key in ("detail_views", "poster_views", "teaser_views", "gallery_views", "music_views"))
+  summary["unique_viewers"] = len(viewer_ids)
+  return summary
+
+
+def set_movie_creator(movie_id: str, creator_id: str | None) -> dict:
+  # Backward-compatible single-id wrapper: clears when None, else [creator_id].
+  creator_ids = [creator_id] if creator_id else []
+  return set_movie_creators(movie_id, creator_ids)
+
+
+def set_movie_creators(movie_id: str, creator_ids: list[str]) -> dict:
+  """Assign one or more creators to a title. An empty list clears the assignment."""
+  for movie in MOVIES:
+    if movie["id"] != movie_id:
+      continue
+    resolved_ids: list[str] = []
+    for cid in creator_ids:
+      creator = next((user for user in USERS if user["id"] == cid), None)
+      if creator is None or creator.get("role") != "creator":
+        raise ValueError("The selected creator account was not found.")
+      resolved_ids.append(cid)
+    movie["creator_ids"] = resolved_ids
+    movie["creator_id"] = resolved_ids[0] if resolved_ids else None
+    return _decorate_movie(movie)
+  raise LookupError("Movie not found.")
 
 
 def update_movie_pricing_config(movie_id: str, payload: dict) -> dict | None:
@@ -754,19 +988,55 @@ def update_movie_pricing_config(movie_id: str, payload: dict) -> dict | None:
       movie["library_pricing_options"] = prices
       _update_movie_approval_status(movie, "pending_super_admin_approval")
       return _pending_or_live(movie, prefer_pending=True)
-    options = _normalize_online_pricing_options(payload.get("online_pricing_options", []))
-    default_online_stars = _derive_default_online_stars(options)
+    raw_stage = str(movie.get("stage", "")).strip().lower()
+    library_subtype = str(movie.get("library_subtype") or "").strip().lower()
+    if raw_stage == "library_free":
+      library_subtype = "free"
+    elif raw_stage == "library_paid":
+      library_subtype = "paid"
+    elif raw_stage != "library":
+      library_subtype = ""
+    is_library = raw_stage in {"library", "library_free", "library_paid"}
+    if is_library and library_subtype not in {"free", "paid"}:
+      library_subtype = "free"
+    options = _normalize_online_pricing_options(
+      payload.get("online_pricing_options", []),
+      allow_zero_stars=(is_library and library_subtype != "paid"),
+    )
+    if is_library:
+      if library_subtype == "paid":
+        if not options:
+          raise ValueError("Library (Paid) titles need at least one online quality with stars required (min 1).")
+        default_online_stars = _derive_default_online_stars(options)
+      else:
+        # Library (Free) titles are always free - keep the chosen qualities but
+        # every tier stays at 0 stars so the admin selection round-trips.
+        for option in options:
+          option["stars_required"] = 0
+        default_online_stars = 0
+      theatre_stars = 0
+      target_stars = 0
+    else:
+      if not options:
+        raise ValueError("Add at least one online quality row.")
+      default_online_stars = _derive_default_online_stars(options)
+      theatre_stars = payload.get("stars_required_theatre")
+      theatre_stars = 3 if theatre_stars is None else int(theatre_stars)
+      target_stars = payload.get("expected_stars")
+      target_stars = 0 if target_stars is None else int(target_stars)
+      if not (1 <= theatre_stars <= 10):
+        raise ValueError("Stars Required - Theatre must be between 1 and 10.")
     request["pending"]["online_pricing_options"] = deepcopy(options)
     request["pending"]["stars_required"] = default_online_stars
-    request["pending"]["stars_required_theatre"] = int(payload.get("stars_required_theatre") or 3)
-    request["pending"]["expected_stars"] = int(payload.get("expected_stars") or 0)
-    request["pending"]["expected_revenue"] = f'{request["pending"]["expected_stars"]} stars'
+    request["pending"]["stars_required_theatre"] = theatre_stars
+    request["pending"]["expected_stars"] = target_stars
+    request["pending"]["expected_revenue"] = f"{target_stars} stars"
     movie["online_pricing_options"] = deepcopy(options)
     movie["stars_required"] = default_online_stars
     movie["reserve_star_price"] = default_online_stars
-    movie["stars_required_theatre"] = request["pending"]["stars_required_theatre"]
-    movie["expected_stars"] = request["pending"]["expected_stars"]
-    movie["expected_revenue"] = request["pending"]["expected_revenue"]
+    movie["stars_required_theatre"] = theatre_stars
+    movie["expected_stars"] = target_stars
+    movie["expected_revenue"] = f"{target_stars} stars"
     if not movie.get("archived"):
       _update_movie_approval_status(movie, "pending_super_admin_approval")
     return _pending_or_live(movie, prefer_pending=True)

@@ -161,6 +161,12 @@ class MovieResponse(BaseModel):
   id: str
   archived: bool = False
   stage: str
+  creator_id: str | None = None
+  creator_name: str | None = None
+  # All creator user ids assigned to this title. Lets the viewer apps show
+  # creator-only features (e.g. the Statistics button) only on titles the
+  # signed-in creator is assigned to.
+  creator_ids: list[str] = []
   approval_status: str = "published"
   approval_status_label: str = "Published"
   requires_super_admin_approval: bool = False
@@ -190,7 +196,9 @@ class MovieResponse(BaseModel):
   viewer_reservation_theatre_status: str | None = None
   stage_label: str
   countdown: str
-  release_date: str
+  # Library (direct-play) titles have no release date; null keeps the viewer
+  # apps from showing an "upcoming" release label for them.
+  release_date: str | None = None
   description: str
   budget: str
   expected_revenue: str
@@ -203,6 +211,10 @@ class MovieResponse(BaseModel):
   posters: str
   music: str
   reward_bonus: str
+  # Raw container uploaded for library (direct-play) titles: "mp4" or "mkv".
+  # Null for regular VCNR-encrypted titles. Lets viewer apps build the
+  # `/movies/{id}/content/stream` URL and play directly without a download.
+  source_extension: str | None = None
 
 
 class MovieListResponse(BaseModel):
@@ -292,6 +304,25 @@ class DeliveryQueueListResponse(BaseModel):
   items: list[DeliveryQueueItemResponse] = Field(default_factory=list)
 
 
+class MovieEngagementStatsResponse(BaseModel):
+  detail_views: int = 0
+  poster_views: int = 0
+  teaser_views: int = 0
+  gallery_views: int = 0
+  music_views: int = 0
+  total_views: int = 0
+  unique_viewers: int = 0
+
+
+class MovieEngagementEventRequest(BaseModel):
+  kind: str = Field(pattern="^(detail|poster|teaser|gallery|music)$")
+
+
+class MovieEngagementAckResponse(BaseModel):
+  message: str
+  kind: str
+
+
 class MovieDetailResponse(BaseModel):
   item: MovieResponse
   posters: list[MediaAssetResponse] = []
@@ -299,6 +330,10 @@ class MovieDetailResponse(BaseModel):
   gallery: list[MediaAssetResponse] = []
   music: list[MediaAssetResponse] = []
   content: list[MediaAssetResponse] = []
+  # Real viewer-activity counts (detail/poster/teaser/gallery/music views).
+  # Populated only for super admins and creators assigned to the title;
+  # regular viewers receive null.
+  engagement: MovieEngagementStatsResponse | None = None
 
 
 class MovieInterestRequest(BaseModel):
@@ -777,6 +812,9 @@ class AdminMovieUpdateRequest(BaseModel):
   genre: str
   cast_credits: list[CastCreditEntry] = []
   story_line: str
+  # Creators assigned to this title. Omitted on edit -> preserve current set;
+  # an empty list clears the assignment; a non-empty list (re)assigns the title.
+  creator_ids: list[str] = []
   # Star/pricing fields are optional here because the "Edit Title" form does not
   # manage them; when omitted the existing values are preserved (see
   # update_movie_details in persistence.py / demo_store.py).
@@ -793,24 +831,45 @@ class AdminMovieCreateRequest(BaseModel):
   genre: str
   cast_credits: list[CastCreditEntry] = []
   story_line: str
-  stars_required: int = Field(default=1, ge=1, le=10)
-  stars_required_theatre: int = Field(default=3, ge=1, le=10)
+  creator_ids: list[str] = []
+  stars_required: int = Field(default=0, ge=0, le=10)
+  stars_required_theatre: int = Field(default=0, ge=0, le=10)
   expected_stars: int = Field(default=0, ge=0)
   release_date: str | None = None
-  stage: str = Field(pattern="^(upcoming|released|library)$")
+  stage: str = Field(pattern="^(upcoming|released|library_free|library_paid)$")
+  # Library titles are raw .mp4/.mkv direct-play streams (never encrypted VCNR).
+  source_extension: str | None = Field(default=None, pattern="^(mp4|mkv)?$")
+
+
+class AdminCreatorAssignRequest(BaseModel):
+  creator_ids: list[str] = []
+
+
+class AdminCreatorResponse(BaseModel):
+  id: str
+  name: str
+  email: str
+
+
+class AdminCreatorListResponse(BaseModel):
+  items: list[AdminCreatorResponse]
 
 
 class OnlinePricingOptionRequest(BaseModel):
   quality_code: str = Field(min_length=2, max_length=40)
   quality_label: str = Field(min_length=2, max_length=80)
-  stars_required: int = Field(ge=1, le=20)
+  # 0 is allowed so Library (Free) titles can be marked free; 20 accommodates the
+  # configured 4K tier while 720p/1080p/2K sit at 5/10/15.
+  stars_required: int = Field(ge=0, le=20)
   sort_order: int = Field(default=0, ge=0)
 
 
 class AdminMoviePricingConfigRequest(BaseModel):
   library_pricing_options: list[LibraryPricingOption] | None = None
   online_pricing_options: list[OnlinePricingOptionRequest] = []
-  stars_required_theatre: int = Field(default=3, ge=1, le=10)
+  # 0 allowed for Library titles (forced to 0 in the store layer); standard
+  # upcoming/released titles still require 1-10.
+  stars_required_theatre: int = Field(default=0, ge=0, le=10)
   expected_stars: int = Field(default=0, ge=0)
 
 

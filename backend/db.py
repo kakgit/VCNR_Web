@@ -6,17 +6,24 @@ from functools import lru_cache
 from fastapi import HTTPException, Request
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import ArgumentError, SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 
-from backend.core.config import get_settings
+from backend.core.config import _SAFE_DEFAULT_DATABASE_URL, get_settings
 from backend.models import Base
 
 
 @lru_cache(maxsize=1)
 def get_engine() -> Engine:
   settings = get_settings()
-  return create_engine(settings.database_url, future=True, pool_pre_ping=True)
+  try:
+    return create_engine(settings.database_url, future=True, pool_pre_ping=True)
+  except (ArgumentError, ValueError, SQLAlchemyError) as error:
+    # Belt-and-suspenders: a malformed DATABASE_URL must never take the
+    # whole app down at import. Fall back to a safe local default so the
+    # server boots and DB-backed routes degrade to the graceful 503 path.
+    print(f"[db] Unusable DATABASE_URL ({error}); falling back to local default.", flush=True)
+    return create_engine(_SAFE_DEFAULT_DATABASE_URL, future=True, pool_pre_ping=True)
 
 
 SessionLocal = sessionmaker(
@@ -59,6 +66,23 @@ def init_db() -> bool:
     Base.metadata.create_all(bind=get_engine())
     with get_engine().begin() as connection:
       connection.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash VARCHAR(255) NOT NULL DEFAULT ''"))
+      connection.execute(text(
+        """
+        CREATE TABLE IF NOT EXISTS movie_creators (
+          id SERIAL PRIMARY KEY,
+          movie_id VARCHAR(120) NOT NULL REFERENCES movies(id),
+          user_id VARCHAR(120) NOT NULL REFERENCES users(id),
+          created_at TIMESTAMP WITHOUT TIME ZONE NOT NULL DEFAULT NOW(),
+          CONSTRAINT uq_movie_creators_movie_user UNIQUE (movie_id, user_id)
+        )
+        """
+      ))
+      connection.execute(text(
+        "CREATE INDEX IF NOT EXISTS ix_movie_creators_movie_id ON movie_creators (movie_id)"
+      ))
+      connection.execute(text(
+        "CREATE INDEX IF NOT EXISTS ix_movie_creators_user_id ON movie_creators (user_id)"
+      ))
       connection.execute(text("ALTER TABLE movies ADD COLUMN IF NOT EXISTS title_category VARCHAR(120)"))
       connection.execute(text("ALTER TABLE movies ADD COLUMN IF NOT EXISTS title_caption VARCHAR(255)"))
       connection.execute(text("ALTER TABLE movies ADD COLUMN IF NOT EXISTS stars_required INTEGER NOT NULL DEFAULT 1"))

@@ -1,10 +1,16 @@
-# Push notification setup (Expo + FCM)
+# Push notification setup (Expo push service + FCM)
 
 One-time account/credential setup so download-date approvals reach viewers
 whose app is closed or whose phone is offline.
 
 The app code is already finished. What is missing is external configuration:
 an **EAS project id** and **Firebase Cloud Messaging credentials**.
+
+> **Note:** the mobile app no longer runs through Expo Go / the Expo CLI dev
+> workflow. The Expo parts that remain are (a) the push **service** that
+> backend `core/push.py` sends through (`exp.host`) and (b) the `expo-*`
+> libraries bundled into the app. Building the app is done **only** via
+> Gradle (`gradlew assembleRelease`) as described in Step 5.
 
 ---
 
@@ -30,44 +36,32 @@ Copy-Item -Recurse d:\Python\VCNR_Web\mobile-viewer-app\android d:\android-backu
 
 ---
 
-## Step 1 — Create an Expo account and get the project id
+## Step 1 — Confirm the EAS project id (already configured)
 
-1. Sign up (free) at <https://expo.dev/signup>.
-2. In `d:\Python\VCNR_Web\mobile-viewer-app`:
-
-```powershell
-npx eas-cli@latest login
-npx eas-cli@latest init
-```
-
-`eas init` creates the project on expo.dev and writes the id into `app.json`.
-Confirm it landed:
+This project already has an Expo project id wired up, so **no `eas-cli` / `eas
+init` step is needed**. Confirm it is present in `d:\Python\VCNR_Web\mobile-viewer-app\app.json`:
 
 ```powershell
 Select-String -Path app.json -Pattern projectId
 ```
 
-`app.json` should now contain:
+`app.json` currently contains:
 
 ```json
 "extra": {
   "eas": {
-    "projectId": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+    "projectId": "9943ea1e-32bd-4d35-b1db-6b6215047aa3"
   }
 }
 ```
 
-> If `eas init` refuses to modify `app.json`, paste the block above manually
-> using the id shown on the project page at expo.dev.
-
-**Why this matters:** outside Expo Go, `getExpoPushTokenAsync()` cannot mint a
-token without this id. `src/push.ts` reads it via `resolveEasProjectId()`.
+**Why this matters:** `getExpoPushTokenAsync()` cannot mint a push token
+without this id. `src/push.ts` reads it via `resolveEasProjectId()`.
 
 Editing `app.json` is enough — no prebuild required. `expo-constants` runs
 `get-app-config-android.gradle` on **every** Gradle build, which regenerates
 `assets/app.config` inside the APK from `app.json`. That is how the id reaches
-the running app. (Verified: the current APK already embeds an `app.config`; it
-just has an empty `extra`, which is exactly what Step 1 fills in.)
+the running app. (Verified: the current APK already embeds an `app.config`.)
 
 ---
 
@@ -158,14 +152,11 @@ Re-running `eas credentials` should then show a configured **FCM V1** key.
 
 ---
 
-## Step 5 — Build the APK locally
+## Step 5 — Build the release APK with Gradle
 
-```powershell
-cd d:\Python\VCNR_Web\mobile-viewer-app
-npx expo run:android --variant release
-```
-
-or, to produce a shareable APK:
+The Expo CLI / EAS build path is **not used anymore**. The app is a bare
+workflow (hand-written Kotlin in `android/`), so the release APK is built
+locally with Gradle:
 
 ```powershell
 cd d:\Python\VCNR_Web\mobile-viewer-app\android
@@ -180,11 +171,11 @@ machine, so no extra SDK setup is needed.
 Install it on a **physical phone** (emulators cannot receive push):
 
 ```powershell
-adb install -r android\app\build\outputs\apk\release\app-release.apk
+adb install -r d:\Python\VCNR_Web\mobile-viewer-app\android\app\build\outputs\apk\release\app-release.apk
 ```
 
 > Do **not** reuse the old `cinevault-viewer-release.apk` in the project root —
-> it predates this work and has no notification module.
+> it predates recent work and may have no notification module.
 
 ---
 

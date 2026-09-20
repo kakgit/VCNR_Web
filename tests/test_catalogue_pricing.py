@@ -71,6 +71,7 @@ class CatalogueApiTests(unittest.TestCase):
         yield session
     app.dependency_overrides[get_db] = db
     app.dependency_overrides[routes.require_admin] = lambda: {"id": "test", "role": "super_admin"}
+    app.dependency_overrides[routes.require_admin_or_creator] = lambda: {"id": "test", "role": "super_admin"}
     # Seeding creates demo accounts and media: unrelated to these isolated tests.
     self.seed = patch.object(persistence, "ensure_seeded")
     self.seed.start()
@@ -117,11 +118,11 @@ class CatalogueApiTests(unittest.TestCase):
   def test_admin_pricing_save_and_reload(self):
     for stage, field, options in (
       ("upcoming", "online_pricing_options", PRICES),
-      ("library", "library_pricing_options", [dict(quality_code="4k", quality_label="4K", discs_required=7312, sort_order=0)]),
+      ("library_paid", "library_pricing_options", [dict(quality_code="4k", quality_label="4K", discs_required=7312, sort_order=0)]),
     ):
       with self.subTest(stage=stage):
         movie_id = self.create(stage)
-        saved = self.post(f"/admin/movies/{movie_id}/pricing-config", {field: options})["item"]
+        saved = self.post(f"/admin/movies/{movie_id}/pricing-config", {field: options, "stars_required_theatre": 3})["item"]
         self.assertEqual(saved[field], options)
         for approved in (False, True):
           if approved:
@@ -130,12 +131,12 @@ class CatalogueApiTests(unittest.TestCase):
           self.assertEqual(response.status_code, 200, response.text)
           loaded = next(item for item in response.json()["items"] if item["id"] == movie_id)
           self.assertEqual(loaded[field], options)
-          self.assertEqual(loaded["catalog_origin"], stage)
+          self.assertEqual(loaded["catalog_origin"], "upcoming" if stage == "upcoming" else "library")
 
 
   def test_lifecycle_and_exact_discount_boundaries(self):
     movie_id = self.create()
-    self.post(f"/admin/movies/{movie_id}/pricing-config", {"online_pricing_options": PRICES})
+    self.post(f"/admin/movies/{movie_id}/pricing-config", {"online_pricing_options": PRICES, "stars_required_theatre": 3})
     self.approve(movie_id)
     cases = [(RELEASE - timedelta(seconds=1), "upcoming", [5, 10, 15, 20]),
              (RELEASE, "released", [5, 10, 15, 20]),
@@ -154,7 +155,7 @@ class CatalogueApiTests(unittest.TestCase):
         self.assertEqual(item["catalog_origin"], "upcoming")
 
   def test_direct_library_prices_are_independent_of_age(self):
-    movie_id = self.create("library")
+    movie_id = self.create("library_paid")
     self.post(f"/admin/movies/{movie_id}/pricing-config", {"library_pricing_options": [
       dict(quality_code="4k", quality_label="4K", discs_required=7312)]})
     self.approve(movie_id)
@@ -186,7 +187,7 @@ class CatalogueApiTests(unittest.TestCase):
     movie = dict(id="test", stage="upcoming", catalog_origin="upcoming", title="Test", online_pricing_options=PRICES)
     before = deepcopy(movie)
     payload = AdminMoviePricingConfigRequest(library_pricing_options=[
-      dict(quality_code="4k", quality_label="4K", discs_required=1)])
+      dict(quality_code="4k", quality_label="4K", discs_required=1)], stars_required_theatre=3)
     with patch.object(demo_store, "MOVIES", [movie]), patch.object(demo_store, "MOVIE_CHANGE_REQUESTS", {}):
       with self.assertRaises(HTTPException) as error:
         routes.admin_update_movie_pricing_config("test", payload, db=None, _={})

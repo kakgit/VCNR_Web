@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
 class Base(DeclarativeBase):
@@ -15,10 +15,10 @@ class MovieRecord(Base):
 
   id: Mapped[str] = mapped_column(String(120), primary_key=True)
   archived: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
-  stage: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+  stage: Mapped[str] = mapped_column(String(30), nullable=False, index=True)
+  library_subtype: Mapped[str | None] = mapped_column(String(20), nullable=True)  # "free" | "paid" | None for non-library
   catalog_origin: Mapped[str | None] = mapped_column(String(20), nullable=True)
   library_pricing_options: Mapped[str | None] = mapped_column(Text, nullable=True)
-
   title_category: Mapped[str | None] = mapped_column(String(120), nullable=True)
   title: Mapped[str] = mapped_column(String(255), nullable=False)
   title_caption: Mapped[str | None] = mapped_column(String(255), nullable=True)
@@ -53,6 +53,13 @@ class MovieRecord(Base):
   posters: Mapped[str] = mapped_column(String(120), nullable=False)
   music: Mapped[str] = mapped_column(String(120), nullable=False)
   reward_bonus: Mapped[str] = mapped_column(String(80), nullable=False)
+  source_extension: Mapped[str | None] = mapped_column(String(10), nullable=True, default=None)
+
+  creators: Mapped[list["UserRecord"]] = relationship(
+    secondary="movie_creators",
+    lazy="select",
+    backref="movies",
+  )
 
 
 class MovieWishRecord(Base):
@@ -63,6 +70,36 @@ class MovieWishRecord(Base):
   movie_id: Mapped[str] = mapped_column(ForeignKey("movies.id"), nullable=False, index=True)
   user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), nullable=False, index=True)
   wish_kind: Mapped[str] = mapped_column(String(20), nullable=False, default="online")
+  created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class MovieEngagementEventRecord(Base):
+  """One viewer interaction with a title's promotional content.
+
+  A row is appended every time a viewer opens the title's detail page or views
+  its posters / teaser / gallery / music from the viewer apps. Wish / reserve /
+  buy actions keep their dedicated counters on MovieRecord; this table tracks
+  the promotional "views" that previously had no statistics.
+  """
+
+  __tablename__ = "movie_engagement_events"
+
+  id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+  movie_id: Mapped[str] = mapped_column(ForeignKey("movies.id"), nullable=False, index=True)
+  # Null for anonymous (signed-out) viewers.
+  user_id: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True, index=True)
+  # One of: detail | poster | teaser | gallery | music.
+  event_kind: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+  created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+
+
+class MovieCreatorRecord(Base):
+  __tablename__ = "movie_creators"
+  __table_args__ = (UniqueConstraint("movie_id", "user_id", name="uq_movie_creators_movie_user"),)
+
+  id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+  movie_id: Mapped[str] = mapped_column(ForeignKey("movies.id"), nullable=False, index=True)
+  user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), nullable=False, index=True)
   created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
 
 

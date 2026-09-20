@@ -8,6 +8,7 @@ from pathlib import Path
 import re
 import secrets
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from backend.core.push import (
@@ -31,6 +32,8 @@ from backend.models import (
   NotificationRecord,
   MovieRecord,
   MovieChangeRequestRecord,
+  MovieCreatorRecord,
+  MovieEngagementEventRecord,
   MovieWishRecord,
   PublishSubmissionRecord,
   PushDeviceTokenRecord,
@@ -138,7 +141,10 @@ MOVIE_RECORD_FIELDS = {
   "library_pricing_options",
   "id",
   "archived",
+  "creator_id",
+  "creator_ids",
   "stage",
+  "library_subtype",
   "title_category",
   "title",
   "title_caption",
@@ -173,7 +179,45 @@ MOVIE_RECORD_FIELDS = {
   "posters",
   "music",
   "reward_bonus",
+  "source_extension",
 }
+
+
+def normalize_movie_stage(stage: str | None) -> tuple[str, str | None]:
+  """Map the admin stage selector to canonical (stage, library_subtype).
+
+  "library_free"/"library_paid" collapse to stage "library" plus a subtype so
+  existing library checks (listing, direct playback) keep working while the
+  UI can still split the Library into Free/Paid sections.
+  """
+  value = str(stage or "").strip().lower().replace(" ", "_").replace("-", "_")
+  if value == "library_free":
+    return "library", "free"
+  if value == "library_paid":
+    return "library", "paid"
+  return value, None
+
+
+def movie_stage_label(stage: str, subtype: str | None = None) -> str:
+  if stage == "library":
+    return "Library - Paid" if subtype == "paid" else "Library - Free"
+  return "Upcoming" if stage == "upcoming" else "New Release" if stage == "released" else "Library"
+
+
+def movie_library_subtype(movie: dict | MovieRecord) -> str | None:
+  stage = str((movie.get("stage") if isinstance(movie, dict) else movie.stage) or "").strip().lower()
+  # Titles created through the Add/Edit Title form store the Free/Paid split
+  # directly in the stage ("library_free"/"library_paid"), so those stages
+  # resolve here too - otherwise the pricing serializer drops the 0-star
+  # quality rows that Library (Free) selections need to round-trip.
+  if stage == "library_paid":
+    return "paid"
+  if stage == "library_free":
+    return "free"
+  if stage != "library":
+    return None
+  subtype = (movie.get("library_subtype") if isinstance(movie, dict) else movie.library_subtype) or "free"
+  return "paid" if str(subtype).strip().lower() == "paid" else "free"
 
 QUEUE_RECORD_FIELDS = {
   "id",
@@ -305,7 +349,7 @@ def _normalize_cast_credit_entries(entries) -> list[dict]:
   return normalized
 
 
-def _normalize_online_pricing_options(entries) -> list[dict]:
+def _normalize_online_pricing_options(entries, allow_zero_stars: bool = False) -> list[dict]:
   normalized: list[dict] = []
   if isinstance(entries, str):
     entries = _json_load(entries, [])
@@ -320,7 +364,11 @@ def _normalize_online_pricing_options(entries) -> list[dict]:
     quality_label = str(item.get("quality_label") or "").strip()
     stars_required = int(item.get("stars_required") or 0)
     sort_order = int(item.get("sort_order", index) or index)
-    if not quality_code or not quality_label or stars_required <= 0 or quality_code in seen_codes:
+    if not quality_code or not quality_label or quality_code in seen_codes:
+      continue
+    # Tiers below 1 star are only meaningful for free Library titles, where the
+    # chosen qualities are kept at 0 stars so the admin selection round-trips.
+    if not allow_zero_stars and stars_required <= 0:
       continue
     seen_codes.add(quality_code)
     normalized.append({
@@ -338,8 +386,17 @@ def _load_online_pricing_options(raw_value: str | None) -> list[dict]:
   return _normalize_online_pricing_options(_json_load(raw_value, []))
 
 
-def _dump_online_pricing_options(entries: list[dict] | None) -> str | None:
-  normalized = _normalize_online_pricing_options(entries or [])
+def _load_online_pricing_options_for_movie(movie) -> list[dict]:
+  # Free Library titles keep their quality tiers at 0 stars; the serializer
+  # must not drop them or the admin selection cannot be restored.
+  return _normalize_online_pricing_options(
+    _json_load(str(getattr(movie, "online_pricing_options", None) or ""), []),
+    allow_zero_stars=movie_library_subtype(movie) == "free",
+  )
+
+
+def _dump_online_pricing_options(entries: list[dict] | None, allow_zero_stars: bool = False) -> str | None:
+  normalized = _normalize_online_pricing_options(entries or [], allow_zero_stars=allow_zero_stars)
   return _json_dump(normalized) if normalized else None
 
 
@@ -368,7 +425,13 @@ def _movie_record_payload(payload: dict) -> dict:
   if "library_pricing_options" in normalized:
     normalized["library_pricing_options"] = json.dumps(pricing_entries(normalized["library_pricing_options"]))
   if "online_pricing_options" in normalized:
-    normalized["online_pricing_options"] = _dump_online_pricing_options(normalized.get("online_pricing_options"))
+    # Free Library titles keep their 0-star quality tiers; derive the subtype
+    # from the payload itself so raw ("library_free"/"library_paid") and
+    # canonical ("library") stages both round-trip their selections.
+    normalized["online_pricing_options"] = _dump_online_pricing_options(
+      normalized.get("online_pricing_options"),
+      allow_zero_stars=movie_library_subtype(normalized) == "free",
+    )
   return normalized
 
 
@@ -456,12 +519,17 @@ def _capture_movie_snapshot(movie: MovieRecord) -> dict:
       "stage": movie.stage,
       "catalog_origin": movie.catalog_origin,
       "library_pricing_options": pricing_entries(movie.library_pricing_options),
+      "library_subtype": movie.library_subtype,
       "title_category": movie.title_category,
       "title": movie.title,
       "title_caption": movie.title_caption,
       "poster": movie.poster,
       "genre": movie.genre,
+      # MovieRecord stores creators via the movie_creators join table; capture
+      # the assigned ids so change-request snapshots carry the assignment.
+      "creator_ids": [user.id for user in movie.creators],
       "stars_required": movie.stars_required,
+      "online_pricing_options": _load_online_pricing_options_for_movie(movie),
       "online_pricing_options": _load_online_pricing_options(movie.online_pricing_options),
       "stars_required_theatre": movie.stars_required_theatre,
       "expected_stars": movie.expected_stars,
@@ -490,6 +558,7 @@ def _capture_movie_snapshot(movie: MovieRecord) -> dict:
       "posters": movie.posters,
       "music": movie.music,
       "reward_bonus": movie.reward_bonus,
+      "source_extension": movie.source_extension,
     }
   )
 
@@ -563,7 +632,10 @@ def _movie_snapshot_to_dict(snapshot: dict, approval_status: str = "published") 
   payload = _movie_record_payload(snapshot)
   payload["library_pricing_options"] = pricing_entries(snapshot.get("library_pricing_options"))
   payload["cast_credits"] = _normalize_cast_credit_entries(snapshot.get("cast_credits", []))
-  payload["online_pricing_options"] = _normalize_online_pricing_options(snapshot.get("online_pricing_options", []))
+  payload["online_pricing_options"] = _normalize_online_pricing_options(
+    snapshot.get("online_pricing_options", []),
+    allow_zero_stars=movie_library_subtype(snapshot) == "free",
+  )
   payload.setdefault("id", "")
   payload.setdefault("archived", False)
   payload.setdefault("stage", "upcoming")
@@ -601,6 +673,7 @@ def _movie_snapshot_to_dict(snapshot: dict, approval_status: str = "published") 
   payload.setdefault("posters", "Poster upload pending")
   payload.setdefault("music", "Music upload pending")
   payload.setdefault("reward_bonus", "+0 pts")
+  payload.setdefault("source_extension", None)
   payload["approval_status"] = approval_status
   payload["approval_status_label"] = _approval_status_label(approval_status)
   payload["requires_super_admin_approval"] = approval_status in {"pending_admin_review", "pending_super_admin_approval", "changes_requested"}
@@ -685,6 +758,8 @@ def _movie_to_dict(
   viewer_reservation_online_status: str | None = None,
   viewer_reservation_theatre_status: str | None = None,
   cast_credits: list[dict] | None = None,
+  creator_ids: list[str] | None = None,
+  creator_names: list[str] | None = None,
   ) -> dict:
   return {
     "id": movie.id,
@@ -692,6 +767,9 @@ def _movie_to_dict(
     "stage": movie.stage,
     "catalog_origin": movie.catalog_origin or title_origin({"stage": movie.stage}),
     "library_pricing_options": pricing_entries(movie.library_pricing_options),
+    "library_subtype": movie.library_subtype,
+    "creator_ids": creator_ids or [],
+    "creator_names": creator_names or [],
     "approval_status": approval_status,
     "approval_status_label": _approval_status_label(approval_status),
     "requires_super_admin_approval": approval_status in {"pending_admin_review", "pending_super_admin_approval", "changes_requested"},
@@ -702,7 +780,7 @@ def _movie_to_dict(
     "genre": movie.genre,
     "cast_credits": _normalize_cast_credit_entries(cast_credits or []),
     "stars_required": movie.stars_required,
-    "online_pricing_options": _load_online_pricing_options(movie.online_pricing_options),
+    "online_pricing_options": _load_online_pricing_options_for_movie(movie),
     "stars_required_theatre": movie.stars_required_theatre,
     "expected_stars": movie.expected_stars,
     "reserve_enabled": movie.reserve_enabled,
@@ -733,6 +811,7 @@ def _movie_to_dict(
     "posters": movie.posters,
     "music": movie.music,
     "reward_bonus": movie.reward_bonus,
+    "source_extension": movie.source_extension,
   }
 
 
@@ -746,6 +825,8 @@ def _movie_to_dict_for_session(
   viewer_reservation_theatre_status: str | None = None,
 ) -> dict:
   linked_title = _get_linked_title_by_movie_id(session, movie.id)
+  creator_ids = [link.user_id for link in session.query(MovieCreatorRecord.user_id).filter(MovieCreatorRecord.movie_id == movie.id).all()]
+  creator_names = _resolve_creator_names(session, creator_ids)
   return _movie_to_dict(
     movie,
     approval_status,
@@ -754,6 +835,8 @@ def _movie_to_dict_for_session(
     viewer_reservation_online_status,
     viewer_reservation_theatre_status,
     _load_cast_credits(linked_title.cast_text if linked_title else None),
+    creator_ids=creator_ids,
+    creator_names=[creator_names.get(uid) for uid in creator_ids],
   )
 
 
@@ -883,7 +966,10 @@ def _seed_titles(session: Session) -> None:
       release_date_text=movie["release_date"],
       tentative_release_date_text=movie["release_date"] if movie["stage"] == "upcoming" else None,
       reserve_star_price=movie.get("reserve_star_price", 0),
-      online_pricing_options=_dump_online_pricing_options(movie.get("online_pricing_options", [])),
+      online_pricing_options=_dump_online_pricing_options(
+        movie.get("online_pricing_options", []),
+        allow_zero_stars=movie_library_subtype(movie) == "free",
+      ),
       reserve_enabled=movie.get("reserve_enabled", False),
       buy_now_enabled=movie.get("buy_now_enabled", False),
       release_decision=movie.get("release_decision", "pending"),
@@ -1014,7 +1100,18 @@ def _get_taxonomy_model(kind: str):
   return model
 
 
+_seed_state_checked = False
+
+
 def ensure_seeded(session: Session) -> None:
+  # Seeding and legacy cleanups are one-time idempotent backfills. Every
+  # persistence helper calls this function, and requests nest several calls,
+  # so re-running all the checks/queries each time adds dozens of database
+  # round trips per request (painful on remote databases). Run the full body
+  # once per server process, then skip.
+  global _seed_state_checked
+  if _seed_state_checked:
+    return
   _purge_legacy_demo_library(session)
   _purge_legacy_demo_users(session)
 
@@ -1051,6 +1148,9 @@ def ensure_seeded(session: Session) -> None:
   _seed_publish_submissions(session)
 
   session.commit()
+  # Only mark the state as checked after the first pass fully succeeded so a
+  # startup failure retries on the next request instead of being masked.
+  _seed_state_checked = True
 
 
 def _cleanup_language_taxonomy(session: Session) -> None:
@@ -1462,6 +1562,31 @@ def _notify_reservers_for_download_ready(
   return count
 
 
+def _sync_movie_creators(session: Session, movie_id: str, creator_ids: list[str]) -> None:
+  """Replace the full set of creators assigned to a movie. Every supplied id
+  must belong to an existing 'creator' role user, else ValueError is raised."""
+  wanted = [str(value).strip() for value in creator_ids if str(value).strip()]
+  session.query(MovieCreatorRecord).filter(MovieCreatorRecord.movie_id == movie_id).delete()
+  if wanted:
+    existing = {
+      user.id for user in session.query(UserRecord.id).filter(UserRecord.id.in_(wanted)).all()
+    }
+    missing = sorted(set(wanted) - existing)
+    if missing:
+      raise ValueError(f"Unknown creator id(s): {', '.join(missing)}")
+    for creator_id in wanted:
+      session.add(MovieCreatorRecord(movie_id=movie_id, user_id=creator_id))
+  session.flush()
+
+
+def _resolve_creator_names(session: Session, creator_ids: list[str]) -> dict[str, str]:
+  unique_ids = sorted({str(value) for value in creator_ids if value})
+  if not unique_ids:
+    return {}
+  users = session.query(UserRecord).filter(UserRecord.id.in_(unique_ids)).all()
+  return {user.id: user.name for user in users}
+
+
 def _movie_list_to_dicts(
   session: Session,
   movies: list[MovieRecord],
@@ -1471,6 +1596,20 @@ def _movie_list_to_dicts(
   movie_ids = [movie.id for movie in movies]
   status_map = _resolve_movie_approval_statuses(session, movie_ids)
   change_requests = _resolve_movie_change_requests(session, movie_ids) if prefer_pending else {}
+  pending_creator_ids: list[str] = []
+  if prefer_pending:
+    for movie in movies:
+      change_request = change_requests.get(movie.id)
+      pending_snapshot = _json_load(change_request.pending_snapshot, {}) if change_request else {}
+      pending_creator_ids.extend(str(value) for value in pending_snapshot.get("creator_ids", []) if value)
+  movie_creator_links: dict[str, list[str]] = {movie.id: [] for movie in movies}
+  if movie_ids:
+    for link in session.query(MovieCreatorRecord).filter(MovieCreatorRecord.movie_id.in_(movie_ids)).all():
+      movie_creator_links.setdefault(link.movie_id, []).append(link.user_id)
+  creator_names = _resolve_creator_names(
+    session,
+    [creator_id for links in movie_creator_links.values() for creator_id in links] + pending_creator_ids,
+  )
   linked_titles = {
     title.legacy_movie_id: title
     for title in session.query(TitleRecord).filter(TitleRecord.legacy_movie_id.in_(movie_ids)).all()
@@ -1488,6 +1627,9 @@ def _movie_list_to_dicts(
       pending_snapshot = _json_load(change_request.pending_snapshot, {}) if change_request else {}
       if pending_snapshot and approval_status in {"pending_super_admin_approval", "changes_requested"}:
         pending_item = _movie_snapshot_to_dict(pending_snapshot, approval_status)
+        pending_ids = [str(value) for value in pending_snapshot.get("creator_ids", []) if value]
+        pending_item["creator_ids"] = pending_ids
+        pending_item["creator_names"] = [creator_names.get(uid) for uid in pending_ids]
         pending_item["viewer_wish_kind"] = viewer_wish_map.get(movie.id)
         pending_item["viewer_reservation_status"] = combined_reservation_status
         pending_item["viewer_reservation_online_status"] = reservation_modes.get("online")
@@ -1503,6 +1645,8 @@ def _movie_list_to_dicts(
         reservation_modes.get("online"),
         reservation_modes.get("theatre"),
         _load_cast_credits(linked_titles.get(movie.id).cast_text if linked_titles.get(movie.id) else None),
+        creator_ids=movie_creator_links.get(movie.id, []),
+        creator_names=[creator_names.get(uid) for uid in movie_creator_links.get(movie.id, [])],
       )
     )
   return items
@@ -1593,7 +1737,11 @@ def _ensure_linked_title(session: Session, movie: MovieRecord, approval_status: 
   category = None
   if movie.title_category:
     category = session.query(CategoryRecord).filter(CategoryRecord.name == movie.title_category).first()
-  creator_user = session.query(UserRecord).filter(UserRecord.role.in_(["producer", "creator"])).first()
+  creator_links = session.query(MovieCreatorRecord.user_id).filter(MovieCreatorRecord.movie_id == movie.id).all()
+  creator_user_id = creator_links[0][0] if creator_links else None
+  if creator_user_id is None:
+    creator_user = session.query(UserRecord).filter(UserRecord.role.in_(["producer", "creator"])).first()
+    creator_user_id = creator_user.id if creator_user else None
   linked_title = TitleRecord(
     slug=movie.id,
     legacy_movie_id=movie.id,
@@ -1700,6 +1848,20 @@ def list_movies(
     if stage:
       items = [item for item in items if item["stage"] == stage]
   return items
+
+
+def list_movies_for_creator(session: Session, user_id: str) -> list[dict]:
+  ensure_seeded(session)
+  # MovieRecord has no creator_id column; assignments live in movie_creators.
+  movies = (
+    session.query(MovieRecord)
+    .join(MovieCreatorRecord, MovieCreatorRecord.movie_id == MovieRecord.id)
+    .filter(MovieCreatorRecord.user_id == user_id)
+    .order_by(MovieRecord.title.asc())
+    .all()
+  )
+  _sync_live_release_entitlements(session, movies)
+  return _movie_list_to_dicts(session, movies, prefer_pending=True, viewer_user_id=user_id)
 
 
 def start_movie_reserve(session: Session, movie_id: str) -> dict | None:
@@ -1887,27 +2049,75 @@ def add_publish_queue_item(session: Session, payload: dict) -> dict:
 def create_movie(session: Session, payload: dict) -> dict:
   ensure_seeded(session)
   cast_credits = _normalize_cast_credit_entries(payload.get("cast_credits", []))
+  # Creator assignments ride on the payload but are NOT MovieRecord columns -
+  # pull them out before the record keyword arguments are built.
+  canonical_stage, library_subtype = normalize_movie_stage(payload.get("stage"))
+  is_library = canonical_stage == "library"
+  requested_creator_ids = (
+    []
+    if is_library
+    else [str(value) for value in (payload.get("creator_ids") or []) if value]
+  )
   payload = _movie_record_payload(payload)
+  payload.pop("creator_ids", None)
+  payload.pop("creator_id", None)
   payload.setdefault("archived", False)
+  payload["stage"] = canonical_stage
+  # Preserve an explicit subtype from the payload when the stage arrives
+  # already canonical ("library" + library_subtype="paid") - normalize_movie_stage
+  # only derives the subtype from combined stages like "library_paid".
+  payload["library_subtype"] = (
+    library_subtype
+    or (str(payload.get("library_subtype") or "").strip().lower() or None)
+  )
   payload["catalog_origin"] = title_origin(payload)
-  payload["pricing_snapshot"] = _current_star_price_snapshot(session)
+  payload["stage_label"] = movie_stage_label(canonical_stage, library_subtype)
+  payload["stars_required"] = 0 if is_library else payload.get("stars_required", 1)
+  payload["stars_required_theatre"] = 0 if is_library else payload.get("stars_required_theatre", 3)
+  payload["expected_stars"] = 0 if is_library else payload.get("expected_stars", 0)
+  payload["reserve_enabled"] = False
+  payload["buy_now_enabled"] = False
+  payload["release_decision"] = "approved" if is_library else "pending"
+  payload["playback_requires_subscription"] = False if is_library else True
+  payload["pricing_snapshot"] = (
+    _current_star_price_snapshot(session) if not is_library else None
+  )
   movie = MovieRecord(**payload)
   session.add(movie)
   session.flush()
   change_request, pending_snapshot = _prepare_movie_change_request(
     session,
     movie,
-    status="pending_super_admin_approval",
+    status="approved" if is_library else "pending_super_admin_approval",
     is_new_title=True,
     capture_assets=True,
   )
   pending_snapshot["cast_credits"] = cast_credits
   _save_pending_movie_snapshot(change_request, pending_snapshot)
-  approval_status = _set_movie_approval_status(session, movie, "pending_super_admin_approval")
+  # Sync the many-to-many creator assignments from the payload (if provided).
+  if requested_creator_ids:
+    _sync_movie_creators(session, movie.id, requested_creator_ids)
+  approval_status = _set_movie_approval_status(
+    session, movie, "approved" if is_library else "pending_super_admin_approval"
+  )
   _set_linked_title_cast_credits(session, movie.id, cast_credits)
   session.commit()
   session.refresh(movie)
-  return _movie_snapshot_to_dict(pending_snapshot, approval_status)
+  result = _movie_snapshot_to_dict(pending_snapshot, approval_status)
+  creator_ids = (
+    []
+    if is_library
+    else [
+      link.user_id
+      for link in session.query(MovieCreatorRecord).filter(
+        MovieCreatorRecord.movie_id == movie.id
+      ).all()
+    ]
+  )
+  creator_names = _resolve_creator_names(session, creator_ids)
+  result["creator_ids"] = creator_ids
+  result["creator_names"] = [creator_names.get(uid) for uid in creator_ids]
+  return result
 
 
 def update_movie_interest(
@@ -2355,14 +2565,48 @@ def update_movie_stage(session: Session, movie_id: str, stage: str) -> dict | No
   movie = session.get(MovieRecord, movie_id)
   if movie is None:
     return None
-  change_request, pending_snapshot = _prepare_movie_change_request(session, movie, status="pending_super_admin_approval")
-  pending_snapshot["stage"] = stage
-  pending_snapshot["stage_label"] = "Upcoming" if stage == "upcoming" else "New Release" if stage == "released" else "Old Movies"
+  canonical_stage, library_subtype = normalize_movie_stage(stage)
+  becoming_library = canonical_stage == "library"
+  status = "approved" if becoming_library else "pending_super_admin_approval"
+  change_request, pending_snapshot = _prepare_movie_change_request(session, movie, status=status)
+  pending_snapshot["stage"] = canonical_stage
+  pending_snapshot["library_subtype"] = library_subtype
+  pending_snapshot["stage_label"] = movie_stage_label(canonical_stage, library_subtype)
+  pending_snapshot["countdown"] = (
+    "Release date to be confirmed"
+    if canonical_stage == "upcoming"
+    else "Now showing"
+    if canonical_stage == "released"
+    else "Library title - play directly"
+  )
+  if becoming_library:
+    # Library titles are direct-play: no stars/pricing, no release date, live.
+    movie.stage = canonical_stage
+    movie.library_subtype = library_subtype
+    movie.stage_label = movie_stage_label(canonical_stage, library_subtype)
+    pending_snapshot["stars_required"] = 0
+    pending_snapshot["stars_required_theatre"] = 0
+    pending_snapshot["expected_stars"] = 0
+    pending_snapshot["reserve_enabled"] = False
+    pending_snapshot["buy_now_enabled"] = False
+    pending_snapshot["release_decision"] = "approved"
+    pending_snapshot["playback_requires_subscription"] = False
+    pending_snapshot["release_date"] = ""
   _save_pending_movie_snapshot(change_request, pending_snapshot)
-  approval_status = _set_movie_approval_status(session, movie, "pending_super_admin_approval")
+  approval_status = _set_movie_approval_status(session, movie, status)
   session.commit()
   session.refresh(movie)
   return _movie_snapshot_to_dict(pending_snapshot, approval_status)
+
+
+def get_movie_by_id(session: Session, movie_id: str) -> MovieRecord | None:
+  ensure_seeded(session)
+  return session.get(MovieRecord, movie_id)
+
+
+def save_movie(session: Session, movie: MovieRecord) -> None:
+  session.add(movie)
+  session.commit()
 
 
 def update_movie_details(session: Session, movie_id: str, payload: dict) -> dict | None:
@@ -2385,12 +2629,28 @@ def update_movie_details(session: Session, movie_id: str, payload: dict) -> dict
   pending_snapshot["expected_revenue"] = f'{pending_snapshot["expected_stars"]} stars'
   if payload.get("release_date"):
     pending_snapshot["release_date"] = payload["release_date"]
+  if "source_extension" in payload:
+    movie.source_extension = payload["source_extension"]
+  # Creator assignment: only touch the snapshot/join table when the caller
+  # explicitly sent the field - an omitted key keeps the current assignment,
+  # an empty list clears it, and a non-empty list (re)assigns the title.
+  if "creator_ids" in payload:
+    _sync_movie_creators(session, movie.id, payload.get("creator_ids") or [])
+    # Keep the pending snapshot in step with the new assignment so approval
+    # reviews list the creators that will apply, not the stale captured ones.
+    pending_snapshot["creator_ids"] = list(payload.get("creator_ids") or [])
+    pending_snapshot.pop("creator_id", None)
   _save_pending_movie_snapshot(change_request, pending_snapshot)
   approval_status = _set_movie_approval_status(session, movie, "pending_super_admin_approval")
   _set_linked_title_cast_credits(session, movie.id, pending_snapshot["cast_credits"])
   session.commit()
   session.refresh(movie)
-  return _movie_snapshot_to_dict(pending_snapshot, approval_status)
+  result = _movie_snapshot_to_dict(pending_snapshot, approval_status)
+  creator_ids = [link.user_id for link in session.query(MovieCreatorRecord).filter(MovieCreatorRecord.movie_id == movie.id).all()]
+  creator_names = _resolve_creator_names(session, creator_ids)
+  result["creator_ids"] = creator_ids
+  result["creator_names"] = [creator_names.get(uid) for uid in creator_ids]
+  return result
 
 
 def update_movie_pricing_config(session: Session, movie_id: str, payload: dict) -> dict | None:
@@ -2398,6 +2658,12 @@ def update_movie_pricing_config(session: Session, movie_id: str, payload: dict) 
   movie = session.get(MovieRecord, movie_id)
   if movie is None:
     return None
+
+  library_subtype = movie_library_subtype(movie)
+  raw_stage = str(movie.stage or "").strip().lower()
+  if library_subtype is None and raw_stage in {"library_free", "library_paid"}:
+    library_subtype = "free" if raw_stage == "library_free" else "paid"
+  is_library = library_subtype is not None
 
   direct_prices = payload.get("library_pricing_options")
   if direct_prices is not None:
@@ -2411,12 +2677,35 @@ def update_movie_pricing_config(session: Session, movie_id: str, payload: dict) 
     session.commit()
     return _movie_snapshot_to_dict(pending_snapshot, approval_status)
 
-  options = _normalize_online_pricing_options(payload.get("online_pricing_options", []))
-  default_online_stars = _derive_default_online_stars(options)
-  theatre_stars = int(payload.get("stars_required_theatre") or 3)
-  target_stars = int(payload.get("expected_stars") or 0)
+  options = _normalize_online_pricing_options(
+    payload.get("online_pricing_options", []),
+    allow_zero_stars=library_subtype == "free",
+  )
+  if is_library:
+    if library_subtype == "paid":
+      if not options:
+        raise ValueError("Library (Paid) titles need at least one online quality with stars required (min 1).")
+      default_online_stars = _derive_default_online_stars(options)
+    else:
+      # Library (Free) titles are always free - keep the chosen qualities but
+      # every tier stays at 0 stars so the admin selection round-trips.
+      for option in options:
+        option["stars_required"] = 0
+      default_online_stars = 0
+    theatre_stars = 0
+    target_stars = 0
+  else:
+    if not options:
+      raise ValueError("Add at least one online quality row.")
+    default_online_stars = _derive_default_online_stars(options)
+    theatre_stars = payload.get("stars_required_theatre")
+    theatre_stars = 3 if theatre_stars is None else int(theatre_stars)
+    target_stars = payload.get("expected_stars")
+    target_stars = 0 if target_stars is None else int(target_stars)
+    if not (1 <= theatre_stars <= 10):
+      raise ValueError("Stars Required - Theatre must be between 1 and 10.")
 
-  movie.online_pricing_options = _dump_online_pricing_options(options)
+  movie.online_pricing_options = _dump_online_pricing_options(options, allow_zero_stars=library_subtype == "free")
   movie.stars_required = default_online_stars
   movie.reserve_star_price = default_online_stars
   movie.stars_required_theatre = theatre_stars
@@ -2642,7 +2931,10 @@ def delete_movie_permanently(session: Session, movie_id: str) -> dict | None:
   deleted_movie = _movie_to_dict_for_session(session, movie)
   session.query(MovieChangeRequestRecord).filter(MovieChangeRequestRecord.movie_id == movie_id).delete()
   session.query(MovieWishRecord).filter(MovieWishRecord.movie_id == movie_id).delete()
+  session.query(MovieCreatorRecord).filter(MovieCreatorRecord.movie_id == movie_id).delete()
   session.query(ContentDeliveryEnrollmentRecord).filter(ContentDeliveryEnrollmentRecord.movie_id == movie_id).delete()
+  session.query(MovieEngagementEventRecord).filter(MovieEngagementEventRecord.movie_id == movie_id).delete()
+  session.query(NotificationRecord).filter(NotificationRecord.movie_id == movie_id).delete()
   linked_title = session.query(TitleRecord).filter(TitleRecord.legacy_movie_id == movie_id).first()
   if linked_title is not None:
     session.query(TitlePosterRecord).filter(TitlePosterRecord.title_id == linked_title.id).delete()
@@ -2670,6 +2962,132 @@ def list_users(session: Session) -> list[dict]:
     for wallet in session.query(WalletRecord).filter(WalletRecord.user_id.in_([user.id for user in users])).all()
   }
   return [_user_to_dict(user, wallets.get(user.id)) for user in users]
+
+
+def list_creators(session: Session) -> list[dict]:
+  ensure_seeded(session)
+  users = (
+    session.query(UserRecord)
+    .filter(UserRecord.role == "creator")
+    .order_by(UserRecord.name.asc())
+    .all()
+  )
+  return [{"id": user.id, "name": user.name, "email": user.email} for user in users]
+
+
+def get_movie_creator_id(session: Session, movie_id: str) -> str | None:
+  movie = session.get(MovieRecord, movie_id)
+  if movie is None:
+    return None
+  # Creators are linked via the movie_creators join table; return the first
+  # assigned creator (or None) for legacy single-creator consumers.
+  link = session.query(MovieCreatorRecord).filter(MovieCreatorRecord.movie_id == movie.id).first()
+  return link.user_id if link else None
+
+
+def get_movie_creator_ids(session: Session, movie_id: str) -> list[str]:
+  """All creator user ids assigned to a title (assignment gate for creator-only features)."""
+  movie = session.get(MovieRecord, movie_id)
+  if movie is None:
+    return []
+  links = session.query(MovieCreatorRecord.user_id).filter(MovieCreatorRecord.movie_id == movie.id).all()
+  return [row[0] for row in links if row[0]]
+
+
+ENGAGEMENT_EVENT_KINDS = ("detail", "poster", "teaser", "gallery", "music")
+
+
+def record_movie_engagement(
+  session: Session,
+  movie_id: str,
+  event_kind: str,
+  user_id: str | None = None,
+) -> bool:
+  """Append one viewer engagement event (detail/poster/teaser/gallery/music view)."""
+  if event_kind not in ENGAGEMENT_EVENT_KINDS:
+    raise ValueError("Unsupported engagement kind.")
+  ensure_seeded(session)
+  movie = session.get(MovieRecord, movie_id)
+  if movie is None or movie.archived:
+    return False
+  session.add(
+    MovieEngagementEventRecord(
+      movie_id=movie.id,
+      user_id=user_id,
+      event_kind=event_kind,
+      created_at=datetime.utcnow(),
+    )
+  )
+  session.commit()
+  return True
+
+
+def get_movie_engagement_summary(session: Session, movie_id: str) -> dict:
+  """Aggregate engagement counts for a title, grouped by event kind."""
+  summary = {
+    "detail_views": 0,
+    "poster_views": 0,
+    "teaser_views": 0,
+    "gallery_views": 0,
+    "music_views": 0,
+    "total_views": 0,
+    "unique_viewers": 0,
+  }
+  rows = (
+    session.query(MovieEngagementEventRecord.event_kind, func.count(MovieEngagementEventRecord.id))
+    .filter(MovieEngagementEventRecord.movie_id == movie_id)
+    .group_by(MovieEngagementEventRecord.event_kind)
+    .all()
+  )
+  for event_kind, count in rows:
+    key = f"{event_kind}_views"
+    if key in summary:
+      summary[key] = int(count)
+  summary["total_views"] = sum(summary[key] for key in ("detail_views", "poster_views", "teaser_views", "gallery_views", "music_views"))
+  unique_row = (
+    session.query(func.count(func.distinct(MovieEngagementEventRecord.user_id)))
+    .filter(MovieEngagementEventRecord.movie_id == movie_id, MovieEngagementEventRecord.user_id.isnot(None))
+    .one()
+  )
+  summary["unique_viewers"] = int(unique_row[0]) if unique_row else 0
+  return summary
+
+
+def set_movie_creator(session: Session, movie_id: str, creator_id: str | None) -> dict:
+  # Backward-compatible single-id wrapper: clears when None, else [creator_id].
+  creator_ids = [creator_id] if creator_id else []
+  return set_movie_creators(session, movie_id, creator_ids)
+
+
+def set_movie_creators(session: Session, movie_id: str, creator_ids: list[str]) -> dict:
+  ensure_seeded(session)
+  movie = session.get(MovieRecord, movie_id)
+  if movie is None:
+    raise LookupError("Movie not found.")
+  _sync_movie_creators(session, movie_id, creator_ids)
+  # Keep any pending change-request snapshot in sync so approving later edits
+  # cannot overwrite the freshly assigned creators with a stale value.
+  change_request = _get_movie_change_request(session, movie.id)
+  if change_request is not None:
+    pending_snapshot = _json_load(change_request.pending_snapshot, {})
+    if pending_snapshot:
+      pending_snapshot["creator_ids"] = creator_ids
+      pending_snapshot.pop("creator_id", None)
+      change_request.pending_snapshot = _json_dump(pending_snapshot)
+      change_request.updated_at = datetime.utcnow()
+  session.commit()
+  session.refresh(movie)
+  approval_status = _resolve_movie_approval_statuses(session, [movie.id]).get(movie.id, "published")
+  linked_title = _get_linked_title_by_movie_id(session, movie.id)
+  resolved_ids = [link.user_id for link in session.query(MovieCreatorRecord).filter(MovieCreatorRecord.movie_id == movie.id).all()]
+  creator_names = _resolve_creator_names(session, resolved_ids)
+  return _movie_to_dict(
+    movie,
+    approval_status,
+    cast_credits=_load_cast_credits(linked_title.cast_text if linked_title else None),
+    creator_ids=resolved_ids,
+    creator_names=[creator_names.get(uid) for uid in resolved_ids],
+  )
 
 
 def get_user_profile(session: Session, user_id: str) -> dict | None:
@@ -2861,6 +3279,9 @@ def delete_user(session: Session, user_id: str) -> dict | None:
     {TitleRecord.creator_user_id: None},
     synchronize_session=False,
   )
+  # Movie creators are linked through the movie_creators join table (MovieRecord
+  # itself has no creator_id column), so remove those links for the deleted user.
+  session.query(MovieCreatorRecord).filter(MovieCreatorRecord.user_id == user.id).delete(synchronize_session=False)
   session.query(PublishSubmissionRecord).filter(PublishSubmissionRecord.creator_user_id == user.id).update(
     {PublishSubmissionRecord.creator_user_id: None},
     synchronize_session=False,

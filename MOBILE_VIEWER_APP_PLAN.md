@@ -7,7 +7,9 @@ Build one shared mobile viewer app for both Android and iOS.
 Recommended starting stack:
 
 - React Native
-- Expo at the beginning for faster setup
+- Expo **libraries only** (expo-* modules bundled into the app) — the app is a
+  bare workflow with hand-written native Kotlin; it is **not** run through
+  Expo Go / the Expo dev server anymore
 - Existing VCNR backend APIs for auth, catalog, wallet, reserve, buy, download, and collection flows
 
 Why this direction:
@@ -132,7 +134,7 @@ Mobile app:
 
 These still need final clarification before implementation:
 
-- React Native with Expo first, or bare React Native from day one
+- React Native with Expo libraries only vs bare React Native from day one → **decided:** bare workflow, no Expo Go / dev server; builds are done locally with Gradle release builds
 - One device only or multiple devices per user
 - Whether extra stars are needed for extra devices
 - Exact secure playback restrictions

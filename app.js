@@ -1,4 +1,4 @@
-import {
+﻿import {
   FragmentedMp4Assembler,
   joinBytes,
   mimeFromInitializationSegment,
@@ -234,11 +234,24 @@ const adminLibraryEditor = document.getElementById("adminLibraryEditor");
 const adminLibraryEditId = document.getElementById("adminLibraryEditId");
 const adminLibraryModalTitle = document.getElementById("adminLibraryModalTitle");
 const adminLibraryModalCopy = document.getElementById("adminLibraryModalCopy");
+const adminLibraryCreator = document.getElementById("adminLibraryCreator");
+const adminCreatorAssignmentModal = document.getElementById("adminCreatorAssignmentModal");
+const adminCreatorAssignmentForm = document.getElementById("adminCreatorAssignmentForm");
+const adminCreatorAssignmentMovieId = document.getElementById("adminCreatorAssignmentMovieId");
+const adminCreatorAssignmentSearch = document.getElementById("adminCreatorAssignmentSearch");
+const adminCreatorAssignmentResults = document.getElementById("adminCreatorAssignmentResults");
+const adminCreatorAssignmentPanel = document.getElementById("adminCreatorAssignmentPanel");
+const adminCreatorAssignmentCount = document.getElementById("adminCreatorAssignmentCount");
+const adminCreatorAssignmentSaveButton = document.getElementById("adminCreatorAssignmentSaveButton");
 const adminLibraryCategory = document.getElementById("adminLibraryCategory");
 const adminLibraryTitle = document.getElementById("adminLibraryTitle");
 const adminLibraryCaption = document.getElementById("adminLibraryCaption");
 const adminLibraryGenre = document.getElementById("adminLibraryGenre");
 const adminLibraryExpectedDate = document.getElementById("adminLibraryExpectedDate");
+const adminLibraryExpectedDateField = document.getElementById("adminLibraryExpectedDateField");
+// The stage select was removed from the resolved editor markup; keep a null-safe
+// declaration so the guarded legacy references below never throw.
+const adminLibraryMovieStage = document.getElementById("adminLibraryMovieStage");
 const adminLibraryCastCredits = document.getElementById("adminLibraryCastCredits");
 const adminLibraryAddCastCreditButton = document.getElementById("adminLibraryAddCastCreditButton");
 const adminLibraryDescription = document.getElementById("adminLibraryDescription");
@@ -309,7 +322,15 @@ const adminMusicAssetList = document.getElementById("adminMusicAssetList");
 const adminMusicCancelButton = document.getElementById("adminMusicCancelButton");
 const adminContentUploadModal = document.getElementById("adminContentUploadModal");
 const adminContentUploadForm = document.getElementById("adminContentUploadForm");
+const adminLibraryContentUploadModal = document.getElementById("adminLibraryContentUploadModal");
+const adminLibraryContentUploadForm = document.getElementById("adminLibraryContentUploadForm");
+const adminLibraryContentMovieId = document.getElementById("adminLibraryContentMovieId");
+const adminLibraryContentFile = document.getElementById("adminLibraryContentFile");
+const adminLibraryContentFileName = document.getElementById("adminLibraryContentFileName");
+const adminLibraryContentStatus = document.getElementById("adminLibraryContentStatus");
+const adminLibraryContentHlsStatus = document.getElementById("adminLibraryContentHlsStatus");
 const adminContentMovieId = document.getElementById("adminContentMovieId");
+let adminLibraryHlsPollTimer = null;
 const adminContentFiles = document.getElementById("adminContentFiles");
 const adminContentPassword = document.getElementById("adminContentPassword");
 const adminContentGeneratePasswordButton = document.getElementById("adminContentGeneratePasswordButton");
@@ -328,6 +349,9 @@ let adminContentQualityState = {
   items: [],
   isComplete: false,
 };
+// Pricing & Targets modal mode - "standard" | "library_free" | "library_paid".
+// Set when the modal opens so star fields and quality-row constraints match the stage.
+let adminPricingMode = "standard";
 const adminSessionRole = document.getElementById("adminSessionRole");
 const adminSessionEmail = document.getElementById("adminSessionEmail");
 const adminSignoutButton = document.getElementById("adminSignoutButton");
@@ -382,6 +406,10 @@ let adminTaxonomyKindFilter = "all";
 let adminTaxonomySortValue = "kind-asc";
 let adminTaxonomyPage = 1;
 const ADMIN_TAXONOMY_PER_PAGE = 6;
+let adminCreators = [];
+let creatorAssignmentUsersPromise = null;
+let creatorAssignmentAssignedIds = new Set();
+let creatorAssignmentSearchTerm = "";
 let adminLibrarySearchTerm = "";
 let adminLibrarySortValue = "title-asc";
 let adminLibraryPage = 1;
@@ -597,6 +625,61 @@ function getProcessedAdminTaxonomies() {
 function getAdminMovieSortMeta() {
   const [key = "title", direction = "asc"] = (adminLibrarySortValue || "title-asc").split("-");
   return { key, direction };
+}
+
+function isAdminLibraryMovie(movie) {
+  if (!movie) {
+    return false;
+  }
+  const stage = String(movie.stage || "").toLowerCase();
+  const subtype = String(movie.librarySubtype || "").toLowerCase();
+  return (
+    stage === "library" ||
+    stage === "library_free" ||
+    stage === "library_paid" ||
+    subtype === "free" ||
+    subtype === "paid"
+  );
+}
+
+function getAdminLibraryEditorStageValue(movie) {
+  if (!movie) {
+    return "upcoming";
+  }
+  const stage = String(movie.stage || "").toLowerCase();
+  if (stage === "library_free" || stage === "library_paid") {
+    return stage;
+  }
+  if (stage === "library") {
+    return getAdminLibrarySubtype(movie) === "paid" ? "library_paid" : "library_free";
+  }
+  return stage || "upcoming";
+}
+
+function getAdminLibrarySubtype(movie) {
+  if (!movie) {
+    return "";
+  }
+  const stage = String(movie.stage || "").toLowerCase();
+  const subtype = String(movie.librarySubtype || "").toLowerCase();
+  const stageLabel = String(movie.stageLabel || "").toLowerCase();
+  if (subtype === "paid" || stage === "library_paid" || stageLabel.includes("paid")) {
+    return "paid";
+  }
+  if (subtype === "free" || stage === "library_free" || stageLabel.includes("free")) {
+    return "free";
+  }
+  if (String(movie.catalogOrigin || movie.catalog_origin || "") === "library") {
+    // Direct Library uploads are Disc-priced; treat them as paid so the
+    // free-title zeroing never touches their Disc prices.
+    return "paid";
+  }
+  if (stage === "library") {
+    // A canonical library record without a subtype defaults to Free, matching
+    // the backend default (movie_library_subtype -> "free").
+    return "free";
+  }
+  return "";
 }
 
 function getAdminMovieStageLabel(movie) {
@@ -1388,6 +1471,8 @@ function normalizeMovie(movie) {
       sortOrder: Number(item.sort_order || 0),
     })) : [],
     effectivePricingOptions: Array.isArray(movie.effective_pricing_options) ? movie.effective_pricing_options : [],
+    creatorIds: Array.isArray(movie.creator_ids) ? movie.creator_ids : (movie.creator_id ? [movie.creator_id] : []),
+    creatorNames: Array.isArray(movie.creator_names) ? movie.creator_names : (movie.creator_name ? [movie.creator_name] : []),
     approvalStatus: movie.approval_status || (movie.archived ? "archived" : "published"),
     approvalStatusLabel: movie.approval_status_label || (movie.archived ? "Archived" : "Published"),
     requiresSuperAdminApproval: Boolean(movie.requires_super_admin_approval),
@@ -1414,7 +1499,7 @@ function normalizeMovie(movie) {
           starsRequired: Number(item?.stars_required || 0),
           sortOrder: Number(item?.sort_order || 0),
         }))
-        .filter((item) => item.qualityCode && item.qualityLabel && item.starsRequired > 0)
+        .filter((item) => item.qualityCode && item.qualityLabel && (item.starsRequired > 0 || item.qualityCode))
       : [],
     starsRequired: Number(movie.stars_required || 1),
     starsRequiredTheatre: Number(movie.stars_required_theatre || movie.reserve_star_price || 3),
@@ -1445,6 +1530,8 @@ function normalizeMovie(movie) {
     posters: movie.posters,
     music: movie.music,
     rewardBonus: movie.reward_bonus,
+    sourceExtension: movie.source_extension || null,
+    librarySubtype: movie.library_subtype || null,
   };
 }
 
@@ -1851,9 +1938,14 @@ function renderAdminPricingRows(items = []) {
 
   adminPricingOnlineRows.innerHTML = rows.map((entry, index) => {
     const qualityCode = String(entry.qualityCode || entry.quality_code || "").trim().toLowerCase();
-    const starsRequired = String((directLibrary
-      ? entry.discsRequired ?? entry.discs_required ?? entry.starsRequired
-      : entry.starsRequired ?? entry.stars_required) ?? "");
+    const starsLockedAtZero = !directLibrary && adminPricingMode === "library_free";
+    const starsRequired = starsLockedAtZero
+      ? "0"
+      : String((directLibrary
+        ? entry.discsRequired ?? entry.discs_required ?? entry.starsRequired
+        : entry.starsRequired ?? entry.stars_required) ?? "").trim();
+    const starsDisabled = starsLockedAtZero ? " disabled" : "";
+    const starsMin = starsLockedAtZero ? "0" : "1";
     return `
       <div class="admin-pricing-row" data-pricing-row="${index}">
         <label class="field">
@@ -1865,7 +1957,7 @@ function renderAdminPricingRows(items = []) {
         </label>
         <label class="field">
           <span class="sr-only">${unit} required</span>
-          <input type="number" min="1" max="${directLibrary ? 100000000 : 20}" step="1" data-pricing-stars placeholder="${unit} required" value="${escapeHtml(starsRequired)}">
+          <input type="number" min="${starsMin}" max="${directLibrary ? 100000000 : 20}" step="1" data-pricing-stars placeholder="${unit} required" value="${escapeHtml(starsRequired)}"${starsDisabled}>
         </label>
         <button type="button" class="icon-btn danger" data-remove-pricing-row title="Remove row" aria-label="Remove row">&#128465;</button>
       </div>
@@ -1898,7 +1990,7 @@ function readAdminPricingRows() {
         sortOrder: index,
       };
     })
-    .filter((item) => item.qualityCode || item.starsRequired);
+    .filter((item) => item.qualityCode);
 }
 
 function appendAdminPricingRow() {
@@ -2086,6 +2178,28 @@ async function loadAdminMoviesFromApi() {
   adminMovies = (response.items || []).map(normalizeMovie);
 }
 
+async function loadAdminCreatorsFromApi() {
+  try {
+    const response = await apiRequest("/admin/creators");
+    adminCreators = response.items || [];
+  } catch (error) {
+    adminCreators = [];
+  }
+}
+
+function renderAdminCreatorOptions() {
+  if (!adminLibraryCreator) {
+    return;
+  }
+  adminLibraryCreator.innerHTML = '<option value="">Not assigned</option>';
+  for (const creator of adminCreators) {
+    const option = document.createElement("option");
+    option.value = creator.id;
+    option.textContent = `${creator.name} (${creator.email})`;
+    adminLibraryCreator.appendChild(option);
+  }
+}
+
 async function loadAdminUsersFromApi() {
   const response = await apiRequest("/admin/users");
   adminUsers = response.items || [];
@@ -2164,13 +2278,17 @@ async function bootstrapAppData() {
       if (profile && ["admin", "super_admin"].includes(profile.role)) {
         setAdminSession(profile.role, profile.email);
         await loadAdminSummaryFromApi();
-        await Promise.all([loadAdminStarPricingFromApi(), loadAdminMoviesFromApi(), loadAdminUsersFromApi(), loadAdminTaxonomiesFromApi()]);
+        await Promise.all([loadAdminStarPricingFromApi(), loadAdminMoviesFromApi(), loadAdminUsersFromApi(), loadAdminTaxonomiesFromApi(), loadAdminCreatorsFromApi()]);
       }
       if (entryMode === "admin" && profile && ["admin", "super_admin"].includes(profile.role)) {
         setView("admin");
         setAdminPanel(profile.role === "super_admin" ? "super-admin" : "users");
       } else if (entryMode === "creator" && profile && ["producer", "creator"].includes(profile.role)) {
-        setView("viewer");
+        setAdminSession(profile.role, profile.email);
+        setAdminPanel("library");
+        setView("admin");
+        await Promise.all([loadAdminMoviesFromApi(), loadAdminTaxonomiesFromApi(), loadAdminCreatorsFromApi()]);
+        renderAdminMovieList();
       }
     } else {
       syncViewerHeader();
@@ -4127,20 +4245,21 @@ function buildAdminMovieRowMarkup(movie, mode = "upcoming") {
         </div>
         <div class="admin-movie-actions">
           <div class="admin-movie-actions-top">
-            <button type="button" class="icon-btn" data-admin-movie-action="edit" title="Edit title" aria-label="Edit title">&#9998;</button>
+            <button type="button" class="icon-btn" data-admin-movie-action="creator" title="Assign creators" aria-label="Assign creators">&#128100;</button>
             <button type="button" class="icon-btn admin-movie-action-posters" data-admin-movie-action="posters" title="Upload posters" aria-label="Upload posters" ${movie.archived ? "disabled" : ""}>&#128247;</button>
             <button type="button" class="icon-btn admin-movie-action-trailer" data-admin-movie-action="trailer" title="Upload teasers" aria-label="Upload teasers" ${movie.archived ? "disabled" : ""}>&#127909;</button>
             <button type="button" class="icon-btn admin-movie-action-gallery" data-admin-movie-action="gallery" title="Upload gallery" aria-label="Upload gallery" ${movie.archived ? "disabled" : ""}>&#127748;</button>
             <button type="button" class="icon-btn admin-movie-action-music" data-admin-movie-action="music" title="Upload music" aria-label="Upload music" ${movie.archived ? "disabled" : ""}>&#9835;</button>
-            ${isUpcomingList ? `<button type="button" class="icon-btn" data-admin-movie-action="delivery-queue" title="Assign creators" aria-label="Assign creators">&#9201;</button>` : ""}
-            <button type="button" class="icon-btn danger" data-admin-movie-action="archive" title="Archive title" aria-label="Archive title" ${movie.archived ? "disabled" : ""}>&#128465;</button>
+            ${isUpcomingList || !isAdminLibraryMovie(movie) ? `<button type="button" class="icon-btn" data-admin-movie-action="delivery-queue" title="Open delivery queue" aria-label="Open delivery queue">&#9201;</button>` : ""}
           </div>
           <div class="admin-movie-actions-bottom">
             <button type="button" class="icon-btn admin-movie-action-approve" data-admin-movie-action="approve" title="Approve title" aria-label="Approve title" ${canApproveMovie(movie) ? "" : "disabled"}>&#10003;</button>
             <button type="button" class="icon-btn" data-admin-movie-action="pricing-targets" title="Pricing and targets" aria-label="Pricing and targets" ${movie.archived ? "disabled" : ""}>&#127919;</button>
-            ${isUpcomingList ? `<button type="button" class="icon-btn admin-movie-action-reserve-start${movie.reserveEnabled ? " is-active" : ""}" data-admin-movie-action="reserve-start" title="${movie.reserveEnabled ? "Stop Reserve Now" : "Start Reserve Now"}" aria-label="${movie.reserveEnabled ? "Stop Reserve Now" : "Start Reserve Now"}" ${canToggleReserve(movie) ? "" : "disabled"}>${movie.reserveEnabled ? "&#9733;" : "&#9734;"}</button>` : ""}
-            <button type="button" class="icon-btn admin-movie-action-content" data-admin-movie-action="content" data-admin-content-open="${movie.id}" onclick="window.openAdminContentUploadForMovie('${movie.id}')" title="Upload main content" aria-label="Upload main content" ${movie.archived ? "disabled" : ""}>&#127916;</button>
-            ${isUpcomingList ? `<button type="button" class="icon-btn admin-movie-action-release-main" data-admin-movie-action="release-main-content" data-admin-release-main-open="${movie.id}" onclick="window.openAdminReleaseMainContentForMovie('${movie.id}')" title="Release main content" aria-label="Release main content" ${movie.archived ? "disabled" : ""}>&#9654;</button>` : ""}
+            ${isUpcomingList || !isAdminLibraryMovie(movie) ? `<button type="button" class="icon-btn admin-movie-action-reserve-start${movie.reserveEnabled ? " is-active" : ""}" data-admin-movie-action="reserve-start" title="${movie.reserveEnabled ? "Stop Reserve Now" : "Start Reserve Now"}" aria-label="${movie.reserveEnabled ? "Stop Reserve Now" : "Start Reserve Now"}" ${canToggleReserve(movie) ? "" : "disabled"}>${movie.reserveEnabled ? "&#9733;" : "&#9734;"}</button>` : ""}
+            ${isAdminLibraryMovie(movie) ? `<button type="button" class="icon-btn icon-btn-processed icon-btn-successful" onclick="window.openAdminLibraryContentUploadForMovie('${movie.id}')" title="Upload library video" aria-label="Upload library video" ${!movie.archived ? "" : "disabled"}>&#127916;</button>` : `<button type="button" class="icon-btn admin-movie-action-content" data-admin-movie-action="content" data-admin-content-open="${movie.id}" onclick="window.openAdminContentUploadForMovie('${movie.id}')" title="Upload main content" aria-label="Upload main content" ${movie.archived ? "disabled" : ""}>&#127916;</button>`}
+            ${isUpcomingList || !isAdminLibraryMovie(movie) ? `<button type="button" class="icon-btn admin-movie-action-release-main" data-admin-movie-action="release-main-content" data-admin-release-main-open="${movie.id}" onclick="window.openAdminReleaseMainContentForMovie('${movie.id}')" title="Release main content" aria-label="Release main content" ${movie.archived ? "disabled" : ""}>&#9654;</button>` : ""}
+            <button type="button" class="icon-btn" data-admin-movie-action="edit" title="Edit title" aria-label="Edit title">&#9998;</button>
+            <button type="button" class="icon-btn danger" data-admin-movie-action="archive" title="Archive title" aria-label="Archive title" ${movie.archived ? "disabled" : ""}>&#128465;</button>
           </div>
         </div>
         <div class="admin-movie-upload-start-row">${escapeHtml(formatAdminUploadStartLabel(movie.deliveryStartAt))}</div>
@@ -4239,6 +4358,180 @@ function renderAdminArchiveMovieList() {
     `).join("")}
   `;
   renderAdminSummaryMetrics();
+}
+
+// Keeps the creator dropdown in sync with the Manage Users data. The movie
+// row chips resolve names from the same source once it is loaded.
+function ensureAdminCreatorsLoaded() {
+  if (creatorAssignmentUsersPromise) {
+    return creatorAssignmentUsersPromise;
+  }
+  if (adminCreators.length) {
+    return Promise.resolve();
+  }
+  creatorAssignmentUsersPromise = loadAdminCreatorsFromApi()
+    .catch(() => {
+      adminCreators = [];
+    })
+    .finally(() => {
+      creatorAssignmentUsersPromise = null;
+    });
+  return creatorAssignmentUsersPromise;
+}
+
+async function updateAdminMovieCreatorRemote(movieId, creatorId) {
+  const response = await apiRequest(`/admin/movies/${movieId}/creator`, {
+    method: "POST",
+    body: JSON.stringify({ creator_id: creatorId || null }),
+  });
+  const updatedMovie = normalizeMovie(response.item);
+  updateMovieCollections(updatedMovie);
+  renderAdminMovieList();
+  renderAdminArchiveMovieList();
+  return response;
+}
+
+function creatorAssignmentName(movie) {
+  if (Array.isArray(movie.creatorNames) && movie.creatorNames.length) {
+    return movie.creatorNames.join(", ");
+  }
+  if (!Array.isArray(movie.creatorIds) || !movie.creatorIds.length) {
+    return "";
+  }
+  return movie.creatorIds
+    .map((id) => {
+      const creator = adminCreators.find((item) => item.id === id);
+      return creator ? creator.name : null;
+    })
+    .filter(Boolean)
+    .join(", ");
+}
+
+function openCreatorAssignmentModal(movieId) {
+  const movie = getMovieById(movieId);
+  if (!movie || !adminCreatorAssignmentModal || !adminCreatorAssignmentForm) {
+    return;
+  }
+  creatorAssignmentAssignedIds = new Set(movie.creatorIds || []);
+  ensureAdminCreatorsLoaded().then(() => {
+    adminCreatorAssignmentMovieId.value = movieId;
+    if (adminCreatorAssignmentSearch) {
+      adminCreatorAssignmentSearch.value = "";
+    }
+    renderCreatorAssignmentResults("");
+    renderCreatorAssignmentPanel();
+    adminCreatorAssignmentModal.classList.remove("hidden");
+    adminCreatorAssignmentModal.setAttribute("aria-hidden", "false");
+    if (adminCreatorAssignmentSearch) {
+      adminCreatorAssignmentSearch.focus();
+    }
+  });
+}
+
+function closeCreatorAssignmentModal() {
+  if (!adminCreatorAssignmentModal) {
+    return;
+  }
+  adminCreatorAssignmentModal.classList.add("hidden");
+  adminCreatorAssignmentModal.setAttribute("aria-hidden", "true");
+  creatorAssignmentAssignedIds = new Set();
+  if (adminCreatorAssignmentForm) {
+    adminCreatorAssignmentForm.reset();
+  }
+}
+
+function renderCreatorAssignmentResults(searchTerm) {
+  if (!adminCreatorAssignmentResults) {
+    return;
+  }
+  const term = (searchTerm || "").trim().toLowerCase();
+  if (!adminCreators.length) {
+    adminCreatorAssignmentResults.innerHTML = `<p class="helper-text">No creator accounts found. Create a user with the Creator role first.</p>`;
+    return;
+  }
+  const filtered = adminCreators.filter((creator) => {
+    if (!term) {
+      return true;
+    }
+    return (
+      String(creator.name || "").toLowerCase().includes(term) ||
+      String(creator.email || "").toLowerCase().includes(term)
+    );
+  });
+  if (!filtered.length) {
+    adminCreatorAssignmentResults.innerHTML = `<p class="helper-text">No creators match "${escapeHtml(term)}".</p>`;
+    return;
+  }
+  adminCreatorAssignmentResults.innerHTML = filtered
+    .map((creator) => {
+      const isAssigned = creatorAssignmentAssignedIds.has(creator.id);
+      return `
+        <button type="button" class="admin-creator-result-item${isAssigned ? " is-assigned" : ""}" data-creator-id="${escapeHtml(creator.id)}" data-creator-action="add">
+          <span>
+            <strong>${escapeHtml(creator.name)}</strong>
+            <small>${escapeHtml(creator.email)}</small>
+          </span>
+          <span class="admin-creator-result-toggle">${isAssigned ? "✓" : "+"}</span>
+        </button>`;
+    })
+    .join("");
+}
+
+function renderCreatorAssignmentPanel() {
+  if (!adminCreatorAssignmentPanel) {
+    return;
+  }
+  if (adminCreatorAssignmentCount) {
+    adminCreatorAssignmentCount.textContent = String(creatorAssignmentAssignedIds.size);
+  }
+  if (!creatorAssignmentAssignedIds.size) {
+    adminCreatorAssignmentPanel.innerHTML = `<p class="helper-text">No creators assigned yet. Search above and click to add.</p>`;
+    return;
+  }
+  const assignedCreators = adminCreators.filter((creator) => creatorAssignmentAssignedIds.has(creator.id));
+  adminCreatorAssignmentPanel.innerHTML = assignedCreators
+    .map((creator) => {
+      const removeLabel = `Remove ${creator.name} from this title`;
+      return `
+        <div class="admin-creator-assigned-item">
+          <span>
+            <strong>${escapeHtml(creator.name)}</strong>
+            <small>${escapeHtml(creator.email)}</small>
+          </span>
+          <button type="button" class="icon-btn danger" data-creator-id="${escapeHtml(creator.id)}" data-creator-action="remove" title="${escapeLabel(removeLabel)}" aria-label="${escapeLabel(removeLabel)}">&times;</button>
+        </div>`;
+    })
+    .join("");
+}
+
+function escapeLabel(value) {
+  return String(value || "").replace(/"/g, "&quot;");
+}
+
+async function saveCreatorAssignment(event) {
+  event.preventDefault();
+  if (!adminCreatorAssignmentMovieId) {
+    return;
+  }
+  const movieId = adminCreatorAssignmentMovieId.value.trim();
+  if (!movieId) {
+    return;
+  }
+  const creatorIds = Array.from(creatorAssignmentAssignedIds);
+  try {
+    const response = await apiRequest(`/admin/movies/${movieId}/creator`, {
+      method: "POST",
+      body: JSON.stringify({ creator_ids: creatorIds }),
+    });
+    const updatedMovie = normalizeMovie(response.item);
+    updateMovieCollections(updatedMovie);
+    renderAdminMovieList();
+    renderAdminArchiveMovieList();
+    closeCreatorAssignmentModal();
+    adminHelper.textContent = response.message;
+  } catch (error) {
+    adminHelper.textContent = error.message;
+  }
 }
 
 function renderAdminLibraryOptions() {
@@ -5056,6 +5349,247 @@ function openAdminContentUploadModal(movie) {
   });
 }
 
+function openAdminLibraryContentUploadModal(movie) {
+  if (!adminLibraryContentUploadModal || !adminLibraryContentMovieId || !movie) {
+    return;
+  }
+
+  adminLibraryContentMovieId.value = movie.id;
+  if (adminLibraryContentFile) {
+    adminLibraryContentFile.value = "";
+  }
+  if (adminLibraryContentFileName) {
+    adminLibraryContentFileName.textContent = "No file selected";
+  }
+  if (adminLibraryContentUploadPreview) {
+    adminLibraryContentUploadPreview.classList.add("hidden");
+    adminLibraryContentUploadPreview.textContent = "";
+  }
+  adminLibraryContentUploadModal.classList.remove("hidden");
+  adminLibraryContentUploadModal.setAttribute("aria-hidden", "false");
+  const selectedMovie = adminMovies.find((item) => item.id === movie.id);
+  if (adminHelper) {
+    adminHelper.textContent = `Ready to upload a library video for \"${escapeHtml(selectedMovie?.title || movie.title)}\".`;
+  }
+  loadAdminLibraryContentStatus();
+
+  // Poll the HLS segmentation status while the modal stays open.
+  if (adminLibraryHlsPollTimer) {
+    window.clearInterval(adminLibraryHlsPollTimer);
+  }
+  adminLibraryHlsPollTimer = window.setInterval(() => {
+    if (!adminLibraryContentUploadModal || adminLibraryContentUploadModal.classList.contains("hidden")) {
+      return;
+    }
+    refreshAdminLibraryContentHlsStatus();
+  }, 5000);
+}
+
+function closeAdminLibraryContentUploadModal() {
+  if (!adminLibraryContentUploadModal || !adminLibraryContentMovieId) {
+    return;
+  }
+
+  if (adminLibraryHlsPollTimer) {
+    window.clearInterval(adminLibraryHlsPollTimer);
+    adminLibraryHlsPollTimer = null;
+  }
+
+  adminLibraryContentUploadModal.classList.add("hidden");
+  adminLibraryContentUploadModal.setAttribute("aria-hidden", "true");
+  adminLibraryContentMovieId.value = "";
+  if (adminLibraryContentFile) {
+    adminLibraryContentFile.value = "";
+  }
+  if (adminLibraryContentFileName) {
+    adminLibraryContentFileName.textContent = "No file selected";
+  }
+  if (adminLibraryContentUploadPreview) {
+    adminLibraryContentUploadPreview.classList.add("hidden");
+    adminLibraryContentUploadPreview.textContent = "";
+  }
+  if (adminLibraryContentStatus) {
+    adminLibraryContentStatus.classList.add("hidden");
+    adminLibraryContentStatus.innerHTML = "";
+  }
+  if (adminLibraryContentHlsStatus) {
+    adminLibraryContentHlsStatus.classList.add("hidden");
+    adminLibraryContentHlsStatus.innerHTML = "";
+  }
+  if (adminHelper) {
+    adminHelper.textContent = "";
+  }
+}
+
+function loadAdminLibraryContentStatus() {
+  const statusEl = adminLibraryContentStatus;
+  if (!statusEl || !adminLibraryContentMovieId) {
+    return;
+  }
+  const movieId = adminLibraryContentMovieId.value.trim();
+  const movie = adminMovies.find((item) => item.id === movieId);
+  const sourceExt = String(movie?.sourceExtension || movie?.source_extension || "").trim().toLowerCase();
+  statusEl.classList.add("hidden");
+  statusEl.innerHTML = "";
+
+  if (!sourceExt) {
+    return;
+  }
+
+  const fileName = `main${sourceExt}`;
+  statusEl.classList.remove("hidden");
+  statusEl.classList.add("department-status");
+
+  const label = document.createElement("span");
+  label.textContent = `Existing library video: ${fileName}`;
+
+  const deleteButton = document.createElement("button");
+  deleteButton.type = "button";
+  deleteButton.className = "icon-btn danger";
+  deleteButton.title = "Delete library video";
+  deleteButton.setAttribute("aria-label", "Delete library video");
+  deleteButton.textContent = "\u{1F5D1}";
+
+  deleteButton.addEventListener("click", async () => {
+    if (!window.confirm(`Delete "${fileName}" from the R2 server?`)) {
+      return;
+    }
+    statusEl.textContent = "Deleting...";
+    try {
+      const response = await deleteAdminLibraryContentRemote(movieId);
+      adminHelper.className = "admin-helper success";
+      adminHelper.textContent = response.message;
+      loadAdminLibraryContentStatus();
+    } catch (error) {
+      adminHelper.className = "admin-helper danger";
+      adminHelper.textContent = error.message || "Failed to delete the library video.";
+      loadAdminLibraryContentStatus();
+    }
+  });
+
+  statusEl.appendChild(label);
+  statusEl.appendChild(deleteButton);
+  refreshAdminLibraryContentHlsStatus();
+}
+
+async function refreshAdminLibraryContentHlsStatus() {
+  const hlsEl = adminLibraryContentHlsStatus;
+  const movieIdEl = adminLibraryContentMovieId;
+  if (!hlsEl || !movieIdEl) {
+    return;
+  }
+  const movieId = movieIdEl.value.trim();
+  if (!movieId) {
+    return;
+  }
+
+  let payload;
+  try {
+    payload = await apiRequest(`/admin/movies/${encodeURIComponent(movieId)}/assets/library-content/status`);
+  } catch (error) {
+    hlsEl.classList.add("hidden");
+    hlsEl.innerHTML = "";
+    return;
+  }
+
+  hlsEl.classList.add("hidden");
+  hlsEl.innerHTML = "";
+  if (!hlsEl.classList.contains("department-status")) {
+    hlsEl.classList.add("department-status");
+  }
+
+  const sourceExtension = String(payload?.source_extension || "").trim();
+  const status = String(payload?.status || "none");
+  const message = String(payload?.message || "").trim();
+  if (status === "none" || !sourceExtension) {
+    return;
+  }
+
+  hlsEl.classList.remove("hidden");
+
+  if (status === "ready") {
+    const badge = document.createElement("span");
+    badge.style.color = "#16a34a";
+    badge.style.fontWeight = "600";
+    badge.textContent = "HLS streaming: Ready";
+    const detail = document.createElement("span");
+    detail.textContent = " Adaptive 720p / 480p — mobile viewers stream small segments.";
+    hlsEl.appendChild(badge);
+    hlsEl.appendChild(detail);
+    return;
+  }
+
+  const badge = document.createElement("span");
+  badge.style.fontWeight = "600";
+
+  if (status === "failed") {
+    badge.style.color = "#dc2626";
+    badge.textContent = "HLS streaming: Failed";
+    const detail = document.createElement("span");
+    detail.textContent = ` ${message || "Segmentation failed. Click below to retry."}`;
+    hlsEl.appendChild(badge);
+    hlsEl.appendChild(detail);
+    hlsEl.appendChild(buildAdminLibraryHlsRetryButton(movieId));
+    return;
+  }
+
+  badge.style.color = "#d97706";
+  badge.textContent = "HLS streaming: Processing…";
+  const detail = document.createElement("span");
+  detail.textContent = " Segments are being generated in the background (this can take a few minutes for large files).";
+  hlsEl.appendChild(badge);
+  hlsEl.appendChild(detail);
+  hlsEl.appendChild(buildAdminLibraryHlsRetryButton(movieId));
+}
+
+function buildAdminLibraryHlsRetryButton(movieId) {
+  const retryButton = document.createElement("button");
+  retryButton.type = "button";
+  retryButton.className = "ghost-btn";
+  retryButton.textContent = "Generate HLS now";
+  retryButton.style.marginLeft = "8px";
+  retryButton.addEventListener("click", async () => {
+    retryButton.disabled = true;
+    retryButton.textContent = "Starting…";
+    try {
+      await apiRequest(`/admin/movies/${encodeURIComponent(movieId)}/assets/library-content/hls/build`, { method: "POST" });
+      adminHelper.className = "admin-helper success";
+      adminHelper.textContent = "HLS generation started in the background.";
+    } catch (error) {
+      adminHelper.className = "admin-helper danger";
+      adminHelper.textContent = error.message || "Failed to start HLS generation.";
+    } finally {
+      retryButton.disabled = false;
+      retryButton.textContent = "Generate HLS now";
+    }
+    refreshAdminLibraryContentHlsStatus();
+  });
+  return retryButton;
+}
+
+async function deleteAdminLibraryContentRemote(movieId) {
+  const response = await apiDeleteRequest(`/admin/movies/${encodeURIComponent(movieId)}/assets/library-content`);
+  const updatedMovie = normalizeMovie(response.item);
+  updateMovieCollections(updatedMovie);
+  renderAdminMovieList();
+  renderAdminArchiveMovieList();
+  return response;
+}
+
+window.openAdminContentUploadForMovie = function openAdminContentUploadForMovie(movieId) {
+  const selectedMovie = adminMovies.find((movie) => movie.id === movieId);
+  if (selectedMovie && !selectedMovie.archived && !isAdminLibraryMovie(selectedMovie)) {
+    openAdminContentQualityUploadModal(selectedMovie);
+  }
+};
+
+window.openAdminLibraryContentUploadForMovie = function openAdminLibraryContentUploadForMovie(movieId) {
+  const selectedMovie = adminMovies.find((movie) => movie.id === movieId);
+  if (selectedMovie && !selectedMovie.archived && isAdminLibraryMovie(selectedMovie)) {
+    openAdminLibraryContentUploadModal(selectedMovie);
+  }
+};
+
 function closeAdminContentUploadModal() {
   if (!adminContentUploadModal || !adminContentMovieId) {
     return;
@@ -5259,10 +5793,10 @@ async function deleteAdminContentQualityRemote(movieId, qualityCode) {
   adminHelper.textContent = response.message;
 }
 
-window.openAdminContentUploadForMovie = function openAdminContentUploadForMovie(movieId) {
+window.openAdminLibraryContentUploadForMovie = function openAdminLibraryContentUploadForMovie(movieId) {
   const selectedMovie = adminMovies.find((movie) => movie.id === movieId);
-  if (selectedMovie && !selectedMovie.archived) {
-    openAdminContentQualityUploadModal(selectedMovie);
+  if (selectedMovie && !selectedMovie.archived && isAdminLibraryMovie(selectedMovie)) {
+    openAdminLibraryContentUploadModal(selectedMovie);
   }
 };
 
@@ -5638,10 +6172,17 @@ function openAdminLibraryEditor(movie = null, mode = "upcoming") {
   const editorStage = adminLibraryEditorMode === "library" ? "library" : "upcoming";
   const isLibraryTitle = editorStage === "library";
   renderAdminLibraryOptions();
+  renderAdminCreatorOptions();
+  if (!adminCreators.length) {
+    loadAdminCreatorsFromApi().then(renderAdminCreatorOptions);
+  }
   adminLibraryModal.classList.remove("hidden");
   adminLibraryModal.setAttribute("aria-hidden", "false");
   adminLibraryEditId.value = movie?.id || "";
   adminLibraryCategory.value = movie?.titleCategory || "";
+  if (adminLibraryCreator) {
+    adminLibraryCreator.value = movie?.creatorId || "";
+  }
   adminLibraryTitle.value = movie?.title || "";
   adminLibraryCaption.value = movie?.titleCaption || "";
   setMultiSelectValues(adminLibraryGenre, String(movie?.genre || "").split(","));
@@ -5651,6 +6192,11 @@ function openAdminLibraryEditor(movie = null, mode = "upcoming") {
   adminLibraryExpectedDate.value = formatAdminDateForInput(movie?.releaseDate);
   renderAdminCastCreditRows(movie?.castCredits || []);
   adminLibraryDescription.value = movie?.description || "";
+  // The creator picker only exists in the creator-facing markup, so never
+  // assume the element is present when disabling it for library titles.
+  if (adminLibraryCreator) {
+    adminLibraryCreator.disabled = isLibraryTitle;
+  }
   adminLibraryModalTitle.textContent = isEditing
     ? "Edit Title"
     : isLibraryTitle
@@ -5673,18 +6219,48 @@ function closeAdminLibraryEditor() {
   adminLibraryModal.setAttribute("aria-hidden", "true");
   adminLibraryEditId.value = "";
   adminLibraryCategory.value = "";
+  if (adminLibraryCreator) {
+    adminLibraryCreator.value = "";
+  }
   adminLibraryTitle.value = "";
   adminLibraryCaption.value = "";
   setMultiSelectValues(adminLibraryGenre, []);
   adminLibraryExpectedDate.value = "";
   renderAdminCastCreditRows([]);
   adminLibraryDescription.value = "";
+  syncLibraryStageFields();
+}
+
+/**
+ * Toggle the admin "Add New Title" form between Upcoming/Released fields
+ * (expected date, creator assignment) and Library fields (direct-play stream).
+ * Library titles are direct-play: no release date, no stars, no creator needed.
+ */
+function syncLibraryStageFields() {
+  if (!adminLibraryMovieStage || !adminLibraryExpectedDateField) {
+    return;
+  }
+  const stage = adminLibraryMovieStage.value;
+  const isLibrary = stage === "library_free" || stage === "library_paid";
+  adminLibraryExpectedDateField.classList.toggle("hidden", isLibrary);
+  // Creator assignment is irrelevant for library titles (direct-play, no creator workspace).
+  if (adminLibraryCreator) {
+    adminLibraryCreator.disabled = isLibrary;
+  }
 }
 
 function openAdminPricingTargetsModal(movie) {
   if (!adminPricingTargetsModal || !adminPricingTargetsMovieId || !movie) {
     return;
   }
+
+  const librarySubtype = getAdminLibrarySubtype(movie);
+  adminPricingMode = librarySubtype === "paid"
+    ? "library_paid"
+    : librarySubtype === "free"
+      ? "library_free"
+      : "standard";
+  const isLibraryMode = adminPricingMode !== "standard";
 
   adminPricingTargetsMovieId.value = movie.id;
   const directLibrary = movie.catalogOrigin === "library";
@@ -5698,15 +6274,25 @@ function openAdminPricingTargetsModal(movie) {
     }
   }
   if (adminPricingTargetsCopy) {
-    adminPricingTargetsCopy.textContent = directLibrary
-      ? `Set per-quality Disc prices for "${movie.title}". These prices do not change with the title's age.`
-      : `Set online quality pricing, theatre stars, and target stars for "${movie.title}".`;
+    if (directLibrary) {
+      adminPricingTargetsCopy.textContent = `Set per-quality Disc prices for "${movie.title}". These prices do not change with the title's age.`;
+    } else if (adminPricingMode === "library_free") {
+      adminPricingTargetsCopy.textContent = `"${movie.title}" is a Library (Free) title - star pricing, theatre stars, and target stars are locked at 0.`;
+    } else if (adminPricingMode === "library_paid") {
+      adminPricingTargetsCopy.textContent = `"${movie.title}" is a Library (Paid) title - set online star pricing (min 1); theatre stars and target stars stay 0.`;
+    } else {
+      adminPricingTargetsCopy.textContent = `Set online quality pricing, theatre stars, and target stars for "${movie.title}".`;
+    }
   }
   if (adminPricingTheatreStars) {
-    adminPricingTheatreStars.value = String(movie.starsRequiredTheatre ?? 3);
+    adminPricingTheatreStars.value = isLibraryMode ? "0" : String(movie.starsRequiredTheatre ?? 3);
+    adminPricingTheatreStars.min = isLibraryMode ? "0" : "1";
+    adminPricingTheatreStars.disabled = isLibraryMode;
   }
   if (adminPricingTargetStars) {
-    adminPricingTargetStars.value = String(movie.expectedStars ?? 0);
+    adminPricingTargetStars.value = isLibraryMode ? "0" : String(movie.expectedStars ?? 0);
+    adminPricingTargetStars.min = "0";
+    adminPricingTargetStars.disabled = isLibraryMode;
   }
   renderAdminPricingRows((directLibrary ? movie.libraryPricingOptions : movie.onlinePricingOptions) || []);
   adminPricingTargetsModal.classList.remove("hidden");
@@ -5717,14 +6303,18 @@ function closeAdminPricingTargetsModal() {
   if (!adminPricingTargetsModal || !adminPricingTargetsMovieId) {
     return;
   }
+  adminPricingMode = "standard";
   adminPricingTargetsModal.classList.add("hidden");
   adminPricingTargetsModal.setAttribute("aria-hidden", "true");
   adminPricingTargetsMovieId.value = "";
   if (adminPricingTheatreStars) {
     adminPricingTheatreStars.value = "3";
+    adminPricingTheatreStars.min = "1";
+    adminPricingTheatreStars.disabled = false;
   }
   if (adminPricingTargetStars) {
     adminPricingTargetStars.value = "";
+    adminPricingTargetStars.disabled = false;
   }
   renderAdminPricingRows([]);
 }
@@ -5872,6 +6462,9 @@ async function updateAdminMovieDetailsRemote(movieId, payload) {
       cast_credits: payload.castCredits,
       story_line: payload.storyLine,
       release_date: payload.expectedDate || null,
+      // Send creator_ids only when a creator was actually chosen in the editor;
+      // omitting the field preserves the existing assignment on the backend.
+      ...(payload.creatorId ? { creator_ids: [payload.creatorId] } : {}),
     }),
   });
 
@@ -5927,6 +6520,7 @@ async function createAdminMovieRemote(payload) {
       cast_credits: payload.castCredits,
       story_line: payload.storyLine,
       release_date: payload.expectedDate || null,
+      creator_ids: payload.creatorId ? [payload.creatorId] : [],
       stage: payload.stage,
     }),
   });
@@ -5942,11 +6536,19 @@ async function createAdminMovieRemote(payload) {
   renderAdminArchiveMovieList();
   renderMovieGrid();
   syncDetailPanel();
-  await loadPlatformSummaryFromApi();
-  await loadAdminSummaryFromApi();
+  // Close the editor and confirm success FIRST: the title is saved at this
+  // point, so cosmetic summary refreshes must never block the visible
+  // "it worked" feedback (or leave the modal stuck open on a slow summary call).
   closeAdminLibraryEditor();
   adminHelper.textContent = response.message;
+  try {
+    await loadPlatformSummaryFromApi();
+    await loadAdminSummaryFromApi();
+  } catch {
+    // Summary refresh is cosmetic here; the title itself was saved.
+  }
 }
+
 
 async function updateAdminStarPricingRemote(payload) {
   const response = await apiRequest("/admin/star-pricing", {
@@ -6006,7 +6608,22 @@ async function restoreAdminMovieRemote(movieId) {
 }
 
 async function deleteArchivedAdminMovieRemote(movieId) {
-  const response = await apiDeleteRequest(`/admin/movies/${movieId}`);
+  let response;
+  try {
+    response = await apiDeleteRequest(`/admin/movies/${movieId}`);
+  } catch (error) {
+    console.error("Delete archived movie API error:", error);
+    if (adminHelper) {
+      adminHelper.textContent = error.message;
+      adminHelper.style.display = "block";
+      adminHelper.style.backgroundColor = "#ffebee";
+      adminHelper.style.color = "#c62828";
+      adminHelper.style.padding = "12px";
+      adminHelper.style.borderRadius = "8px";
+      adminHelper.style.marginBottom = "16px";
+    }
+    throw error;
+  }
   closeAdminDeleteDialog();
   removeMovieFromCollections(movieId);
   await Promise.all([
@@ -6019,7 +6636,15 @@ async function deleteArchivedAdminMovieRemote(movieId) {
   renderAdminArchiveMovieList();
   renderMovieGrid();
   syncDetailPanel();
-  adminHelper.textContent = response.message;
+  if (adminHelper) {
+    adminHelper.textContent = response.message || "Movie deleted permanently.";
+    adminHelper.style.display = "block";
+    adminHelper.style.backgroundColor = "#e8f5e9";
+    adminHelper.style.color = "#2e7d32";
+    adminHelper.style.padding = "12px";
+    adminHelper.style.borderRadius = "8px";
+    adminHelper.style.marginBottom = "16px";
+  }
 }
 
 async function reviewAdminMovieApprovalRemote(movieId, action = "approve") {
@@ -6864,6 +7489,17 @@ if (authForm) {
         setAuthMessage("This portal is only for creator accounts.", true);
         return;
       }
+      if (entryMode === "creator" && response.next_view === "producer") {
+        // Creators land in the admin panel scoped to "Manage Library" with only
+        // the titles assigned to them.
+        setAdminSession(response.role, authEmail.value.trim());
+        setAdminPanel("library");
+        setView("admin");
+        await Promise.all([loadAdminMoviesFromApi(), loadAdminTaxonomiesFromApi(), loadAdminCreatorsFromApi()]);
+        renderAdminMovieList();
+        setAuthMessage(response.message);
+        return;
+      }
       setView(response.next_view === "producer" ? "viewer" : response.next_view);
       if (response.next_view === "admin") {
         setAdminSession(response.role, authEmail.value.trim());
@@ -6874,6 +7510,7 @@ if (authForm) {
           loadAdminMoviesFromApi(),
           loadAdminUsersFromApi(),
           loadAdminTaxonomiesFromApi(),
+          loadAdminCreatorsFromApi(),
         ]);
         renderAdminMovieList();
         renderAdminArchiveMovieList();
@@ -7902,6 +8539,12 @@ document.querySelectorAll("[data-admin-content-close]").forEach((button) => {
   });
 });
 
+document.querySelectorAll("[data-admin-library-content-close]").forEach((button) => {
+  button.addEventListener("click", () => {
+    closeAdminLibraryContentUploadModal();
+  });
+});
+
 if (adminContentCancelButton) {
   adminContentCancelButton.addEventListener("click", () => {
     closeAdminContentQualityUploadModal();
@@ -7937,7 +8580,16 @@ if (adminDeleteConfirmButton) {
         await deleteAdminUserRemote(adminPendingDelete.id);
       }
     } catch (error) {
-      adminHelper.textContent = error.message;
+      console.error("Delete confirm error:", error);
+      if (adminHelper) {
+        adminHelper.textContent = error.message;
+        adminHelper.style.display = "block";
+        adminHelper.style.backgroundColor = "#ffebee";
+        adminHelper.style.color = "#c62828";
+        adminHelper.style.padding = "12px";
+        adminHelper.style.borderRadius = "8px";
+        adminHelper.style.marginBottom = "16px";
+      }
     }
   });
 }
@@ -8079,6 +8731,12 @@ if (adminLibraryTitleSort) {
     renderAdminLibraryTitlesList();
   });
   adminLibraryTitleSort.value = adminLibraryTitleSortValue;
+}
+
+if (adminLibraryMovieStage) {
+  adminLibraryMovieStage.addEventListener("change", () => {
+    syncLibraryStageFields();
+  });
 }
 
 if (adminStarPricingForm) {
@@ -8275,9 +8933,29 @@ if (adminLibraryEditor) {
     const castCredits = readAdminCastCreditRows();
     const storyLine = adminLibraryDescription.value.trim();
     const expectedDate = formatAdminDateForApi(adminLibraryExpectedDate.value);
-    const stage = adminLibraryEditorMode === "library" ? "library" : "upcoming";
+    // The merged backend create schema only accepts upcoming, released,
+    // library_free, or library_paid - the dropdown-less editor sends the
+    // paid-library variant and the pricing dialog configures Disc prices.
+    const stage = adminLibraryEditorMode === "library" ? "library_paid" : "upcoming";
+    // The creator picker only exists in the creator-facing editor, so never
+    // assume the element is present (a missing #adminLibraryCreator would
+    // previously throw here and silently kill the whole save flow).
+    const creatorId = adminLibraryCreator ? adminLibraryCreator.value : "";
     const editId = adminLibraryEditId.value.trim();
 
+    const saveButton = document.getElementById("adminLibrarySaveButton");
+    const setSaving = (saving) => {
+      if (!saveButton) return;
+      saveButton.disabled = saving;
+      if (saving) {
+        saveButton.dataset.originalLabel = saveButton.textContent;
+        saveButton.textContent = "Saving…";
+      } else if (saveButton.dataset.originalLabel) {
+        saveButton.textContent = saveButton.dataset.originalLabel;
+        delete saveButton.dataset.originalLabel;
+      }
+    };
+    setSaving(true);
     try {
       if (!titleCategory || !title || !genre || !storyLine) {
         throw new Error("Title category, title name, genre, and story line are required.");
@@ -8292,6 +8970,8 @@ if (adminLibraryEditor) {
         }
       }
 
+      const isLibraryStage = stage === "library_free" || stage === "library_paid";
+
       if (editId) {
         await updateAdminMovieDetailsRemote(editId, {
           titleCategory,
@@ -8300,7 +8980,9 @@ if (adminLibraryEditor) {
           genre,
           castCredits,
           storyLine,
-          expectedDate,
+          // Library titles have no release date; keep the existing one untouched.
+          expectedDate: isLibraryStage ? "" : expectedDate,
+          creatorId: isLibraryStage ? "" : creatorId,
         });
         closeAdminLibraryEditor();
       } else {
@@ -8311,12 +8993,15 @@ if (adminLibraryEditor) {
           genre,
           castCredits,
           storyLine,
-          expectedDate,
+          expectedDate: isLibraryStage ? "" : expectedDate,
+          creatorId: isLibraryStage ? "" : creatorId,
           stage,
         });
       }
     } catch (error) {
       adminHelper.textContent = error.message;
+    } finally {
+      setSaving(false);
     }
   });
 }
@@ -8333,12 +9018,32 @@ if (adminPricingTargetsForm) {
     const starsRequiredTheatre = Number(adminPricingTheatreStars?.value || 0);
     const expectedStars = Number(adminPricingTargetStars?.value || 0);
 
+    // Derive the pricing mode from the selected title so validation can never
+    // misclassify a Library title as a standard one on save.
+    const pricingMovie = adminMovies.find((movie) => movie.id === movieId);
+    const pricingSubtype = getAdminLibrarySubtype(pricingMovie || {});
+    const pricingMode = pricingSubtype === "paid"
+      ? "library_paid"
+      : pricingSubtype === "free"
+        ? "library_free"
+        : adminPricingMode;
+    const isFreeLibraryPricing = pricingMode === "library_free";
+    const isPaidLibraryPricing = pricingMode === "library_paid";
+    const isLibraryPricing = isFreeLibraryPricing || isPaidLibraryPricing;
+
     try {
       if (!movieId) {
         throw new Error("Choose a title before saving pricing.");
       }
       if (!onlinePricingOptions.length) {
         throw new Error("Add at least one online quality row.");
+      }
+
+      // Library (Free) titles are always free - every online quality stays at 0 stars.
+      if (isFreeLibraryPricing) {
+        for (const item of onlinePricingOptions) {
+          item.starsRequired = 0;
+        }
       }
 
       const seenQualities = new Set();
@@ -8350,8 +9055,16 @@ if (adminPricingTargetsForm) {
           throw new Error("Each online quality can be used only once.");
         }
         seenQualities.add(item.qualityCode);
-        if (!Number.isInteger(item.starsRequired) || item.starsRequired < 1 || item.starsRequired > maximumPrice) {
-          throw new Error(`${priceUnit} required for ${item.qualityLabel || item.qualityCode} must be a whole number between 1 and ${maximumPrice}.`);
+        if (directLibrary) {
+          if (!Number.isInteger(item.starsRequired) || item.starsRequired < 1 || item.starsRequired > maximumPrice) {
+            throw new Error(`${priceUnit} required for ${item.qualityLabel || item.qualityCode} must be a whole number between 1 and ${maximumPrice}.`);
+          }
+        } else if (isFreeLibraryPricing) {
+          if (item.starsRequired !== 0) {
+            throw new Error("Stars required must be 0 for Library (Free) titles.");
+          }
+        } else if (!Number.isFinite(item.starsRequired) || item.starsRequired < 1 || item.starsRequired > 10) {
+          throw new Error(`Stars required for ${item.qualityLabel || item.qualityCode} must be between 1 and 10.`);
         }
       }
 
@@ -8360,12 +9073,20 @@ if (adminPricingTargetsForm) {
         return;
       }
 
-      if (!Number.isFinite(starsRequiredTheatre) || starsRequiredTheatre < 1 || starsRequiredTheatre > 10) {
-        throw new Error("Stars Required - Theatre must be between 1 and 10.");
-      }
-
-      if (!Number.isFinite(expectedStars) || expectedStars < 0) {
-        throw new Error("Target Stars must be zero or higher.");
+      if (isLibraryPricing) {
+        if (starsRequiredTheatre !== 0) {
+          throw new Error("Stars Required - Theatre must be 0 for Library titles.");
+        }
+        if (expectedStars !== 0) {
+          throw new Error("Target Stars must be 0 for Library titles.");
+        }
+      } else {
+        if (!Number.isFinite(starsRequiredTheatre) || starsRequiredTheatre < 1 || starsRequiredTheatre > 10) {
+          throw new Error("Stars Required - Theatre must be between 1 and 10.");
+        }
+        if (!Number.isFinite(expectedStars) || expectedStars < 0) {
+          throw new Error("Target Stars must be zero or higher.");
+        }
       }
 
       await updateAdminMoviePricingConfigRemote(movieId, {
@@ -8779,6 +9500,60 @@ if (adminContentUploadForm) {
   });
 }
 
+if (adminLibraryContentUploadForm) {
+  adminLibraryContentUploadForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+
+    const movieId = adminLibraryContentMovieId?.value.trim();
+    const file = adminLibraryContentFile?.files?.[0];
+    const sourceName = file?.name?.trim();
+
+    try {
+      if (!movieId) {
+        throw new Error("Please choose a title first.");
+      }
+      if (!file) {
+        throw new Error("Choose a library video file.");
+      }
+      if (!sourceName || !/\.(mp4|mkv)$/i.test(sourceName)) {
+        throw new Error("Library content must be .mp4 or .mkv.");
+      }
+      if (adminLibraryContentFileName) {
+        adminLibraryContentFileName.textContent = sourceName;
+      }
+      if (adminLibraryContentUploadPreview) {
+        adminLibraryContentUploadPreview.classList.remove("hidden");
+        adminLibraryContentUploadPreview.textContent = `Uploading "${escapeHtml(sourceName)}" to R2...`;
+      }
+      adminHelper.className = "admin-helper neutral";
+      adminHelper.textContent = `Uploading "${escapeHtml(sourceName)}" to R2...`;
+      const formData = new FormData();
+      formData.append("file", file);
+      const response = await apiUploadRequest(`/admin/movies/${encodeURIComponent(movieId)}/assets/library-content`, formData);
+      const updatedMovie = normalizeMovie(response.item);
+      updateMovieCollections(updatedMovie);
+      renderAdminMovieList();
+      renderAdminArchiveMovieList();
+      if (adminLibraryUploadStartAtDisplay) {
+        setAdminLibraryUploadStartAtDisplay(updatedMovie?.title || "", "");
+        setAdminContentUploadStartAtDisplay("");
+      }
+      adminHelper.textContent = response.message;
+      adminHelper.className = "admin-helper success";
+      if (adminLibraryContentUploadPreview) {
+        adminLibraryContentUploadPreview.textContent = "Upload complete. HLS segments are being generated in the background — this screen updates automatically.";
+      }
+      loadAdminLibraryContentStatus();
+    } catch (error) {
+      adminHelper.className = "admin-helper danger";
+      adminHelper.textContent = error.message || "Library content upload failed.";
+      if (adminLibraryContentUploadPreview) {
+        adminLibraryContentUploadPreview.textContent = error.message || "Library content upload failed.";
+      }
+    }
+  });
+}
+
 if (adminContentAssetList) {
   adminContentAssetList.addEventListener("change", (event) => {
     const packageInput = event.target.closest("[data-admin-content-package-input]");
@@ -9002,6 +9777,8 @@ async function handleAdminTitleRowAction(actionButton, card) {
       openAdminGalleryUploadModal(selectedMovie);
     } else if (actionButton.dataset.adminMovieAction === "music" && !selectedMovie.archived) {
       openAdminMusicUploadModal(selectedMovie);
+    } else if (actionButton.dataset.adminMovieAction === "creator") {
+      openCreatorAssignmentModal(movieId);
     } else if (actionButton.dataset.adminMovieAction === "delivery-queue") {
       openAdminDeliveryQueueForMovie(movieId);
     } else if (actionButton.dataset.adminMovieAction === "archive" && !selectedMovie.archived) {
@@ -9054,6 +9831,43 @@ bindAdminTitleListEvents(adminMovieList, "admin-library-page", (delta) => {
 bindAdminTitleListEvents(adminLibraryTitleList, "admin-library-title-page", (delta) => {
   adminLibraryTitlePage += delta;
 });
+
+if (adminCreatorAssignmentForm) {
+  adminCreatorAssignmentForm.addEventListener("submit", saveCreatorAssignment);
+}
+
+if (adminCreatorAssignmentSearch) {
+  adminCreatorAssignmentSearch.addEventListener("input", () => {
+    renderCreatorAssignmentResults(adminCreatorAssignmentSearch.value);
+  });
+}
+
+if (adminCreatorAssignmentModal) {
+  adminCreatorAssignmentModal.addEventListener("click", (event) => {
+    if (event.target.closest("[data-admin-creator-assignment-close]")) {
+      closeCreatorAssignmentModal();
+      return;
+    }
+    const actionButton = event.target.closest("[data-creator-action]");
+    if (!actionButton) {
+      return;
+    }
+    const creatorId = actionButton.dataset.creatorId;
+    if (!creatorId) {
+      return;
+    }
+    if (actionButton.dataset.creatorAction === "add") {
+      creatorAssignmentAssignedIds.add(creatorId);
+      renderCreatorAssignmentResults(adminCreatorAssignmentSearch ? adminCreatorAssignmentSearch.value : "");
+      renderCreatorAssignmentPanel();
+    } else if (actionButton.dataset.creatorAction === "remove") {
+      creatorAssignmentAssignedIds.delete(creatorId);
+      renderCreatorAssignmentResults(adminCreatorAssignmentSearch ? adminCreatorAssignmentSearch.value : "");
+      renderCreatorAssignmentPanel();
+    }
+  });
+}
+
 
 if (adminArchiveMovieList) {
   adminArchiveMovieList.addEventListener("click", async (event) => {

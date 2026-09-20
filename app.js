@@ -238,13 +238,11 @@ const adminLibraryCategory = document.getElementById("adminLibraryCategory");
 const adminLibraryTitle = document.getElementById("adminLibraryTitle");
 const adminLibraryCaption = document.getElementById("adminLibraryCaption");
 const adminLibraryGenre = document.getElementById("adminLibraryGenre");
-const adminLibraryMovieStage = document.getElementById("adminLibraryMovieStage");
 const adminLibraryExpectedDate = document.getElementById("adminLibraryExpectedDate");
 const adminLibraryCastCredits = document.getElementById("adminLibraryCastCredits");
 const adminLibraryAddCastCreditButton = document.getElementById("adminLibraryAddCastCreditButton");
 const adminLibraryDescription = document.getElementById("adminLibraryDescription");
 const adminLibraryCancelButton = document.getElementById("adminLibraryCancelButton");
-const adminLibraryStageField = document.getElementById("adminLibraryStageField");
 const adminLibraryDateLabel = document.getElementById("adminLibraryDateLabel");
 const adminAddLibraryTitleButton = document.getElementById("adminAddLibraryTitleButton");
 const adminLibraryTitleSearch = document.getElementById("adminLibraryTitleSearch");
@@ -5647,10 +5645,6 @@ function openAdminLibraryEditor(movie = null, mode = "upcoming") {
   adminLibraryTitle.value = movie?.title || "";
   adminLibraryCaption.value = movie?.titleCaption || "";
   setMultiSelectValues(adminLibraryGenre, String(movie?.genre || "").split(","));
-  adminLibraryMovieStage.value = isEditing ? (movie.stage || editorStage) : editorStage;
-  if (adminLibraryStageField) {
-    adminLibraryStageField.classList.add("hidden");
-  }
   if (adminLibraryDateLabel) {
     adminLibraryDateLabel.textContent = isLibraryTitle ? "Release Date" : "Expected date";
   }
@@ -5682,7 +5676,6 @@ function closeAdminLibraryEditor() {
   adminLibraryTitle.value = "";
   adminLibraryCaption.value = "";
   setMultiSelectValues(adminLibraryGenre, []);
-  adminLibraryMovieStage.value = "upcoming";
   adminLibraryExpectedDate.value = "";
   renderAdminCastCreditRows([]);
   adminLibraryDescription.value = "";
@@ -8282,8 +8275,7 @@ if (adminLibraryEditor) {
     const castCredits = readAdminCastCreditRows();
     const storyLine = adminLibraryDescription.value.trim();
     const expectedDate = formatAdminDateForApi(adminLibraryExpectedDate.value);
-    const stage = (adminLibraryMovieStage?.value || "").trim()
-      || (adminLibraryEditorMode === "library" ? "library" : "upcoming");
+    const stage = adminLibraryEditorMode === "library" ? "library" : "upcoming";
     const editId = adminLibraryEditId.value.trim();
 
     try {
@@ -8301,7 +8293,6 @@ if (adminLibraryEditor) {
       }
 
       if (editId) {
-        const existingMovie = adminMovies.find((movie) => movie.id === editId);
         await updateAdminMovieDetailsRemote(editId, {
           titleCategory,
           title,
@@ -8311,9 +8302,6 @@ if (adminLibraryEditor) {
           storyLine,
           expectedDate,
         });
-        if (existingMovie && existingMovie.stage !== stage) {
-          await updateAdminMovieStageRemote(editId, stage);
-        }
         closeAdminLibraryEditor();
       } else {
         await createAdminMovieRemote({

@@ -88,6 +88,8 @@ def init_db() -> bool:
       connection.execute(text("ALTER TABLE movies ADD COLUMN IF NOT EXISTS stars_required INTEGER NOT NULL DEFAULT 1"))
       connection.execute(text("ALTER TABLE movies ADD COLUMN IF NOT EXISTS online_pricing_options TEXT"))
       connection.execute(text("ALTER TABLE movies ADD COLUMN IF NOT EXISTS catalog_origin VARCHAR(20)"))
+      connection.execute(text("ALTER TABLE movies ADD COLUMN IF NOT EXISTS library_subtype VARCHAR(20)"))
+      connection.execute(text("ALTER TABLE movies ADD COLUMN IF NOT EXISTS source_extension VARCHAR(10)"))
       connection.execute(text("ALTER TABLE movies ADD COLUMN IF NOT EXISTS library_pricing_options TEXT"))
       connection.execute(text("UPDATE movies SET catalog_origin = CASE WHEN stage = 'library' THEN 'library' ELSE 'upcoming' END WHERE catalog_origin IS NULL"))
       connection.execute(text("ALTER TABLE movies ADD COLUMN IF NOT EXISTS stars_required_theatre INTEGER NOT NULL DEFAULT 3"))

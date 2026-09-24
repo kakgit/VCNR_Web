@@ -3,6 +3,8 @@ from __future__ import annotations
 from copy import deepcopy
 from datetime import datetime
 import hashlib
+import json
+import secrets
 
 from backend.core.push import (
   build_push_message,
@@ -41,6 +43,23 @@ PUSH_DEVICE_TOKENS: list[dict] = []
 
 def _approval_label(status: str) -> str:
   return APPROVAL_STATUS_LABELS.get(status, status.replace("_", " ").title())
+
+
+def _derive_reservation_close_at(password_publish_at: str | None) -> str | None:
+  """Mirror persistence._derive_reservation_close_at for the DB-less store.
+
+  The reserve window closes 15 minutes before the password publishes, so the
+  demo/offline path must derive the same timestamp instead of raising
+  NameError while releasing main content.
+  """
+  if not password_publish_at:
+    return None
+
+  parsed = parse_app_datetime(password_publish_at)
+  if parsed is None:
+    return None
+  derived = parsed.timestamp() - (15 * 60)
+  return datetime.fromtimestamp(derived, parsed.tzinfo).replace(tzinfo=None).strftime("%Y-%m-%dT%H:%M")
 
 
 def _normalize_online_pricing_options(entries, allow_zero_stars: bool = False) -> list[dict]:

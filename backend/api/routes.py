@@ -359,7 +359,7 @@ def _download_cast_image(source_url: str, timeout: float = 30.0) -> bytes | None
 
 def _movie_content_qualities(movie: dict) -> list[dict]:
   options = movie.get("online_pricing_options") or []
-  library_subtype = movie_library_subtype(movie)
+  library_subtype = persistence.movie_library_subtype(movie)
   is_free_library = library_subtype == "free"
   qualities: list[dict] = []
   for index, item in enumerate(options, start=1):

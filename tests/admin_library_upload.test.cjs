@@ -22,7 +22,7 @@ function setup() {
   const c = { console, Set, Number, String, Array, JSON, FormData, Promise, Error, RegExp };
   for (const name of ['adminLibraryContentFile', 'adminLibraryContentFileName',
     'adminLibraryContentUploadPreview', 'adminLibraryUploadStartAtDisplay',
-    'adminContentUploadStartAtDisplay', 'adminHelper']) c[name] = element();
+    'adminLibraryPackageSummary', 'adminContentUploadStartAtDisplay', 'adminHelper']) c[name] = element();
   for (const name of ['setAdminLibraryUploadStartAtDisplay', 'setAdminContentUploadStartAtDisplay']) c[name] = () => {};
   c.adminLibrarySelectedPackageFiles = [];
   c.sent = null;
@@ -45,7 +45,8 @@ function setup() {
   c.normalizeMovie = item => item;
   vm.createContext(c);
   for (const name of ['adminLibraryPackageEntryName', 'normalizeAdminLibraryPackageEntries',
-    'summarizeAdminLibraryPackageSelection', 'missingAdminLibraryPackageChunks',
+    'describeAdminLibraryPackageSelection', 'summarizeAdminLibraryPackageSelection',
+    'missingAdminLibraryPackageChunks',
     'readAdminLibraryPackageManifest', 'adminLibraryQualityForFile',
     'uploadAdminLibraryContentPackageRemote']) {
     vm.runInContext(functionSource(name), c);
@@ -157,12 +158,28 @@ test('an empty selection is rejected before any request', async () => {
   assert.equal(c.sent, null);
 });
 
-test('the selection summary flags a missing manifest and counts chunks', () => {
+test('the selection summary flags a missing manifest and counts chunks', async () => {
   const c = setup();
-  c.summarizeAdminLibraryPackageSelection([{ file: fakeFile('dc-480p-1.mp4') }]);
-  assert.match(c.adminLibraryContentFileName.textContent, /1 files selected · 1 chunks · manifest\.json missing/);
-  c.summarizeAdminLibraryPackageSelection(selection(libraryManifest()));
-  assert.match(c.adminLibraryContentFileName.textContent, /4 files selected · 3 chunks$/);
-  c.summarizeAdminLibraryPackageSelection([]);
-  assert.equal(c.adminLibraryContentFileName.textContent, 'No folder selected');
+  await c.summarizeAdminLibraryPackageSelection([{ file: fakeFile('dc-480p-1.mp4') }]);
+  assert.match(c.adminLibraryPackageSummary.textContent, /1 files selected · 1 video chunks · manifest\.json MISSING/);
+  await c.summarizeAdminLibraryPackageSelection(selection(libraryManifest()));
+  assert.match(c.adminLibraryPackageSummary.textContent, /4 files selected · 3 video chunks/);
+  await c.summarizeAdminLibraryPackageSelection([]);
+  assert.equal(c.adminLibraryPackageSummary.textContent, 'No folder selected yet.');
+});
+
+test('the selection summary lists every title quality in manifest.json', async () => {
+  const c = setup();
+  await c.summarizeAdminLibraryPackageSelection(selection(libraryManifest()));
+  assert.match(c.adminLibraryPackageSummary.textContent, /Title qualities in manifest\.json/);
+  assert.match(c.adminLibraryPackageSummary.textContent, /480P \(ready\)/);
+  assert.match(c.adminLibraryPackageSummary.textContent, /720P \(ready\)/);
+});
+
+test('a partially selected quality is called out in the summary', async () => {
+  const c = setup();
+  // dc-720p-1.mp4 is in the manifest but was not selected.
+  await c.summarizeAdminLibraryPackageSelection(selection(libraryManifest(), ['dc-720p-1.mp4']));
+  assert.match(c.adminLibraryPackageSummary.textContent, /480P \(ready\)/);
+  assert.match(c.adminLibraryPackageSummary.textContent, /720P \(0\/1 files\)/);
 });

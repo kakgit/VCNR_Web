@@ -1326,14 +1326,18 @@
         <div id="adminLibraryContentStatus" class="admin-upload-note hidden"></div>
         <div id="adminLibraryContentHlsStatus" class="admin-upload-note hidden"></div>
         <div id="adminLibraryContentUploadPreview" class="admin-upload-note hidden"></div>
+        <div class="taxonomy-form-actions admin-content-actions admin-content-package-actions">
+          <button type="button" class="secondary-btn" id="adminLibraryPackageChooseButton">Choose Converted Folder</button>
+        </div>
         <label class="field">
           <span class="admin-content-field-label-row">
             <span>Converted Library Content Folder</span>
             <small id="adminLibraryContentFileName" class="admin-content-field-value">No folder selected</small>
           </span>
           <input id="adminLibraryContentFile" type="file" multiple webkitdirectory directory>
-          <small class="field-hint">Select the <strong>content</strong> folder created by Library Converter: a <code>manifest.json</code> plus the plain <code>.mp4</code> chunks it references. Loose raw video files are not accepted.</small>
+          <small class="field-hint">Choose the <strong>content</strong> folder written by Library Converter. It must contain <code>manifest.json</code> plus every <code>.mp4</code> chunk that manifest lists. Raw <code>.mp4</code>/<code>.mkv</code> source files are not accepted.</small>
         </label>
+        <p class="admin-content-quality-file" id="adminLibraryPackageSummary">No folder selected yet.</p>
         <div class="taxonomy-form-actions admin-content-actions">
           <button type="submit" class="primary-btn" id="adminLibraryContentUploadButton">Upload Library Package</button>
           <button type="button" class="ghost-btn" data-admin-library-content-close>Close</button>

@@ -328,6 +328,8 @@ const adminLibraryContentFile = document.getElementById("adminLibraryContentFile
 const adminLibraryContentFileName = document.getElementById("adminLibraryContentFileName");
 const adminLibraryContentStatus = document.getElementById("adminLibraryContentStatus");
 const adminLibraryContentHlsStatus = document.getElementById("adminLibraryContentHlsStatus");
+const adminLibraryPackageChooseButton = document.getElementById("adminLibraryPackageChooseButton");
+const adminLibraryPackageSummary = document.getElementById("adminLibraryPackageSummary");
 const adminContentMovieId = document.getElementById("adminContentMovieId");
 let adminLibraryHlsPollTimer = null;
 const adminContentFiles = document.getElementById("adminContentFiles");
@@ -5258,18 +5260,66 @@ function normalizeAdminLibraryPackageEntries(files) {
   });
 }
 
-function summarizeAdminLibraryPackageSelection(files) {
+function describeAdminLibraryPackageSelection(files) {
   const selectedFiles = Array.from(files || []);
-  if (!adminLibraryContentFileName) {
+  const chunkCount = selectedFiles.filter((entry) => /\.(mp4|mkv)$/i.test((entry?.file || entry)?.name || "")).length;
+  const subtitleCount = selectedFiles.filter((entry) => /\.vtt$/i.test((entry?.file || entry)?.name || "")).length;
+  const hasManifest = selectedFiles.some((entry) => adminLibraryPackageEntryName(entry) === "manifest.json");
+  const parts = [`${selectedFiles.length} files selected`, `${chunkCount} video chunks`];
+  if (subtitleCount) {
+    parts.push(`${subtitleCount} subtitle file${subtitleCount === 1 ? "" : "s"}`);
+  }
+  if (!hasManifest) {
+    parts.push("manifest.json MISSING");
+  }
+  return { text: parts.join(" · "), chunkCount, subtitleCount, hasManifest };
+}
+
+// Reads manifest.json straight out of the selection so the modal can show which
+// title qualities are actually present before anything is uploaded.
+async function summarizeAdminLibraryPackageSelection(files) {
+  const selectedFiles = Array.from(files || []);
+  if (adminLibraryContentFileName) {
+    adminLibraryContentFileName.textContent = selectedFiles.length ? "Folder selected" : "No folder selected";
+  }
+  if (!adminLibraryPackageSummary) {
     return;
   }
   if (!selectedFiles.length) {
-    adminLibraryContentFileName.textContent = "No folder selected";
+    adminLibraryPackageSummary.textContent = "No folder selected yet.";
     return;
   }
-  const hasManifest = selectedFiles.some((entry) => adminLibraryPackageEntryName(entry) === "manifest.json");
-  const chunkCount = selectedFiles.filter((entry) => /\.(mp4|mkv)$/i.test((entry?.file || entry)?.name || "")).length;
-  adminLibraryContentFileName.textContent = `${selectedFiles.length} files selected · ${chunkCount} chunks${hasManifest ? "" : " · manifest.json missing"}`;
+
+  const described = describeAdminLibraryPackageSelection(selectedFiles);
+  adminLibraryPackageSummary.textContent = described.text;
+  if (!described.hasManifest) {
+    return;
+  }
+
+  let manifest = null;
+  try {
+    manifest = await readAdminLibraryPackageManifest(normalizeAdminLibraryPackageEntries(selectedFiles));
+  } catch (error) {
+    adminLibraryPackageSummary.textContent = `${described.text} · manifest.json could not be read`;
+    return;
+  }
+
+  const entries = normalizeAdminLibraryPackageEntries(selectedFiles);
+  const selectedNames = new Set(entries.map((entry) => (entry.file?.name || "").toLowerCase()));
+  const qualities = (Array.isArray(manifest.qualities) ? manifest.qualities : []).map((quality) => {
+    const label = String(quality?.quality_label || quality?.quality_code || "Unknown");
+    const records = [
+      ...(Array.isArray(quality?.files) ? quality.files : []),
+      ...(Array.isArray(quality?.subtitle_files) ? quality.subtitle_files : []),
+    ];
+    const present = records.filter((record) => selectedNames.has(String(record?.name || "").toLowerCase())).length;
+    const mark = present === records.length ? "ready" : `${present}/${records.length} files`;
+    return `${label} (${mark})`;
+  });
+  const headline = qualities.length
+    ? `Title qualities in manifest.json: ${qualities.join(", ")}`
+    : "manifest.json lists no title qualities.";
+  adminLibraryPackageSummary.textContent = `${described.text}\n${headline}`;
 }
 
 async function chooseAdminLibraryContentFolder() {
@@ -5279,7 +5329,7 @@ async function chooseAdminLibraryContentFolder() {
   }
   const directoryHandle = await window.showDirectoryPicker({ mode: "read" });
   adminLibrarySelectedPackageFiles = await collectAdminContentDirectoryFiles(directoryHandle, directoryHandle.name || "");
-  summarizeAdminLibraryPackageSelection(adminLibrarySelectedPackageFiles);
+  await summarizeAdminLibraryPackageSelection(adminLibrarySelectedPackageFiles);
 }
 
 // Read and parse the top-level manifest.json of a Library Converter package.
@@ -5548,6 +5598,9 @@ function openAdminLibraryContentUploadModal(movie) {
   if (adminLibraryContentFileName) {
     adminLibraryContentFileName.textContent = "No folder selected";
   }
+  if (adminLibraryPackageSummary) {
+    adminLibraryPackageSummary.textContent = "No folder selected yet.";
+  }
   if (adminLibraryContentUploadPreview) {
     adminLibraryContentUploadPreview.classList.add("hidden");
     adminLibraryContentUploadPreview.textContent = "";
@@ -5591,6 +5644,9 @@ function closeAdminLibraryContentUploadModal() {
   }
   if (adminLibraryContentFileName) {
     adminLibraryContentFileName.textContent = "No folder selected";
+  }
+  if (adminLibraryPackageSummary) {
+    adminLibraryPackageSummary.textContent = "No folder selected yet.";
   }
   if (adminLibraryContentUploadPreview) {
     adminLibraryContentUploadPreview.classList.add("hidden");
@@ -9691,9 +9747,26 @@ if (adminContentUploadForm) {
 }
 
 if (adminLibraryContentFile) {
-  adminLibraryContentFile.addEventListener("change", () => {
+  adminLibraryContentFile.addEventListener("change", async () => {
     adminLibrarySelectedPackageFiles = Array.from(adminLibraryContentFile.files || []);
-    summarizeAdminLibraryPackageSelection(adminLibrarySelectedPackageFiles);
+    await summarizeAdminLibraryPackageSelection(adminLibrarySelectedPackageFiles);
+  });
+}
+
+if (adminLibraryPackageChooseButton) {
+  adminLibraryPackageChooseButton.addEventListener("click", async () => {
+    try {
+      await chooseAdminLibraryContentFolder();
+    } catch (error) {
+      // AbortError is the browser's own "user closed the picker" signal.
+      if (error?.name !== "AbortError") {
+        if (adminLibraryPackageSummary) {
+          adminLibraryPackageSummary.textContent = error.message || "Could not select the content folder.";
+        }
+        adminHelper.className = "admin-helper danger";
+        adminHelper.textContent = error.message || "Could not select the content folder.";
+      }
+    }
   });
 }
 
@@ -9706,6 +9779,7 @@ if (adminLibraryContentUploadForm) {
     const files = adminLibrarySelectedPackageFiles.length
       ? adminLibrarySelectedPackageFiles
       : Array.from(adminLibraryContentFile?.files || []);
+    await summarizeAdminLibraryPackageSelection(files);
 
     try {
       if (!movieId) {
@@ -9714,7 +9788,6 @@ if (adminLibraryContentUploadForm) {
       if (!files.length) {
         throw new Error("Choose the content folder created by Library Converter.");
       }
-      summarizeAdminLibraryPackageSelection(files);
       if (button) {
         button.disabled = true;
         button.textContent = "Uploading...";

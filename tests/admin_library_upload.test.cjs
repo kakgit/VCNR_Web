@@ -48,6 +48,7 @@ function setup() {
     'describeAdminLibraryPackageSelection', 'summarizeAdminLibraryPackageSelection',
     'missingAdminLibraryPackageChunks',
     'readAdminLibraryPackageManifest', 'adminLibraryQualityForFile',
+    'adminLibraryConfiguredQualityCodes', 'validateAdminLibraryPackageQualities',
     'uploadAdminLibraryContentPackageRemote']) {
     vm.runInContext(functionSource(name), c);
   }
@@ -182,4 +183,57 @@ test('a partially selected quality is called out in the summary', async () => {
   await c.summarizeAdminLibraryPackageSelection(selection(libraryManifest(), ['dc-720p-1.mp4']));
   assert.match(c.adminLibraryPackageSummary.textContent, /480P \(ready\)/);
   assert.match(c.adminLibraryPackageSummary.textContent, /720P \(0\/1 files\)/);
+});
+
+test('non-library titles read qualities from onlinePricingOptions', () => {
+  const c = setup();
+  // Array.from re-creates the array in this realm so deepEqual's prototype
+  // check does not trip over the vm context's Array.
+  const codes = Array.from(c.adminLibraryConfiguredQualityCodes({
+    catalogOrigin: 'upcoming',
+    libraryPricingOptions: [{ qualityCode: '4k' }],
+    onlinePricingOptions: [{ qualityCode: '720P' }, { qualityCode: '1080p' }],
+  }));
+  assert.deepEqual(codes, ['720p', '1080p']);
+});
+
+test('a package matching the configured pricing qualities is accepted', async () => {
+  const c = setup();
+  const movie = { id: 'dc', catalogOrigin: 'library',
+    libraryPricingOptions: [{ qualityCode: '480p' }, { qualityCode: '720p' }] };
+  await c.uploadAdminLibraryContentPackageRemote('dc', selection(libraryManifest()), null, movie);
+  assert.equal(c.sent.url, '/admin/movies/dc/assets/library-content/package/register');
+});
+
+test('a package missing a configured quality is rejected before uploading', async () => {
+  const c = setup();
+  // Configured for 480p + 720p, but the package only carries 720p.
+  const manifest = libraryManifest();
+  manifest.qualities = manifest.qualities.filter(q => q.quality_code !== '480p');
+  const movie = { id: 'dc', catalogOrigin: 'library',
+    libraryPricingOptions: [{ qualityCode: '480p' }, { qualityCode: '720p' }] };
+  await assert.rejects(
+    () => c.uploadAdminLibraryContentPackageRemote('dc', selection(manifest), null, movie),
+    /configured for 480p in Configure Title Pricing/
+  );
+  assert.equal(c.puts.length, 0, 'nothing may be uploaded');
+  assert.equal(c.sent, null);
+});
+
+test('a package with an unconfigured quality is rejected', async () => {
+  const c = setup();
+  // Package has 480p + 720p, pricing only configured 720p.
+  const movie = { id: 'dc', catalogOrigin: 'library', libraryPricingOptions: [{ qualityCode: '720p' }] };
+  await assert.rejects(
+    () => c.uploadAdminLibraryContentPackageRemote('dc', selection(libraryManifest()), null, movie),
+    /not configured in Configure Title Pricing/
+  );
+  assert.equal(c.puts.length, 0, 'nothing may be uploaded');
+});
+
+test('a title with no configured qualities is not quality-checked', async () => {
+  const c = setup();
+  const movie = { id: 'dc', catalogOrigin: 'library', libraryPricingOptions: [] };
+  await c.uploadAdminLibraryContentPackageRemote('dc', selection(libraryManifest()), null, movie);
+  assert.equal(c.sent.url, '/admin/movies/dc/assets/library-content/package/register');
 });

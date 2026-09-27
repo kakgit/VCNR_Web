@@ -5398,7 +5398,52 @@ function adminLibraryQualityForFile(manifest, fileName) {
   return "";
 }
 
-async function uploadAdminLibraryContentPackageRemote(movieId, files, onProgress) {
+// The qualities Configure Title Pricing exposes for this title, using the same
+// rule as the pricing dialog: direct Library titles price in Discs, everything
+// else in Stars.
+function adminLibraryConfiguredQualityCodes(movie) {
+  if (!movie) {
+    return [];
+  }
+  const rows = movie.catalogOrigin === "library" ? movie.libraryPricingOptions : movie.onlinePricingOptions;
+  const codes = [];
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const code = String(row?.qualityCode || row?.quality_code || "").trim().toLowerCase();
+    if (code && !codes.includes(code)) {
+      codes.push(code);
+    }
+  }
+  return codes;
+}
+
+// Refuse a package whose qualities do not line up with the pricing rows, so the
+// operator finds out before uploading rather than after.
+function validateAdminLibraryPackageQualities(manifest, movie) {
+  const configured = adminLibraryConfiguredQualityCodes(movie);
+  if (!configured.length) {
+    return;
+  }
+  const provided = new Set();
+  const labels = new Map();
+  for (const quality of Array.isArray(manifest?.qualities) ? manifest.qualities : []) {
+    const code = String(quality?.quality_code || quality?.qualityCode || "").trim().toLowerCase();
+    if (!code) {
+      continue;
+    }
+    provided.add(code);
+    labels.set(code, String(quality?.quality_label || quality?.qualityLabel || code));
+  }
+  const missing = configured.filter((code) => !provided.has(code));
+  if (missing.length) {
+    throw new Error(`This title is configured for ${missing.join(", ")} in Configure Title Pricing, but the package only has ${Array.from(provided).map((code) => labels.get(code) || code).join(", ") || "no qualities"}. Convert and include the missing ${missing.length === 1 ? "quality" : "qualities"}.`);
+  }
+  const unknown = Array.from(provided).filter((code) => !configured.includes(code));
+  if (unknown.length) {
+    throw new Error(`The package has ${unknown.map((code) => labels.get(code) || code).join(", ")}, which ${unknown.length === 1 ? "is not" : "are not"} configured in Configure Title Pricing for this title. Configure ${unknown.length === 1 ? "its" : "their"} pricing first, or re-convert the package.`);
+  }
+}
+
+async function uploadAdminLibraryContentPackageRemote(movieId, files, onProgress, movie) {
   const entries = normalizeAdminLibraryPackageEntries(files);
   if (!entries.length) {
     throw new Error("Please select the content folder created by Library Converter.");
@@ -5414,6 +5459,8 @@ async function uploadAdminLibraryContentPackageRemote(movieId, files, onProgress
   if (packageKind && packageKind !== "library") {
     throw new Error(`This is a "${packageKind}" content package. Library titles need a Library Converter package.`);
   }
+  // The package must match the qualities configured in Configure Title Pricing.
+  validateAdminLibraryPackageQualities(manifest, movie);
 
   // manifest.json itself only describes the package; the payload is the chunks.
   const payloadEntries = entries.filter((entry) => adminLibraryPackageEntryName(entry) !== "manifest.json");
@@ -9775,6 +9822,7 @@ if (adminLibraryContentUploadForm) {
     event.preventDefault();
 
     const movieId = adminLibraryContentMovieId?.value.trim();
+    const selectedMovie = adminMovies.find((movie) => movie.id === movieId);
     const button = document.getElementById("adminLibraryContentUploadButton");
     const files = adminLibrarySelectedPackageFiles.length
       ? adminLibrarySelectedPackageFiles
@@ -9805,7 +9853,7 @@ if (adminLibraryContentUploadForm) {
         adminHelper.textContent = message;
       };
       reportProgress("Validating the library package...");
-      const response = await uploadAdminLibraryContentPackageRemote(movieId, files, reportProgress);
+      const response = await uploadAdminLibraryContentPackageRemote(movieId, files, reportProgress, selectedMovie);
       adminLibrarySelectedPackageFiles = [];
       if (adminLibraryContentFile) {
         adminLibraryContentFile.value = "";

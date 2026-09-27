@@ -68,6 +68,7 @@ from backend.core.storage import (
   upload_media_object_stream,
   verified_media_download_url,
 )
+from backend.core import catalogue as catalogue_lib
 from backend.core import hls as hls_lib
 from backend.core.time_utils import app_now, is_app_time_reached, parse_app_datetime
 from backend import persistence
@@ -2284,6 +2285,66 @@ def _library_content_destination(
   raise HTTPException(status_code=400, detail="Only .mp4 chunks and .vtt subtitles are uploaded directly.")
 
 
+def _configured_library_quality_codes(movie: dict) -> list[str]:
+  """Quality codes configured for a title in Configure Title Pricing.
+
+  Mirrors the pricing dialog (``directLibrary ? libraryPricingOptions :
+  onlinePricingOptions``): a direct Library title prices its qualities in Discs
+  under ``library_pricing_options``, while every other origin - including the
+  Library Free/Paid variants that derive Discs from Stars - configures them
+  under ``online_pricing_options``.
+
+  Returns an empty list when nothing is configured, in which case the package is
+  not checked against any expected quality set.
+  """
+  if catalogue_lib.title_origin(movie) == "library":
+    options = catalogue_lib.pricing_entries(movie.get("library_pricing_options"))
+  else:
+    options = catalogue_lib.pricing_entries(movie.get("online_pricing_options"))
+  codes: list[str] = []
+  for option in options:
+    code = _normalize_quality_code(str(option.get("quality_code") or ""))
+    if code and code not in codes:
+      codes.append(code)
+  return codes
+
+
+def _validate_library_package_qualities(movie: dict, manifest: dict) -> None:
+  """Refuse a package whose qualities do not match the configured pricing rows.
+
+  Viewers are offered exactly the qualities in Configure Title Pricing, so a
+  package missing one of them - or carrying an extra - would advertise content
+  that does not exist. Mirrors the VCNR check in
+  ``_stage_converted_content_package``.
+  """
+  configured = _configured_library_quality_codes(movie)
+  if not configured:
+    return
+  provided = {
+    _normalize_quality_code(str(entry.get("quality_code") or ""))
+    for entry in (manifest.get("qualities") or [])
+    if isinstance(entry, dict)
+  }
+  missing = [code for code in configured if code not in provided]
+  unknown = sorted(code for code in provided if code and code not in configured)
+  if missing:
+    raise HTTPException(
+      status_code=400,
+      detail=(
+        "This package is missing the title qualities configured in Configure Title Pricing: "
+        f'{", ".join(missing)}. Convert and upload those qualities too.'
+      ),
+    )
+  if unknown:
+    raise HTTPException(
+      status_code=400,
+      detail=(
+        "This package has title qualities that are not configured in Configure Title Pricing: "
+        f'{", ".join(unknown)}. Configure their pricing first, or re-convert the package.'
+      ),
+    )
+
+
 def _register_library_content_package(movie: dict, source_manifest: dict) -> tuple[dict, int]:
   """Finalise a library package whose chunks were PUT straight to R2.
 
@@ -2297,6 +2358,7 @@ def _register_library_content_package(movie: dict, source_manifest: dict) -> tup
       detail=f'This is a "{package_kind}" content package. Library titles need a Library Converter package.',
     )
   manifest = _build_library_content_manifest(movie, source_manifest)
+  _validate_library_package_qualities(movie, manifest)
   total_chunks = 0
   for quality_entry in manifest.get("qualities", []):
     quality_code = _normalize_quality_code(str(quality_entry.get("quality_code") or ""))

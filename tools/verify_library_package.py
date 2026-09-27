@@ -135,6 +135,50 @@ def main():
                 }),
                 "no chunk records in manifest.json", results)
 
+    print("Qualities must match Configure Title Pricing:")
+    direct = dict(MOVIE, catalog_origin="library", stage="library", library_pricing_options=[
+        {"quality_code": "480p", "quality_label": "480P", "discs_required": 1000, "sort_order": 0},
+        {"quality_code": "720p", "quality_label": "720P", "discs_required": 2000, "sort_order": 1},
+    ])
+    ok = routes._configured_library_quality_codes(direct) == ["480p", "720p"]
+    print(f"  {'PASS' if ok else 'FAIL'} direct Library reads Disc pricing rows: "
+          f"{routes._configured_library_quality_codes(direct)}")
+    results.append(ok)
+
+    derived = dict(MOVIE, catalog_origin="upcoming", stage="library_paid", online_pricing_options=[
+        {"quality_code": "1080p", "quality_label": "1080P", "stars_required": 5, "sort_order": 0},
+    ], library_pricing_options=[])
+    ok = routes._configured_library_quality_codes(derived) == ["1080p"]
+    print(f"  {'PASS' if ok else 'FAIL'} upcoming-derived Library reads Star pricing rows: "
+          f"{routes._configured_library_quality_codes(derived)}")
+    results.append(ok)
+
+    ok = routes._configured_library_quality_codes(
+        dict(MOVIE, catalog_origin="library", stage="library")) == []
+    print(f"  {'PASS' if ok else 'FAIL'} nothing configured means no expected quality set")
+    results.append(ok)
+
+    expect_http("package missing a configured quality",
+                lambda: routes._validate_library_package_qualities(direct, json.loads(
+                    build_manifest_json({"dc-720p-1.mp4": b"C" * 8}))),
+                "missing the title qualities configured in Configure Title Pricing: 480p", results)
+
+    # Package carries 480p and 720p, but only 480p is configured -> 720p is extra.
+    expect_http("package with an unconfigured quality",
+                lambda: routes._validate_library_package_qualities(
+                    dict(direct, library_pricing_options=[{"quality_code": "480p", "quality_label": "480P"}]),
+                    json.loads(manifest_json)),
+                "not configured in Configure Title Pricing: 720p", results)
+
+    accepted = True
+    try:
+        routes._validate_library_package_qualities(direct, json.loads(manifest_json))
+    except HTTPException as error:
+        accepted = False
+        print(f"        unexpected: {error.detail}")
+    print(f"  {'PASS' if accepted else 'FAIL'} matching package accepted")
+    results.append(accepted)
+
     print("HLS build target:")
     keys = hls_lib._library_package_chunk_keys(manifest)
     ok = keys == ["dc/content/720p/dc-720p.library-pkg/dc-720p-1.mp4"]

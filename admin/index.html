@@ -1328,14 +1328,14 @@
         <div id="adminLibraryContentUploadPreview" class="admin-upload-note hidden"></div>
         <label class="field">
           <span class="admin-content-field-label-row">
-            <span>Library Video (.mp4 or .mkv)</span>
-            <small id="adminLibraryContentFileName" class="admin-content-field-value">No file selected</small>
+            <span>Converted Library Content Folder</span>
+            <small id="adminLibraryContentFileName" class="admin-content-field-value">No folder selected</small>
           </span>
-          <input id="adminLibraryContentFile" type="file" accept=".mp4,.mkv">
-          <small class="field-hint">This file will be uploaded to the R2 server. It will not be converted to VCNR format.</small>
+          <input id="adminLibraryContentFile" type="file" multiple webkitdirectory directory>
+          <small class="field-hint">Select the <strong>content</strong> folder created by Library Converter: a <code>manifest.json</code> plus the plain <code>.mp4</code> chunks it references. Loose raw video files are not accepted.</small>
         </label>
         <div class="taxonomy-form-actions admin-content-actions">
-          <button type="submit" class="primary-btn" id="adminLibraryContentUploadButton">Upload to R2</button>
+          <button type="submit" class="primary-btn" id="adminLibraryContentUploadButton">Upload Library Package</button>
           <button type="button" class="ghost-btn" data-admin-library-content-close>Close</button>
         </div>
       </form>

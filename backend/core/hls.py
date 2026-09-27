@@ -210,30 +210,66 @@ def _upload_library_hls_file(tmp_dir: str, movie_id: str, filename: str) -> None
     upload_media_object_stream(key, fileobj, content_type)
 
 
-def build_library_hls(movie_id: str) -> bool:
-  """Segment a library title's raw video into adaptive HLS and upload to R2.
+def _library_package_chunk_keys(manifest: dict) -> list[str]:
+  """Chunk keys of the best-quality library package in the content manifest.
 
-  Safe to run as a background task after the raw upload completes.  Returns
-  True when the full HLS package (master + variant playlists + segments) is
-  present in R2.  A machine-readable job state (``running`` / ``ready`` /
-  ``failed``) is persisted next to the segments so the admin UI can surface
-  failures instead of showing a stuck spinner.
+  Returns ``[]`` when the manifest is not a stored library package, which lets
+  ``build_library_hls`` fall back to the legacy single-object upload.
+  """
+  if str(manifest.get("package_kind") or "").strip().lower() != "library":
+    return []
+  qualities = [item for item in (manifest.get("qualities") or []) if isinstance(item, dict)]
+  if not qualities:
+    return []
+  # Highest sort_order wins: segment the best rendition the operator uploaded.
+  quality = max(qualities, key=lambda item: int(item.get("sort_order") or 0))
+  quality_code = str(quality.get("quality_code") or "").strip().lower()
+  movie_id = str(manifest.get("movie_id") or "").strip()
+  if not quality_code or not movie_id:
+    return []
+  records = [
+    item
+    for item in (quality.get("files") or [])
+    if isinstance(item, dict) and str(item.get("media_kind") or "video") == "video"
+  ]
+  keys: list[str] = []
+  for record in sorted(records, key=lambda item: int(item.get("chunk_index") or 0)):
+    name = Path(str(record.get("name") or "")).name
+    if not name:
+      continue
+    keys.append(f"{movie_id}/content/{quality_code}/{movie_id}-{quality_code}.library-pkg/{name}")
+  return keys
+
+
+def _write_library_source_file(keys: list[str], target: Path) -> bool:
+  """Reassemble a playable MP4 from plain chunk objects into ``target``."""
+  try:
+    with target.open("wb") as out:
+      for key in keys:
+        payload = download_media_object(key)
+        if payload is None:
+          logger.warning("build_library_hls: missing chunk %s", key)
+          return False
+        out.write(payload)
+        del payload
+  except Exception:
+    logger.exception("build_library_hls: could not reassemble library chunks")
+    return False
+  return target.is_file() and target.stat().st_size > 0
+
+
+def build_library_hls(movie_id: str, manifest: dict | None = None) -> bool:
+  """Segment a library title's video into adaptive HLS and upload to R2.
+
+  Accepts either a stored Library Converter package (plain ``.mp4`` chunks that
+  are reassembled here) or a legacy single raw ``.mp4``/``.mkv`` object. Safe to
+  run as a background task after the upload completes.  Returns True when the
+  full HLS package (master + variant playlists + segments) is present in R2.  A
+  machine-readable job state (``running`` / ``ready`` / ``failed``) is persisted
+  next to the segments so the admin UI can surface failures instead of showing a
+  stuck spinner.
   """
   try:
-    source_key = next(
-      (
-        key
-        for key in list_media_keys(f"{movie_id}/content/")
-        if key.lower().endswith((".mp4", ".mkv")) and f"/{HLS_FOLDER}/" not in key
-      ),
-      None,
-    )
-    if source_key is None:
-      detail = "No raw library video found in storage."
-      logger.warning("build_library_hls(%s): %s", movie_id, detail)
-      _write_hls_status(movie_id, "failed", detail)
-      return False
-
     ffmpeg = _ffmpeg_exe()
     if not ffmpeg:
       detail = "ffmpeg binary is not available on the server."
@@ -243,18 +279,42 @@ def build_library_hls(movie_id: str) -> bool:
 
     _write_hls_status(movie_id, "running")
 
-    data = download_media_object(source_key)
-    if not data:
-      detail = "Could not download the raw video from storage."
-      logger.warning("build_library_hls(%s): %s", movie_id, detail)
-      _write_hls_status(movie_id, "failed", detail)
-      return False
-
     with TemporaryDirectory() as tmp_dir:
       tmp_path = Path(tmp_dir)
-      source_path = tmp_path / f"source{Path(source_key).suffix.lower() or '.mp4'}"
-      source_path.write_bytes(data)
-      del data
+      source_path = tmp_path / "source.mp4"
+
+      # A library package stores one chunk per 8 MiB, so there is no single
+      # object to probe: reassemble the best quality instead of picking a chunk.
+      chunk_keys = _library_package_chunk_keys(manifest or {})
+      if chunk_keys:
+        if not _write_library_source_file(chunk_keys, source_path):
+          detail = "Could not reassemble the library package chunks from storage."
+          logger.warning("build_library_hls(%s): %s", movie_id, detail)
+          _write_hls_status(movie_id, "failed", detail)
+          return False
+      else:
+        source_key = next(
+          (
+            key
+            for key in list_media_keys(f"{movie_id}/content/")
+            if key.lower().endswith((".mp4", ".mkv")) and f"/{HLS_FOLDER}/" not in key
+          ),
+          None,
+        )
+        if source_key is None:
+          detail = "No raw library video found in storage."
+          logger.warning("build_library_hls(%s): %s", movie_id, detail)
+          _write_hls_status(movie_id, "failed", detail)
+          return False
+        data = download_media_object(source_key)
+        if not data:
+          detail = "Could not download the raw video from storage."
+          logger.warning("build_library_hls(%s): %s", movie_id, detail)
+          _write_hls_status(movie_id, "failed", detail)
+          return False
+        source_path = tmp_path / f"source{Path(source_key).suffix.lower() or '.mp4'}"
+        source_path.write_bytes(data)
+        del data
 
       width, height = _probe_resolution(ffmpeg, str(source_path))
 

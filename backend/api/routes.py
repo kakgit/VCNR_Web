@@ -2198,6 +2198,179 @@ async def _store_converted_content_package(
   return manifest, total_chunks
 
 
+def _build_library_content_manifest(movie: dict, source_manifest: dict) -> dict:
+  """Turn a Library Converter manifest into the server's canonical content manifest.
+
+  The converter layout and the VCNR one share the ``qualities`` / ``files`` shape,
+  so the same manifest reader serves both pipelines. Library packages are plain
+  MP4 chunks (never encrypted, never torrented), so the encryption and torrent
+  keys stay empty.
+  """
+  manifest = _default_content_manifest(movie)
+  manifest["delivery_start_at"] = None
+  manifest["upload_start_at"] = None
+  manifest["package_kind"] = "library"
+  manifest["encryption"] = {}
+  manifest["torrent_packages"] = {}
+  manifest["qualities"] = []
+  manifest["files"] = []
+
+  uploaded_at = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+  for source_code, source_entry in _content_quality_lookup(source_manifest).items():
+    quality_code = _normalize_quality_code(source_code)
+    video_records = [
+      dict(item)
+      for item in (source_entry.get("files") or [])
+      if isinstance(item, dict) and str(item.get("media_kind") or "video") == "video"
+    ]
+    if not video_records:
+      raise HTTPException(status_code=400, detail=f"{quality_code} has no chunk records in manifest.json.")
+
+    saved_video: list[dict] = []
+    for record in sorted(video_records, key=lambda item: int(item.get("chunk_index") or 0)):
+      saved_record = dict(record)
+      saved_record["quality_code"] = quality_code
+      saved_record["quality_label"] = source_entry.get("quality_label") or quality_code
+      saved_video.append(saved_record)
+    saved_subtitles = [
+      {**dict(record), "quality_code": quality_code}
+      for record in (source_entry.get("subtitle_files") or [])
+      if isinstance(record, dict)
+    ]
+
+    quality_entry = {
+      "quality_code": quality_code,
+      "quality_label": source_entry.get("quality_label") or quality_code,
+      "stars_required": 0,
+      "sort_order": int(source_entry.get("sort_order") or 0),
+      "source_name": source_entry.get("source_name") or quality_code,
+      "source_extension": ".mp4",
+      "password_sha256": None,
+      "uploaded_at": source_entry.get("uploaded_at") or uploaded_at,
+      "chunk_count": len(saved_video),
+      "files": saved_video,
+      "subtitle_files": saved_subtitles,
+    }
+    for passthrough_key in ("original_source_name", "original_source_extension", "media", "conversion"):
+      if source_entry.get(passthrough_key) is not None:
+        quality_entry[passthrough_key] = source_entry[passthrough_key]
+    _replace_content_quality_entry(manifest, quality_code, quality_entry)
+
+  manifest["chunk_count"] = sum(int(item.get("chunk_count") or 0) for item in manifest["qualities"])
+  manifest["total_bytes"] = sum(int(item.get("chunk_size") or 0) for item in manifest["files"])
+  return manifest
+
+
+def _find_library_package_upload(
+  uploaded_lookup: dict[str, UploadFile],
+  movie_id: str,
+  quality_code: str,
+  chunk_name: str,
+) -> UploadFile | None:
+  """Locate a selected file by name for one chunk, tolerating folder prefixes."""
+  candidates = [
+    f"{quality_code}/{_library_package_name(movie_id, quality_code)}/{chunk_name}",
+    f"{quality_code}/{chunk_name}",
+    chunk_name,
+  ]
+  upload = next((uploaded_lookup.get(path) for path in candidates if uploaded_lookup.get(path)), None)
+  if upload is not None:
+    return upload
+  return next((
+    candidate
+    for path, candidate in uploaded_lookup.items()
+    if path.endswith(f"/{chunk_name}") or path == chunk_name
+  ), None)
+
+
+def _validate_library_package_chunks(
+  movie_id: str,
+  manifest: dict,
+  uploaded_lookup: dict[str, UploadFile],
+) -> list[tuple[str, str]]:
+  """Check every manifest-referenced chunk is present, sized and hashed correctly.
+
+  Runs to completion before anything is written, so a half-copied package is
+  rejected outright instead of leaving a partially playable title in R2.
+  """
+  validated: list[tuple[str, str]] = []
+  for quality_entry in manifest.get("qualities", []):
+    quality_code = _normalize_quality_code(str(quality_entry.get("quality_code") or ""))
+    label = str(quality_entry.get("quality_label") or quality_code)
+    for record in _library_package_quality_records(quality_entry):
+      chunk_name = Path(str(record.get("name") or "")).name
+      if not chunk_name or not re.search(r"\.(mp4|mkv|vtt)$", chunk_name, re.IGNORECASE):
+        raise HTTPException(status_code=400, detail=f"{label} has an invalid chunk name in manifest.json.")
+      upload = _find_library_package_upload(uploaded_lookup, movie_id, quality_code, chunk_name)
+      if upload is None:
+        raise HTTPException(status_code=400, detail=f"Missing chunk file for {label}: {chunk_name}.")
+
+      raw = upload.file.read()
+      upload.file.seek(0)
+      expected_size = int(record.get("chunk_size") or 0)
+      if expected_size > 0 and len(raw) != expected_size:
+        raise HTTPException(status_code=400, detail=f"Chunk size mismatch for {chunk_name}.")
+      expected_sha256 = str(record.get("sha256") or "").strip().lower()
+      if expected_sha256 and hashlib.sha256(raw).hexdigest().lower() != expected_sha256:
+        raise HTTPException(status_code=400, detail=f"Chunk checksum mismatch for {chunk_name}.")
+      record["name"] = chunk_name
+      record["size"] = len(raw)
+      validated.append((quality_code, chunk_name))
+  return validated
+
+
+async def _store_library_content_package(
+  movie: dict,
+  files: list[UploadFile],
+  relative_paths: list[str],
+) -> tuple[dict, int]:
+  """Validate + store a Library Converter package, one R2 object per chunk.
+
+  Mirrors ``_store_converted_content_package`` but for plain (unencrypted) MP4
+  chunks: no password, no KDF, no torrent. Each quality is kept as its own set of
+  first-class objects so the stream endpoint can serve any of them.
+  """
+  if not files:
+    raise HTTPException(status_code=400, detail="Please select the converted content folder.")
+  source_manifest = await _read_converted_package_manifest(files, relative_paths)
+  package_kind = str(source_manifest.get("package_kind") or "").strip().lower()
+  if package_kind and package_kind != "library":
+    raise HTTPException(
+      status_code=400,
+      detail=f'This is a "{package_kind}" content package. Library titles need a Library Converter package.',
+    )
+
+  manifest = _build_library_content_manifest(movie, source_manifest)
+  uploaded_lookup = _converted_package_file_lookup(files, relative_paths)
+  validated = _validate_library_package_chunks(movie["id"], manifest, uploaded_lookup)
+
+  for quality_code, chunk_name in validated:
+    upload = _find_library_package_upload(uploaded_lookup, movie["id"], quality_code, chunk_name)
+    if upload is None:
+      continue
+    raw = upload.file.read()
+    upload.file.seek(0)
+    content_type = "text/vtt" if chunk_name.lower().endswith(".vtt") else "video/mp4"
+    upload_media_object(
+      _library_chunk_key(movie["id"], quality_code, chunk_name),
+      raw,
+      content_type,
+    )
+
+  _write_content_manifest(movie["id"], manifest)
+  total_chunks = sum(int(item.get("chunk_count") or 0) for item in manifest.get("qualities", []))
+  return manifest, total_chunks
+
+
+def _delete_library_package_objects(movie_id: str) -> None:
+  """Delete stored library chunk objects, leaving the HLS folder to the caller."""
+  for key in list_media_keys(f"{movie_id}/content/"):
+    if f"/{hls_lib.HLS_FOLDER}/" in key:
+      continue
+    if key.lower().endswith((".mp4", ".mkv", ".vtt")):
+      delete_media_object(key)
+
+
 def _converted_content_destination(movie_id: str, relative_path: str, final_quality_code: str | None = None) -> tuple[str, str, str]:
   normalized_path = _normalize_upload_relative_path(relative_path)
   path = Path(normalized_path)
@@ -3758,6 +3931,35 @@ async def admin_upload_movie_content_quality(
   )
 
 
+def _library_package_name(movie_id: str, quality_code: str) -> str:
+  return f"{movie_id}-{_normalize_quality_code(quality_code)}.library-pkg"
+
+
+def _library_chunk_key(movie_id: str, quality_code: str, filename: str) -> str:
+  """R2 key for one plain library chunk, mirroring the VCNR package layout."""
+  package = _library_package_name(movie_id, quality_code)
+  return media_object_key(movie_id, "content", f"{_normalize_quality_code(quality_code)}/{package}/{filename}")
+
+
+def _library_package_quality_records(quality_entry: dict) -> list[dict]:
+  """Every chunk record a library quality ships: video chunks + WebVTT sidecars."""
+  records = [item for item in (quality_entry.get("files") or []) if isinstance(item, dict)]
+  records.extend(item for item in (quality_entry.get("subtitle_files") or []) if isinstance(item, dict))
+  return records
+
+
+def _library_package_qualities(manifest: dict) -> list[dict]:
+  """Uploaded library qualities, highest sort_order first (best playback first)."""
+  entries = [item for item in (manifest.get("qualities") or []) if isinstance(item, dict)]
+  entries.sort(key=lambda item: int(item.get("sort_order") or 0), reverse=True)
+  return entries
+
+
+def _default_library_quality(manifest: dict) -> str | None:
+  qualities = _library_package_qualities(manifest)
+  return str(qualities[0].get("quality_code") or "") if qualities else None
+
+
 @router.post("/admin/movies/{movie_id}/assets/content-package", response_model=AdminMovieActionResponse)
 async def admin_upload_movie_converted_content_package(
   movie_id: str,
@@ -3854,6 +4056,66 @@ async def admin_upload_library_content(
   )
 
 
+@router.post("/admin/movies/{movie_id}/assets/library-content/package", response_model=AdminMovieActionResponse)
+async def admin_upload_library_content_package(
+  movie_id: str,
+  files: list[UploadFile] = File(...),
+  relative_paths: list[str] = Form(default=[]),
+  db: Session | None = Depends(get_db),
+  _: dict[str, str] = Depends(require_admin),
+  background_tasks: BackgroundTasks = BackgroundTasks(),
+) -> AdminMovieActionResponse:
+  """Ingest a Library Converter package for a library title.
+
+  The whole ``content`` folder is uploaded at once: ``manifest.json`` plus the
+  plain ``.mp4`` chunks (and ``.vtt`` subtitles) it references. Every referenced
+  chunk must be present and must match its recorded size and sha256, otherwise
+  the upload is rejected before anything is written. Each quality is stored as
+  its own set of R2 objects, so ``/movies/{id}/content/stream?quality=`` can
+  serve any of them and the HLS builder can pick the best one.
+  """
+  movie = _get_movie_or_404(db, movie_id)
+  manifest, chunk_count = await _store_library_content_package(movie, files, relative_paths)
+
+  # Library packages always deliver MP4, so the direct-play stream endpoint and
+  # the HLS status endpoint can rely on source_extension being set.
+  if db:
+    movie_record = persistence.get_movie_by_id(db, movie_id)
+    if movie_record is not None:
+      movie_record.source_extension = ".mp4"
+      persistence.save_movie(db, movie_record)
+  else:
+    demo_store.set_movie_source_extension(movie_id, ".mp4")
+
+  if db:
+    schedule_movie = persistence.update_movie_content_delivery_start(db, movie_id, None)
+  else:
+    schedule_movie = demo_store.update_movie_content_delivery_start(movie_id, None)
+  if schedule_movie is None:
+    raise HTTPException(status_code=404, detail="Movie not found.")
+
+  matched = persistence.register_movie_asset_change(db, movie_id, "content") if db else demo_store.register_movie_asset_change(movie_id, "content")
+  if matched is None:
+    raise HTTPException(status_code=404, detail="Movie not found.")
+
+  # Adaptive HLS is segmented from the best uploaded quality in the background.
+  if r2_enabled():
+    background_tasks.add_task(hls_lib.build_library_hls, movie_id, manifest)
+
+  quality_labels = ", ".join(
+    str(item.get("quality_label") or item.get("quality_code") or "")
+    for item in _library_package_qualities(manifest)
+  )
+  return AdminMovieActionResponse(
+    item=_sanitize_movie_payload(matched),
+    message=(
+      f'Library package uploaded for "{matched["title"]}" with {chunk_count} chunk file'
+      f'{"s" if chunk_count != 1 else ""} ({quality_labels}). '
+      "Upload future start time was reset."
+    ),
+  )
+
+
 @router.delete("/admin/movies/{movie_id}/assets/library-content", response_model=AdminMovieActionResponse)
 def admin_delete_library_content(
   movie_id: str,
@@ -3867,14 +4129,17 @@ def admin_delete_library_content(
   if source_ext in {".mp4", ".mkv"}:
     delete_media_object(media_object_key(movie_id, "content", f"main{source_ext}"))
 
-  # Defensive cleanup: also remove any other library video object under the content prefix.
+  # Defensive cleanup: also remove any other library video object under the
+  # content prefix. This is what clears a stored Library Converter package,
+  # whose chunks are plain .mp4/.vtt objects spread over one folder per quality.
   if r2_enabled():
-    for key in list_media_keys(f"{movie_id}/content/"):
-      if key.lower().endswith((".mp4", ".mkv")):
-        delete_media_object(key)
+    _delete_library_package_objects(movie_id)
 
   # Remove any generated adaptive HLS segments + playlists.
   hls_lib.delete_library_hls(movie_id)
+
+  # Drop the stored content manifest so the title reports "no package uploaded".
+  _content_manifest_path(movie_id).unlink(missing_ok=True)
 
   # Clear the source extension so the stream endpoint stops serving the deleted file.
   if db:
@@ -3902,28 +4167,44 @@ def admin_library_content_status(
 
   ``status`` is one of:
     * ``none``       - no library video uploaded yet,
-    * ``ready``      - raw file uploaded AND adaptive HLS built,
-    * ``processing`` - raw file uploaded, HLS segmentation still running/failed.
+    * ``ready``      - package uploaded AND adaptive HLS built,
+    * ``processing`` - package uploaded, HLS segmentation still running/failed.
+
+  A Library Converter package also reports its ``qualities`` so the admin UI can
+  show which renditions are stored.
   """
   movie = _get_movie_or_404(db, movie_id)
+  manifest = _read_content_manifest(movie_id) or {}
+  has_package = str(manifest.get("package_kind") or "").strip().lower() == "library"
   source_ext = str(movie.get("source_extension") or "").strip().lower()
-  if source_ext not in {".mp4", ".mkv"}:
-    return {"status": "none", "source_extension": None, "message": ""}
+  if not has_package and source_ext not in {".mp4", ".mkv"}:
+    return {"status": "none", "source_extension": None, "message": "", "qualities": []}
+
+  qualities = [
+    {
+      "quality_code": str(item.get("quality_code") or ""),
+      "quality_label": str(item.get("quality_label") or item.get("quality_code") or ""),
+      "chunk_count": int(item.get("chunk_count") or 0),
+    }
+    for item in _library_package_qualities(manifest)
+  ] if has_package else []
 
   hls_state = hls_lib.library_hls_status(movie_id)
   state = hls_state.get("state")
   if state == "ready":
-    return {"status": "ready", "source_extension": source_ext, "message": ""}
+    return {"status": "ready", "source_extension": source_ext or None, "message": "", "qualities": qualities}
   if state == "failed":
     return {
       "status": "failed",
-      "source_extension": source_ext,
+      "source_extension": source_ext or None,
       "message": hls_state.get("detail") or "HLS generation failed on the server.",
+      "qualities": qualities,
     }
   return {
     "status": "processing",
-    "source_extension": source_ext,
+    "source_extension": source_ext or None,
     "message": hls_state.get("detail") or "HLS segments are being generated in the background.",
+    "qualities": qualities,
   }
 
 
@@ -3936,10 +4217,12 @@ def admin_library_content_hls_build(
 ) -> dict:
   """(Re)start the background HLS segmentation job for a library title."""
   movie = _get_movie_or_404(db, movie_id)
+  manifest = _read_content_manifest(movie_id)
+  has_package = str((manifest or {}).get("package_kind") or "").strip().lower() == "library"
   source_ext = str(movie.get("source_extension") or "").strip().lower()
-  if source_ext not in {".mp4", ".mkv"}:
+  if not has_package and source_ext not in {".mp4", ".mkv"}:
     raise HTTPException(status_code=400, detail="Upload a library video first before generating HLS.")
-  background_tasks.add_task(hls_lib.build_library_hls, movie_id)
+  background_tasks.add_task(hls_lib.build_library_hls, movie_id, manifest or {})
   return {"status": "processing", "message": "HLS generation started in the background."}
 
 
@@ -4131,6 +4414,7 @@ def stream_movie_content(
   request: Request,
   db: Session | None = Depends(get_db),
   token: str | None = None,
+  quality: str | None = None,
 ) -> StreamingResponse:
   """Stream a library title's content.
 
@@ -4170,6 +4454,67 @@ def stream_movie_content(
   source_ext = str(movie.get("source_extension") or "").strip().lower()
   if source_ext not in {".mp4", ".mkv"}:
     raise HTTPException(status_code=400, detail="This title does not have a direct-play library video.")
+
+  # Adaptive HLS when the background job already finished: serve the master
+  # playlist whose children point at the authenticated ``/content/hls/...``
+  # endpoints, so players fetch small segments instead of one large file.
+  # This must be checked before the single-object direct play below, otherwise
+  # the direct-play redirect would always win and the HLS build would go unused.
+  if hls_lib.library_hls_ready(movie_id):
+    hls_manifest_data = download_media_object(hls_lib.library_hls_manifest_key(movie_id))
+    if hls_manifest_data is not None:
+      hls_manifest_text = hls_manifest_data.decode("utf-8", errors="replace")
+      auth_token = token or _extract_auth_token(request) or ""
+      rewritten = hls_lib.rewrite_hls_manifest(hls_manifest_text, movie_id, str(request.base_url), auth_token) if auth_token else hls_manifest_text
+      return Response(
+        content=rewritten,
+        media_type="application/vnd.apple.mpegurl",
+        headers={"Cache-Control": "no-cache"},
+      )
+
+  # A stored Library Converter package has no single main.mp4: it is chunked per
+  # quality. Serve the requested quality (default: the best one uploaded) by
+  # streaming its plain chunks in chunk_index order, which concatenates back
+  # into the original MP4.
+  manifest = _read_content_manifest(movie_id) or {}
+  if str(manifest.get("package_kind") or "").strip().lower() == "library":
+    quality_lookup = _content_quality_lookup(manifest)
+    requested = _normalize_quality_code(quality or "")
+    quality_entry = quality_lookup.get(requested) if requested else None
+    if quality_entry is None:
+      default_quality = _default_library_quality(manifest)
+      quality_entry = quality_lookup.get(default_quality) if default_quality else None
+    if quality_entry is None:
+      raise HTTPException(status_code=404, detail="Library content package is empty.")
+    quality_code = _normalize_quality_code(str(quality_entry.get("quality_code") or ""))
+    records = sorted(
+      (item for item in (quality_entry.get("files") or []) if isinstance(item, dict)),
+      key=lambda item: int(item.get("chunk_index") or 0),
+    )
+    chunk_keys = [
+      _library_chunk_key(movie_id, quality_code, Path(str(item.get("name") or "")).name)
+      for item in records
+      if str(item.get("name") or "").strip()
+    ]
+    if chunk_keys:
+      total_bytes = sum(int(item.get("size") or item.get("chunk_size") or 0) for item in records)
+
+      def _iter_library_chunks():
+        for key in chunk_keys:
+          payload = download_media_object(key)
+          if payload is None:
+            return
+          yield payload
+
+      return StreamingResponse(
+        _iter_library_chunks(),
+        media_type="video/mp4",
+        headers={
+          "Content-Disposition": f'inline; filename="{movie_id}-{quality_code}.mp4"',
+          "Cache-Control": "no-cache",
+          **({"Content-Length": str(total_bytes)} if total_bytes > 0 else {}),
+        },
+      )
 
   # Resolve the file on Cloudflare R2.
   object_key = media_object_key(movie_id, "content", f"main{source_ext}")
@@ -4215,21 +4560,6 @@ def stream_movie_content(
       "Cache-Control": "no-cache",
     },
   )
-
-  # Adaptive HLS fallback when the raw file is not available but the background
-  # segmentation finished: serve the HLS master playlist whose children point at
-  # the authenticated ``/movies/{id}/content/hls/...`` endpoints.
-  if hls_lib.library_hls_ready(movie_id):
-    manifest_data = download_media_object(hls_lib.library_hls_manifest_key(movie_id))
-    if manifest_data is not None:
-      manifest_text = manifest_data.decode("utf-8", errors="replace")
-      auth_token = token or _extract_auth_token(request) or ""
-      rewritten = hls_lib.rewrite_hls_manifest(manifest_text, movie_id, str(request.base_url), auth_token) if auth_token else manifest_text
-      return Response(
-        content=rewritten,
-        media_type="application/vnd.apple.mpegurl",
-        headers={"Cache-Control": "no-cache"},
-      )
 
 
 def _stream_file_bytes(path: Path, chunk_size: int = 1024 * 1024):

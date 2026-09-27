@@ -343,6 +343,10 @@ const adminLibraryUploadStartAtDisplay = document.getElementById("adminLibraryUp
 
 let adminContentPreviewUrls = new Map();
 let adminContentSelectedPackageFiles = [];
+// Library titles ingest a Library Converter package (manifest.json + plain .mp4
+// chunks) instead of a loose video file, so the Library modal keeps its own
+// selection state. Reuses collectAdminContentDirectoryFiles() for the picker.
+let adminLibrarySelectedPackageFiles = [];
 let adminContentQualityState = {
   movieId: "",
   items: [],
@@ -5238,6 +5242,132 @@ async function chooseAdminConvertedContentFolder() {
   summarizeAdminContentPackageSelection(adminContentSelectedPackageFiles);
 }
 
+function adminLibraryPackageEntryName(entry) {
+  const file = entry?.file || entry;
+  const path = entry?.relativePath || file?.webkitRelativePath || file?.name || "";
+  return String(path).replace(/\\/g, "/").split("/").pop();
+}
+
+function normalizeAdminLibraryPackageEntries(files) {
+  return Array.from(files || []).map((entry) => {
+    const file = entry?.file || entry;
+    return {
+      file,
+      relativePath: entry?.relativePath || file?.webkitRelativePath || file?.name || "",
+    };
+  });
+}
+
+function summarizeAdminLibraryPackageSelection(files) {
+  const selectedFiles = Array.from(files || []);
+  if (!adminLibraryContentFileName) {
+    return;
+  }
+  if (!selectedFiles.length) {
+    adminLibraryContentFileName.textContent = "No folder selected";
+    return;
+  }
+  const hasManifest = selectedFiles.some((entry) => adminLibraryPackageEntryName(entry) === "manifest.json");
+  const chunkCount = selectedFiles.filter((entry) => /\.(mp4|mkv)$/i.test((entry?.file || entry)?.name || "")).length;
+  adminLibraryContentFileName.textContent = `${selectedFiles.length} files selected · ${chunkCount} chunks${hasManifest ? "" : " · manifest.json missing"}`;
+}
+
+async function chooseAdminLibraryContentFolder() {
+  if (!window.showDirectoryPicker) {
+    adminLibraryContentFile?.click();
+    return;
+  }
+  const directoryHandle = await window.showDirectoryPicker({ mode: "read" });
+  adminLibrarySelectedPackageFiles = await collectAdminContentDirectoryFiles(directoryHandle, directoryHandle.name || "");
+  summarizeAdminLibraryPackageSelection(adminLibrarySelectedPackageFiles);
+}
+
+// Read and parse the top-level manifest.json of a Library Converter package.
+async function readAdminLibraryPackageManifest(entries) {
+  const manifestEntry = entries.find((entry) => adminLibraryPackageEntryName(entry) === "manifest.json");
+  if (!manifestEntry) {
+    throw new Error("The selected folder must contain manifest.json. Convert the title with Library Converter and select its content folder.");
+  }
+  let manifest;
+  try {
+    manifest = JSON.parse(await manifestEntry.file.text());
+  } catch (error) {
+    throw new Error("The selected manifest.json is invalid.");
+  }
+  if (!manifest || typeof manifest !== "object") {
+    throw new Error("The selected manifest.json is invalid.");
+  }
+  return manifest;
+}
+
+// Every quality the manifest lists must ship its full chunk list, and each of
+// those chunks must actually be part of the selection. This is the check that
+// stops a half-copied package from registering as a playable title.
+function missingAdminLibraryPackageChunks(entries, manifest) {
+  const selectedNames = new Set(entries.map((entry) => (entry.file?.name || "").toLowerCase()));
+  const qualityEntries = Array.isArray(manifest?.qualities) ? manifest.qualities : [];
+  if (!qualityEntries.length) {
+    throw new Error("The selected manifest.json lists no title qualities.");
+  }
+  const missing = [];
+  for (const quality of qualityEntries) {
+    const label = String(quality?.quality_label || quality?.quality_code || "Unknown quality");
+    const records = [
+      ...(Array.isArray(quality?.files) ? quality.files : []),
+      ...(Array.isArray(quality?.subtitle_files) ? quality.subtitle_files : []),
+    ];
+    if (!records.length) {
+      missing.push(`${label} has no chunk records in manifest.json`);
+      continue;
+    }
+    for (const record of records) {
+      const name = String(record?.name || "").trim();
+      if (!name) {
+        missing.push(`${label} has an unnamed chunk in manifest.json`);
+      } else if (!selectedNames.has(name.toLowerCase())) {
+        missing.push(`${label}: ${name}`);
+      }
+    }
+  }
+  return missing;
+}
+
+async function uploadAdminLibraryContentPackageRemote(movieId, files) {
+  const entries = normalizeAdminLibraryPackageEntries(files);
+  if (!entries.length) {
+    throw new Error("Please select the content folder created by Library Converter.");
+  }
+  const manifest = await readAdminLibraryPackageManifest(entries);
+  const missing = missingAdminLibraryPackageChunks(entries, manifest);
+  if (missing.length) {
+    const preview = missing.slice(0, 5).join(", ");
+    const overflow = missing.length > 5 ? ` (+${missing.length - 5} more)` : "";
+    throw new Error(`The selected folder is missing files referenced by manifest.json: ${preview}${overflow}. Select the complete content folder.`);
+  }
+  const packageKind = String(manifest.package_kind || "").trim().toLowerCase();
+  if (packageKind && packageKind !== "library") {
+    throw new Error(`This is a "${packageKind}" content package. Library titles need a Library Converter package.`);
+  }
+
+  const formData = new FormData();
+  entries.forEach((entry) => {
+    formData.append("files", entry.file, entry.file.name);
+    formData.append("relative_paths", entry.relativePath);
+  });
+  const response = await apiUploadRequest(`/admin/movies/${encodeURIComponent(movieId)}/assets/library-content/package`, formData);
+  const updatedMovie = normalizeMovie(response.item);
+  updateMovieCollections(updatedMovie);
+  renderAdminMovieList();
+  renderAdminArchiveMovieList();
+  renderMovieGrid();
+  syncDetailPanel();
+  if (adminLibraryUploadStartAtDisplay) {
+    setAdminLibraryUploadStartAtDisplay(updatedMovie?.title || "", "");
+    setAdminContentUploadStartAtDisplay("");
+  }
+  return response;
+}
+
 function renderAdminContentQualityAssets(container, items, isComplete) {
   if (!container) {
     return;
@@ -5358,11 +5488,12 @@ function openAdminLibraryContentUploadModal(movie) {
   }
 
   adminLibraryContentMovieId.value = movie.id;
+  adminLibrarySelectedPackageFiles = [];
   if (adminLibraryContentFile) {
     adminLibraryContentFile.value = "";
   }
   if (adminLibraryContentFileName) {
-    adminLibraryContentFileName.textContent = "No file selected";
+    adminLibraryContentFileName.textContent = "No folder selected";
   }
   if (adminLibraryContentUploadPreview) {
     adminLibraryContentUploadPreview.classList.add("hidden");
@@ -5401,11 +5532,12 @@ function closeAdminLibraryContentUploadModal() {
   adminLibraryContentUploadModal.classList.add("hidden");
   adminLibraryContentUploadModal.setAttribute("aria-hidden", "true");
   adminLibraryContentMovieId.value = "";
+  adminLibrarySelectedPackageFiles = [];
   if (adminLibraryContentFile) {
     adminLibraryContentFile.value = "";
   }
   if (adminLibraryContentFileName) {
-    adminLibraryContentFileName.textContent = "No file selected";
+    adminLibraryContentFileName.textContent = "No folder selected";
   }
   if (adminLibraryContentUploadPreview) {
     adminLibraryContentUploadPreview.classList.add("hidden");
@@ -5795,13 +5927,6 @@ async function deleteAdminContentQualityRemote(movieId, qualityCode) {
   setAdminContentUploadStartAtDisplay("");
   adminHelper.textContent = response.message;
 }
-
-window.openAdminLibraryContentUploadForMovie = function openAdminLibraryContentUploadForMovie(movieId) {
-  const selectedMovie = adminMovies.find((movie) => movie.id === movieId);
-  if (selectedMovie && !selectedMovie.archived && isAdminLibraryMovie(selectedMovie)) {
-    openAdminLibraryContentUploadModal(selectedMovie);
-  }
-};
 
 window.openAdminReleaseMainContentForMovie = function openAdminReleaseMainContentForMovie(movieId) {
   const selectedMovie = adminMovies.find((movie) => movie.id === movieId);
@@ -9512,43 +9637,48 @@ if (adminContentUploadForm) {
   });
 }
 
+if (adminLibraryContentFile) {
+  adminLibraryContentFile.addEventListener("change", () => {
+    adminLibrarySelectedPackageFiles = Array.from(adminLibraryContentFile.files || []);
+    summarizeAdminLibraryPackageSelection(adminLibrarySelectedPackageFiles);
+  });
+}
+
 if (adminLibraryContentUploadForm) {
   adminLibraryContentUploadForm.addEventListener("submit", async (event) => {
     event.preventDefault();
 
     const movieId = adminLibraryContentMovieId?.value.trim();
-    const file = adminLibraryContentFile?.files?.[0];
-    const sourceName = file?.name?.trim();
+    const button = document.getElementById("adminLibraryContentUploadButton");
+    const files = adminLibrarySelectedPackageFiles.length
+      ? adminLibrarySelectedPackageFiles
+      : Array.from(adminLibraryContentFile?.files || []);
 
     try {
       if (!movieId) {
         throw new Error("Please choose a title first.");
       }
-      if (!file) {
-        throw new Error("Choose a library video file.");
+      if (!files.length) {
+        throw new Error("Choose the content folder created by Library Converter.");
       }
-      if (!sourceName || !/\.(mp4|mkv)$/i.test(sourceName)) {
-        throw new Error("Library content must be .mp4 or .mkv.");
-      }
-      if (adminLibraryContentFileName) {
-        adminLibraryContentFileName.textContent = sourceName;
+      summarizeAdminLibraryPackageSelection(files);
+      if (button) {
+        button.disabled = true;
+        button.textContent = "Uploading...";
       }
       if (adminLibraryContentUploadPreview) {
         adminLibraryContentUploadPreview.classList.remove("hidden");
-        adminLibraryContentUploadPreview.textContent = `Uploading "${escapeHtml(sourceName)}" to R2...`;
+        adminLibraryContentUploadPreview.textContent = "Validating and uploading the library package...";
       }
       adminHelper.className = "admin-helper neutral";
-      adminHelper.textContent = `Uploading "${escapeHtml(sourceName)}" to R2...`;
-      const formData = new FormData();
-      formData.append("file", file);
-      const response = await apiUploadRequest(`/admin/movies/${encodeURIComponent(movieId)}/assets/library-content`, formData);
-      const updatedMovie = normalizeMovie(response.item);
-      updateMovieCollections(updatedMovie);
-      renderAdminMovieList();
-      renderAdminArchiveMovieList();
-      if (adminLibraryUploadStartAtDisplay) {
-        setAdminLibraryUploadStartAtDisplay(updatedMovie?.title || "", "");
-        setAdminContentUploadStartAtDisplay("");
+      adminHelper.textContent = "Uploading the library package...";
+      const response = await uploadAdminLibraryContentPackageRemote(movieId, files);
+      adminLibrarySelectedPackageFiles = [];
+      if (adminLibraryContentFile) {
+        adminLibraryContentFile.value = "";
+      }
+      if (adminLibraryContentFileName) {
+        adminLibraryContentFileName.textContent = "No folder selected";
       }
       adminHelper.textContent = response.message;
       adminHelper.className = "admin-helper success";
@@ -9561,6 +9691,11 @@ if (adminLibraryContentUploadForm) {
       adminHelper.textContent = error.message || "Library content upload failed.";
       if (adminLibraryContentUploadPreview) {
         adminLibraryContentUploadPreview.textContent = error.message || "Library content upload failed.";
+      }
+    } finally {
+      if (button) {
+        button.disabled = false;
+        button.textContent = "Upload Library Package";
       }
     }
   });

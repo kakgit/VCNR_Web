@@ -5332,7 +5332,23 @@ function missingAdminLibraryPackageChunks(entries, manifest) {
   return missing;
 }
 
-async function uploadAdminLibraryContentPackageRemote(movieId, files) {
+// Map a selected file to the quality that owns it, using the manifest's own
+// quality folders so the chunk lands in the same place the register step looks.
+function adminLibraryQualityForFile(manifest, fileName) {
+  const target = String(fileName || "").toLowerCase();
+  for (const quality of Array.isArray(manifest?.qualities) ? manifest.qualities : []) {
+    const records = [
+      ...(Array.isArray(quality?.files) ? quality.files : []),
+      ...(Array.isArray(quality?.subtitle_files) ? quality.subtitle_files : []),
+    ];
+    if (records.some((record) => String(record?.name || "").toLowerCase() === target)) {
+      return String(quality?.quality_code || quality?.quality_label || "");
+    }
+  }
+  return "";
+}
+
+async function uploadAdminLibraryContentPackageRemote(movieId, files, onProgress) {
   const entries = normalizeAdminLibraryPackageEntries(files);
   if (!entries.length) {
     throw new Error("Please select the content folder created by Library Converter.");
@@ -5349,12 +5365,49 @@ async function uploadAdminLibraryContentPackageRemote(movieId, files) {
     throw new Error(`This is a "${packageKind}" content package. Library titles need a Library Converter package.`);
   }
 
-  const formData = new FormData();
-  entries.forEach((entry) => {
-    formData.append("files", entry.file, entry.file.name);
-    formData.append("relative_paths", entry.relativePath);
-  });
-  const response = await apiUploadRequest(`/admin/movies/${encodeURIComponent(movieId)}/assets/library-content/package`, formData);
+  // manifest.json itself only describes the package; the payload is the chunks.
+  const payloadEntries = entries.filter((entry) => adminLibraryPackageEntryName(entry) !== "manifest.json");
+  if (!payloadEntries.length) {
+    throw new Error("The selected folder does not contain any .mp4 chunks or .vtt subtitles.");
+  }
+
+  for (let index = 0; index < payloadEntries.length; index += 1) {
+    const entry = payloadEntries[index];
+    const file = entry.file;
+    onProgress?.(`Uploading ${index + 1} of ${payloadEntries.length}: ${file.name}`);
+    const presignForm = new FormData();
+    presignForm.append("relative_path", entry.relativePath);
+    const qualityCode = adminLibraryQualityForFile(manifest, file.name);
+    if (qualityCode) {
+      presignForm.append("final_quality_code", qualityCode);
+    }
+    const presign = await apiUploadRequest(`/admin/movies/${movieId}/assets/library-content/package/presign`, presignForm);
+    let putResponse;
+    try {
+      putResponse = await fetch(presign.upload_url, { method: "PUT", body: file });
+    } catch (error) {
+      throw new Error(`Direct R2 upload could not start for ${file.name}. Please check R2 CORS/network and retry. ${error.message || ""}`.trim());
+    }
+    if (!putResponse.ok) {
+      let putError = "";
+      try {
+        putError = await putResponse.text();
+      } catch {
+        putError = "";
+      }
+      throw new Error(`Direct R2 upload failed for ${file.name} with HTTP ${putResponse.status}.${putError ? ` ${putError.slice(0, 160)}` : ""}`);
+    }
+  }
+
+  onProgress?.("Finalizing library package...");
+  const registerForm = new FormData();
+  registerForm.append("manifest_json", JSON.stringify(manifest));
+  let response;
+  try {
+    response = await apiUploadRequest(`/admin/movies/${movieId}/assets/library-content/package/register`, registerForm);
+  } catch (error) {
+    throw new Error(`Files uploaded to R2, but finalizing the manifest failed: ${error.message}`);
+  }
   const updatedMovie = normalizeMovie(response.item);
   updateMovieCollections(updatedMovie);
   renderAdminMovieList();
@@ -9672,7 +9725,14 @@ if (adminLibraryContentUploadForm) {
       }
       adminHelper.className = "admin-helper neutral";
       adminHelper.textContent = "Uploading the library package...";
-      const response = await uploadAdminLibraryContentPackageRemote(movieId, files);
+      const reportProgress = (message) => {
+        if (adminLibraryContentUploadPreview) {
+          adminLibraryContentUploadPreview.textContent = message;
+        }
+        adminHelper.textContent = message;
+      };
+      reportProgress("Validating the library package...");
+      const response = await uploadAdminLibraryContentPackageRemote(movieId, files, reportProgress);
       adminLibrarySelectedPackageFiles = [];
       if (adminLibraryContentFile) {
         adminLibraryContentFile.value = "";

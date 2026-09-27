@@ -26,9 +26,19 @@ function setup() {
   for (const name of ['setAdminLibraryUploadStartAtDisplay', 'setAdminContentUploadStartAtDisplay']) c[name] = () => {};
   c.adminLibrarySelectedPackageFiles = [];
   c.sent = null;
+  c.puts = [];
   c.apiUploadRequest = async (url, formData) => {
-    c.sent = { url, entries: Array.from(formData.entries()) };
+    const entries = Array.from(formData.entries());
+    c.sent = { url, entries };
+    if (url.endsWith('/presign')) {
+      const name = entries.find(([k]) => k === 'relative_path')[1].split('/').pop();
+      return { upload_url: `https://r2.example/${name}`, filename: name };
+    }
     return { item: {}, message: 'Library package uploaded.' };
+  };
+  c.fetch = async (url, options) => {
+    c.puts.push({ url, method: options.method });
+    return { ok: true, text: async () => '' };
   };
   for (const name of ['updateMovieCollections', 'renderAdminMovieList', 'renderAdminArchiveMovieList',
     'renderMovieGrid', 'syncDetailPanel']) c[name] = () => {};
@@ -36,7 +46,8 @@ function setup() {
   vm.createContext(c);
   for (const name of ['adminLibraryPackageEntryName', 'normalizeAdminLibraryPackageEntries',
     'summarizeAdminLibraryPackageSelection', 'missingAdminLibraryPackageChunks',
-    'readAdminLibraryPackageManifest', 'uploadAdminLibraryContentPackageRemote']) {
+    'readAdminLibraryPackageManifest', 'adminLibraryQualityForFile',
+    'uploadAdminLibraryContentPackageRemote']) {
     vm.runInContext(functionSource(name), c);
   }
   return c;
@@ -71,13 +82,26 @@ function selection(manifest, exclude = []) {
   });
 }
 
-test('a valid Library Converter package is accepted and posted to the package route', async () => {
+test('a valid Library Converter package is presigned, PUT to R2, then registered', async () => {
   const c = setup();
   const response = await c.uploadAdminLibraryContentPackageRemote('dc', selection(libraryManifest()));
-  assert.equal(c.sent.url, '/admin/movies/dc/assets/library-content/package');
-  assert.equal(c.sent.entries.filter(([k]) => k === 'files').length, 4);
-  assert.equal(c.sent.entries.filter(([k]) => k === 'relative_paths').length, 4);
+  // 3 chunks, each presigned then PUT straight to R2 (never through the API).
+  assert.equal(c.puts.length, 3);
+  assert.ok(c.puts.every(put => put.method === 'PUT' && put.url.startsWith('https://r2.example/')));
+  // The final call registers the manifest.
+  assert.equal(c.sent.url, '/admin/movies/dc/assets/library-content/package/register');
+  assert.equal(c.sent.entries[0][0], 'manifest_json');
+  assert.equal(JSON.parse(c.sent.entries[0][1]).package_kind, 'library');
   assert.equal(response.message, 'Library package uploaded.');
+});
+
+test('each chunk is presigned with the quality that owns it', async () => {
+  const c = setup();
+  const progress = [];
+  await c.uploadAdminLibraryContentPackageRemote('dc', selection(libraryManifest()), m => progress.push(m));
+  assert.equal(c.puts.length, 3);
+  assert.ok(progress.some(m => /Uploading 1 of 3/.test(m)), `progress: ${progress}`);
+  assert.ok(progress.some(m => /Finalizing library package/.test(m)));
 });
 
 test('a selection without manifest.json is rejected', async () => {

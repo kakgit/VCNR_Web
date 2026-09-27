@@ -2261,39 +2261,43 @@ def _build_library_content_manifest(movie: dict, source_manifest: dict) -> dict:
   return manifest
 
 
-def _find_library_package_upload(
-  uploaded_lookup: dict[str, UploadFile],
+def _library_content_destination(
   movie_id: str,
-  quality_code: str,
-  chunk_name: str,
-) -> UploadFile | None:
-  """Locate a selected file by name for one chunk, tolerating folder prefixes."""
-  candidates = [
-    f"{quality_code}/{_library_package_name(movie_id, quality_code)}/{chunk_name}",
-    f"{quality_code}/{chunk_name}",
-    chunk_name,
-  ]
-  upload = next((uploaded_lookup.get(path) for path in candidates if uploaded_lookup.get(path)), None)
-  if upload is not None:
-    return upload
-  return next((
-    candidate
-    for path, candidate in uploaded_lookup.items()
-    if path.endswith(f"/{chunk_name}") or path == chunk_name
-  ), None)
+  relative_path: str,
+  final_quality_code: str | None = None,
+) -> tuple[str, str, str]:
+  """Resolve one selected library file to (quality, filename, R2 key).
 
-
-def _validate_library_package_chunks(
-  movie_id: str,
-  manifest: dict,
-  uploaded_lookup: dict[str, UploadFile],
-) -> list[tuple[str, str]]:
-  """Check every manifest-referenced chunk is present, sized and hashed correctly.
-
-  Runs to completion before anything is written, so a half-copied package is
-  rejected outright instead of leaving a partially playable title in R2.
+  The library counterpart of ``_converted_content_destination``: plain ``.mp4``
+  chunks and ``.vtt`` sidecars instead of encrypted ``.vcnr``, and no torrent.
   """
-  validated: list[tuple[str, str]] = []
+  normalized_path = _normalize_upload_relative_path(relative_path)
+  path = Path(normalized_path)
+  filename = path.name
+  if not filename:
+    raise HTTPException(status_code=400, detail="Invalid library content file path.")
+  suffix = path.suffix.lower()
+  parts = normalized_path.split("/")
+  quality_code = _normalize_quality_code(final_quality_code or (parts[0] if len(parts) > 1 else path.stem))
+  if suffix in {".mp4", ".mkv", ".vtt"}:
+    return quality_code, filename, _library_chunk_key(movie_id, quality_code, filename)
+  raise HTTPException(status_code=400, detail="Only .mp4 chunks and .vtt subtitles are uploaded directly.")
+
+
+def _register_library_content_package(movie: dict, source_manifest: dict) -> tuple[dict, int]:
+  """Finalise a library package whose chunks were PUT straight to R2.
+
+  Mirrors the VCNR register step: every chunk the manifest references must
+  already exist in storage, otherwise the title is not registered.
+  """
+  package_kind = str(source_manifest.get("package_kind") or "").strip().lower()
+  if package_kind and package_kind != "library":
+    raise HTTPException(
+      status_code=400,
+      detail=f'This is a "{package_kind}" content package. Library titles need a Library Converter package.',
+    )
+  manifest = _build_library_content_manifest(movie, source_manifest)
+  total_chunks = 0
   for quality_entry in manifest.get("qualities", []):
     quality_code = _normalize_quality_code(str(quality_entry.get("quality_code") or ""))
     label = str(quality_entry.get("quality_label") or quality_code)
@@ -2301,64 +2305,12 @@ def _validate_library_package_chunks(
       chunk_name = Path(str(record.get("name") or "")).name
       if not chunk_name or not re.search(r"\.(mp4|mkv|vtt)$", chunk_name, re.IGNORECASE):
         raise HTTPException(status_code=400, detail=f"{label} has an invalid chunk name in manifest.json.")
-      upload = _find_library_package_upload(uploaded_lookup, movie_id, quality_code, chunk_name)
-      if upload is None:
-        raise HTTPException(status_code=400, detail=f"Missing chunk file for {label}: {chunk_name}.")
-
-      raw = upload.file.read()
-      upload.file.seek(0)
-      expected_size = int(record.get("chunk_size") or 0)
-      if expected_size > 0 and len(raw) != expected_size:
-        raise HTTPException(status_code=400, detail=f"Chunk size mismatch for {chunk_name}.")
-      expected_sha256 = str(record.get("sha256") or "").strip().lower()
-      if expected_sha256 and hashlib.sha256(raw).hexdigest().lower() != expected_sha256:
-        raise HTTPException(status_code=400, detail=f"Chunk checksum mismatch for {chunk_name}.")
+      if not media_object_exists(_library_chunk_key(movie["id"], quality_code, chunk_name)):
+        raise HTTPException(status_code=404, detail=f"Uploaded chunk was not found in storage: {chunk_name}.")
       record["name"] = chunk_name
-      record["size"] = len(raw)
-      validated.append((quality_code, chunk_name))
-  return validated
-
-
-async def _store_library_content_package(
-  movie: dict,
-  files: list[UploadFile],
-  relative_paths: list[str],
-) -> tuple[dict, int]:
-  """Validate + store a Library Converter package, one R2 object per chunk.
-
-  Mirrors ``_store_converted_content_package`` but for plain (unencrypted) MP4
-  chunks: no password, no KDF, no torrent. Each quality is kept as its own set of
-  first-class objects so the stream endpoint can serve any of them.
-  """
-  if not files:
-    raise HTTPException(status_code=400, detail="Please select the converted content folder.")
-  source_manifest = await _read_converted_package_manifest(files, relative_paths)
-  package_kind = str(source_manifest.get("package_kind") or "").strip().lower()
-  if package_kind and package_kind != "library":
-    raise HTTPException(
-      status_code=400,
-      detail=f'This is a "{package_kind}" content package. Library titles need a Library Converter package.',
-    )
-
-  manifest = _build_library_content_manifest(movie, source_manifest)
-  uploaded_lookup = _converted_package_file_lookup(files, relative_paths)
-  validated = _validate_library_package_chunks(movie["id"], manifest, uploaded_lookup)
-
-  for quality_code, chunk_name in validated:
-    upload = _find_library_package_upload(uploaded_lookup, movie["id"], quality_code, chunk_name)
-    if upload is None:
-      continue
-    raw = upload.file.read()
-    upload.file.seek(0)
-    content_type = "text/vtt" if chunk_name.lower().endswith(".vtt") else "video/mp4"
-    upload_media_object(
-      _library_chunk_key(movie["id"], quality_code, chunk_name),
-      raw,
-      content_type,
-    )
-
+      if record.get("media_kind") == "video":
+        total_chunks += 1
   _write_content_manifest(movie["id"], manifest)
-  total_chunks = sum(int(item.get("chunk_count") or 0) for item in manifest.get("qualities", []))
   return manifest, total_chunks
 
 
@@ -4056,26 +4008,60 @@ async def admin_upload_library_content(
   )
 
 
-@router.post("/admin/movies/{movie_id}/assets/library-content/package", response_model=AdminMovieActionResponse)
-async def admin_upload_library_content_package(
+@router.post("/admin/movies/{movie_id}/assets/library-content/package/presign")
+def admin_presign_library_content_file(
   movie_id: str,
-  files: list[UploadFile] = File(...),
-  relative_paths: list[str] = Form(default=[]),
+  relative_path: str = Form(...),
+  final_quality_code: str | None = Form(default=None),
+  db: Session | None = Depends(get_db),
+  _: dict[str, str] = Depends(require_admin),
+) -> dict:
+  """Return a direct R2 upload URL for one file of a Library Converter package.
+
+  Mirrors the VCNR content-package presign step so library chunks go browser ->
+  R2 instead of streaming through the API server.
+  """
+  _get_movie_or_404(db, movie_id)
+  quality_code, filename, key = _library_content_destination(movie_id, relative_path, final_quality_code)
+  content_type = "text/vtt" if filename.lower().endswith(".vtt") else "video/mp4"
+  upload_url = presign_media_upload(key, content_type)
+  if upload_url is None:
+    raise HTTPException(status_code=503, detail="Unable to create a direct upload URL right now.")
+  return {
+    "movie_id": movie_id,
+    "quality_code": quality_code,
+    "filename": filename,
+    "key": key,
+    "upload_url": upload_url,
+  }
+
+
+@router.post("/admin/movies/{movie_id}/assets/library-content/package/register", response_model=AdminMovieActionResponse)
+def admin_register_library_content_package(
+  movie_id: str,
+  manifest_json: str = Form(...),
   db: Session | None = Depends(get_db),
   _: dict[str, str] = Depends(require_admin),
   background_tasks: BackgroundTasks = BackgroundTasks(),
 ) -> AdminMovieActionResponse:
-  """Ingest a Library Converter package for a library title.
+  """Register a Library Converter package whose chunks are already in R2.
 
-  The whole ``content`` folder is uploaded at once: ``manifest.json`` plus the
-  plain ``.mp4`` chunks (and ``.vtt`` subtitles) it references. Every referenced
-  chunk must be present and must match its recorded size and sha256, otherwise
-  the upload is rejected before anything is written. Each quality is stored as
-  its own set of R2 objects, so ``/movies/{id}/content/stream?quality=`` can
-  serve any of them and the HLS builder can pick the best one.
+  The whole ``content`` folder is described by one ``manifest.json``: the plain
+  ``.mp4`` chunks (and ``.vtt`` subtitles) it references. Every referenced chunk
+  must already exist in storage, otherwise the title is not registered. Each
+  quality is kept as its own set of objects, so
+  ``/movies/{id}/content/stream?quality=`` can serve any of them.
   """
   movie = _get_movie_or_404(db, movie_id)
-  manifest, chunk_count = await _store_library_content_package(movie, files, relative_paths)
+  try:
+    source_manifest = json.loads(manifest_json)
+  except Exception:
+    raise HTTPException(status_code=400, detail="The library manifest.json is invalid.")
+  if not isinstance(source_manifest, dict):
+    raise HTTPException(status_code=400, detail="The library manifest.json is invalid.")
+
+  # _register_library_content_package rejects a non-library package_kind itself.
+  manifest, chunk_count = _register_library_content_package(movie, source_manifest)
 
   # Library packages always deliver MP4, so the direct-play stream endpoint and
   # the HLS status endpoint can rely on source_extension being set.

@@ -256,7 +256,6 @@ const adminLibraryCastCredits = document.getElementById("adminLibraryCastCredits
 const adminLibraryAddCastCreditButton = document.getElementById("adminLibraryAddCastCreditButton");
 const adminLibraryDescription = document.getElementById("adminLibraryDescription");
 const adminLibraryCancelButton = document.getElementById("adminLibraryCancelButton");
-const adminLibraryDateLabel = document.getElementById("adminLibraryDateLabel");
 const adminAddLibraryTitleButton = document.getElementById("adminAddLibraryTitleButton");
 const adminLibraryTitleSearch = document.getElementById("adminLibraryTitleSearch");
 const adminLibraryTitleSort = document.getElementById("adminLibraryTitleSort");
@@ -4213,10 +4212,14 @@ function buildAdminTableFooterMarkup(totalCount, pageCount, startIndex, totalPag
  * One title row. `mode` controls the available action icons:
  *   upcoming -> Assign Creators, posters, teasers, gallery, music, approve,
  *               pricing, Reserve Now, upload content, release content, edit, archive
- *   library  -> everything except Assign Creators, Reserve Now and Release Main Content
+ *   library  -> everything except Assign Creators, Reserve Now, Open Delivery
+ *               Queue and Release Main Content
  */
 function buildAdminMovieRowMarkup(movie, mode = "upcoming") {
   const isUpcomingList = mode !== "library";
+  // Library rows are direct-play catalogue titles: creator assignment, the
+  // delivery queue, Reserve Now and Release Main Content do not apply to them.
+  const isLibraryRow = !isUpcomingList || isAdminLibraryMovie(movie);
   return `
       <article class="admin-movie-row" data-admin-movie-id="${movie.id}">
         <div class="admin-movie-main">
@@ -4245,19 +4248,19 @@ function buildAdminMovieRowMarkup(movie, mode = "upcoming") {
         </div>
         <div class="admin-movie-actions">
           <div class="admin-movie-actions-top">
-            <button type="button" class="icon-btn" data-admin-movie-action="creator" title="Assign creators" aria-label="Assign creators">&#128100;</button>
+            ${isLibraryRow ? "" : `<button type="button" class="icon-btn" data-admin-movie-action="creator" title="Assign creators" aria-label="Assign creators">&#128100;</button>`}
             <button type="button" class="icon-btn admin-movie-action-posters" data-admin-movie-action="posters" title="Upload posters" aria-label="Upload posters" ${movie.archived ? "disabled" : ""}>&#128247;</button>
             <button type="button" class="icon-btn admin-movie-action-trailer" data-admin-movie-action="trailer" title="Upload teasers" aria-label="Upload teasers" ${movie.archived ? "disabled" : ""}>&#127909;</button>
             <button type="button" class="icon-btn admin-movie-action-gallery" data-admin-movie-action="gallery" title="Upload gallery" aria-label="Upload gallery" ${movie.archived ? "disabled" : ""}>&#127748;</button>
             <button type="button" class="icon-btn admin-movie-action-music" data-admin-movie-action="music" title="Upload music" aria-label="Upload music" ${movie.archived ? "disabled" : ""}>&#9835;</button>
-            ${isUpcomingList || !isAdminLibraryMovie(movie) ? `<button type="button" class="icon-btn" data-admin-movie-action="delivery-queue" title="Open delivery queue" aria-label="Open delivery queue">&#9201;</button>` : ""}
+            ${isLibraryRow ? "" : `<button type="button" class="icon-btn" data-admin-movie-action="delivery-queue" title="Open delivery queue" aria-label="Open delivery queue">&#9201;</button>`}
           </div>
           <div class="admin-movie-actions-bottom">
             <button type="button" class="icon-btn admin-movie-action-approve" data-admin-movie-action="approve" title="Approve title" aria-label="Approve title" ${canApproveMovie(movie) ? "" : "disabled"}>&#10003;</button>
             <button type="button" class="icon-btn" data-admin-movie-action="pricing-targets" title="Pricing and targets" aria-label="Pricing and targets" ${movie.archived ? "disabled" : ""}>&#127919;</button>
-            ${isUpcomingList || !isAdminLibraryMovie(movie) ? `<button type="button" class="icon-btn admin-movie-action-reserve-start${movie.reserveEnabled ? " is-active" : ""}" data-admin-movie-action="reserve-start" title="${movie.reserveEnabled ? "Stop Reserve Now" : "Start Reserve Now"}" aria-label="${movie.reserveEnabled ? "Stop Reserve Now" : "Start Reserve Now"}" ${canToggleReserve(movie) ? "" : "disabled"}>${movie.reserveEnabled ? "&#9733;" : "&#9734;"}</button>` : ""}
+            ${isLibraryRow ? "" : `<button type="button" class="icon-btn admin-movie-action-reserve-start${movie.reserveEnabled ? " is-active" : ""}" data-admin-movie-action="reserve-start" title="${movie.reserveEnabled ? "Stop Reserve Now" : "Start Reserve Now"}" aria-label="${movie.reserveEnabled ? "Stop Reserve Now" : "Start Reserve Now"}" ${canToggleReserve(movie) ? "" : "disabled"}>${movie.reserveEnabled ? "&#9733;" : "&#9734;"}</button>`}
             ${isAdminLibraryMovie(movie) ? `<button type="button" class="icon-btn icon-btn-processed icon-btn-successful" onclick="window.openAdminLibraryContentUploadForMovie('${movie.id}')" title="Upload library video" aria-label="Upload library video" ${!movie.archived ? "" : "disabled"}>&#127916;</button>` : `<button type="button" class="icon-btn admin-movie-action-content" data-admin-movie-action="content" data-admin-content-open="${movie.id}" onclick="window.openAdminContentUploadForMovie('${movie.id}')" title="Upload main content" aria-label="Upload main content" ${movie.archived ? "disabled" : ""}>&#127916;</button>`}
-            ${isUpcomingList || !isAdminLibraryMovie(movie) ? `<button type="button" class="icon-btn admin-movie-action-release-main" data-admin-movie-action="release-main-content" data-admin-release-main-open="${movie.id}" onclick="window.openAdminReleaseMainContentForMovie('${movie.id}')" title="Release main content" aria-label="Release main content" ${movie.archived ? "disabled" : ""}>&#9654;</button>` : ""}
+            ${isLibraryRow ? "" : `<button type="button" class="icon-btn admin-movie-action-release-main" data-admin-movie-action="release-main-content" data-admin-release-main-open="${movie.id}" onclick="window.openAdminReleaseMainContentForMovie('${movie.id}')" title="Release main content" aria-label="Release main content" ${movie.archived ? "disabled" : ""}>&#9654;</button>`}
             <button type="button" class="icon-btn" data-admin-movie-action="edit" title="Edit title" aria-label="Edit title">&#9998;</button>
             <button type="button" class="icon-btn danger" data-admin-movie-action="archive" title="Archive title" aria-label="Archive title" ${movie.archived ? "disabled" : ""}>&#128465;</button>
           </div>
@@ -6168,9 +6171,15 @@ function openAdminLibraryEditor(movie = null, mode = "upcoming") {
 
   const isEditing = Boolean(movie);
   // Manage Titles > Upcoming / Library fix the stage, so the dropdown stays hidden.
-  adminLibraryEditorMode = isEditing ? (movie.stage || mode) : mode;
-  const editorStage = adminLibraryEditorMode === "library" ? "library" : "upcoming";
-  const isLibraryTitle = editorStage === "library";
+  // The movie itself decides the section: the backend stores library titles as
+  // "library" / "library_free" / "library_paid", and the Library List passes
+  // "upcoming" as the fallback mode when opening the editor. Reading the mode
+  // off the raw stage string alone therefore treated edited library titles as
+  // upcoming and revealed the Release Date field they must not have.
+  const isLibraryTitle = isEditing ? isAdminLibraryMovie(movie) : mode === "library";
+  // Normalise to exactly "library" / "upcoming" so the submit handler's stage
+  // selection and syncLibraryStageFields() never see a library_free variant.
+  adminLibraryEditorMode = isLibraryTitle ? "library" : "upcoming";
   renderAdminLibraryOptions();
   renderAdminCreatorOptions();
   if (!adminCreators.length) {
@@ -6186,10 +6195,13 @@ function openAdminLibraryEditor(movie = null, mode = "upcoming") {
   adminLibraryTitle.value = movie?.title || "";
   adminLibraryCaption.value = movie?.titleCaption || "";
   setMultiSelectValues(adminLibraryGenre, String(movie?.genre || "").split(","));
-  if (adminLibraryDateLabel) {
-    adminLibraryDateLabel.textContent = isLibraryTitle ? "Release Date" : "Expected date";
+  // Library titles have no Release Date, so the whole field is hidden for them.
+  syncLibraryStageFields();
+  if (!isLibraryTitle) {
+    adminLibraryExpectedDate.value = formatAdminDateForInput(movie?.releaseDate);
+  } else {
+    adminLibraryExpectedDate.value = "";
   }
-  adminLibraryExpectedDate.value = formatAdminDateForInput(movie?.releaseDate);
   renderAdminCastCreditRows(movie?.castCredits || []);
   adminLibraryDescription.value = movie?.description || "";
   // The creator picker only exists in the creator-facing markup, so never
@@ -6232,17 +6244,17 @@ function closeAdminLibraryEditor() {
 }
 
 /**
- * Toggle the admin "Add New Title" form between Upcoming/Released fields
- * (expected date, creator assignment) and Library fields (direct-play stream).
- * Library titles are direct-play: no release date, no stars, no creator needed.
+ * Toggle the admin "Add New Title" form between Upcoming and Library fields.
+ * Library titles are direct-play catalogue entries: they have no release date
+ * and no creator assignment, so the date field is hidden and the creator
+ * picker is disabled. The stage is fixed by the section the editor was opened
+ * from (adminLibraryEditorMode), because the stage <select> no longer exists.
  */
 function syncLibraryStageFields() {
-  if (!adminLibraryMovieStage || !adminLibraryExpectedDateField) {
-    return;
+  const isLibrary = adminLibraryEditorMode === "library";
+  if (adminLibraryExpectedDateField) {
+    adminLibraryExpectedDateField.classList.toggle("hidden", isLibrary);
   }
-  const stage = adminLibraryMovieStage.value;
-  const isLibrary = stage === "library_free" || stage === "library_paid";
-  adminLibraryExpectedDateField.classList.toggle("hidden", isLibrary);
   // Creator assignment is irrelevant for library titles (direct-play, no creator workspace).
   if (adminLibraryCreator) {
     adminLibraryCreator.disabled = isLibrary;

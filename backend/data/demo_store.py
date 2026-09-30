@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from datetime import datetime
+from datetime import datetime, timedelta
 import hashlib
 import json
 import secrets
@@ -31,6 +31,10 @@ MOVIE_CHANGE_REQUESTS: dict[str, dict] = {}
 MOVIE_WISHES: list[dict] = []
 MOVIE_RESERVATIONS: list[dict] = []
 MOVIE_ENGAGEMENT_EVENTS: list[dict] = []
+# "Pay & Play" Library unlocks (demo/DB-less twin of the `library_access` table).
+LIBRARY_ACCESS: list[dict] = []
+# Days one disc purchase keeps a Library title playable online / downloadable.
+LIBRARY_ACCESS_WINDOW_DAYS = 7
 DEFAULT_STAR_PRICE_SETTINGS = {
   "price_inr": 50,
   "price_usd": 0.0,
@@ -1407,6 +1411,149 @@ def convert_stars_to_discs(user_id: str, stars: int) -> dict:
     "discs_per_star": per_star,
     "disc_price_inr": float(get_star_conversion_rate()["disc_price_inr"]),
   }
+
+
+def _library_access_iso(value) -> str | None:
+  return value.isoformat() if isinstance(value, datetime) else None
+
+
+def _library_access_payload(entry: dict, now: datetime | None = None) -> dict:
+  """Serialise one demo unlock window exactly like the DB-backed twin does."""
+  current = now or datetime.utcnow()
+  expires_at = entry.get("expires_at") if isinstance(entry.get("expires_at"), datetime) else None
+  remaining = int(max(0, (expires_at - current).total_seconds())) if expires_at else 0
+  is_active = str(entry.get("status") or "") == "active" and remaining > 0
+  return {
+    "movie_id": entry.get("movie_id"),
+    "quality_code": entry.get("quality_code"),
+    "quality_label": entry.get("quality_label"),
+    "discs_spent": int(entry.get("discs_spent") or 0),
+    "status": "active" if is_active else "expired",
+    "active": is_active,
+    "started_at": _library_access_iso(entry.get("started_at")),
+    "expires_at": _library_access_iso(expires_at),
+    "seconds_remaining": remaining,
+    "window_days": LIBRARY_ACCESS_WINDOW_DAYS,
+  }
+
+
+def _expire_stale_library_access(user_id: str, now: datetime | None = None) -> None:
+  current = now or datetime.utcnow()
+  for entry in LIBRARY_ACCESS:
+    if entry.get("user_id") != user_id or str(entry.get("status") or "") != "active":
+      continue
+    expires_at = entry.get("expires_at")
+    if isinstance(expires_at, datetime) and expires_at <= current:
+      entry["status"] = "expired"
+
+
+def _library_disc_option(movie_id: str, quality_code: str) -> tuple[dict | None, dict | None]:
+  """Catalogue view + the disc-priced quality row the viewer picked."""
+  view = next((item for item in list_movies() if item["id"] == movie_id), None)
+  if view is None:
+    return None, None
+  wanted = str(quality_code or "").strip().lower()
+  option = next(
+    (
+      item
+      for item in (view.get("effective_pricing_options") or [])
+      if str(item.get("currency") or "") == "discs"
+      and str(item.get("quality_code") or "").strip().lower() == wanted
+    ),
+    None,
+  )
+  return view, option
+
+
+def purchase_library_access(user_id: str, movie_id: str, quality_code: str) -> dict:
+  """Demo-store "Pay & Play": charge discs once and open the 1-week unlock window."""
+  user = next((item for item in USERS if item["id"] == user_id), None)
+  if user is None:
+    raise ValueError("Your account could not be found. Please sign in again.")
+  view, option = _library_disc_option(movie_id, quality_code)
+  if view is None:
+    raise ValueError("Movie not found.")
+  if option is None:
+    raise ValueError("This title quality is not priced in discs yet.")
+
+  normalized_quality_code = str(option.get("quality_code") or "").strip().lower()
+  quality_label = str(option.get("quality_label") or normalized_quality_code).strip()
+  cost = int(option.get("amount") or 0)
+  if cost <= 0:
+    raise ValueError("This title quality has no disc price yet.")
+
+  now = datetime.utcnow()
+  entry = next(
+    (item for item in LIBRARY_ACCESS if item.get("user_id") == user_id and item.get("movie_id") == movie_id),
+    None,
+  )
+  disc_balance = int(user.get("disks", 0) or 0)
+  already_unlocked = (
+    entry is not None
+    and str(entry.get("status") or "") == "active"
+    and isinstance(entry.get("expires_at"), datetime)
+    and entry["expires_at"] > now
+    and str(entry.get("quality_code") or "").strip().lower() == normalized_quality_code
+  )
+  if already_unlocked:
+    return {
+      "title": view.get("title"),
+      "access": _library_access_payload(entry, now),
+      "disc_balance": disc_balance,
+      "discs_spent": 0,
+      "charged": False,
+      "message": (
+        f'"{view.get("title")}" is already unlocked until '
+        f'{_library_access_iso(entry.get("expires_at"))}. Playing it again is free.'
+      ),
+    }
+  if disc_balance < cost:
+    raise ValueError(f"Not enough discs: your balance is {disc_balance}.")
+
+  if entry is None:
+    entry = {"user_id": user_id, "movie_id": movie_id, "created_at": now}
+    LIBRARY_ACCESS.append(entry)
+  user["disks"] = disc_balance - cost
+  entry.update(
+    {
+      "quality_code": normalized_quality_code,
+      "quality_label": quality_label,
+      "discs_spent": cost,
+      "status": "active",
+      "started_at": now,
+      "expires_at": now + timedelta(days=LIBRARY_ACCESS_WINDOW_DAYS),
+      "updated_at": now,
+    }
+  )
+  return {
+    "title": view.get("title"),
+    "access": _library_access_payload(entry, now),
+    "disc_balance": int(user["disks"]),
+    "discs_spent": cost,
+    "charged": True,
+    "message": (
+      f'"{view.get("title")}" unlocked for {LIBRARY_ACCESS_WINDOW_DAYS} days. '
+      "Play it online as often as you like or download it to keep on this device."
+    ),
+  }
+
+
+def get_library_access(user_id: str, movie_id: str) -> dict | None:
+  now = datetime.utcnow()
+  _expire_stale_library_access(user_id, now)
+  entry = next(
+    (item for item in LIBRARY_ACCESS if item.get("user_id") == user_id and item.get("movie_id") == movie_id),
+    None,
+  )
+  return _library_access_payload(entry, now) if entry is not None else None
+
+
+def list_library_accesses(user_id: str) -> list[dict]:
+  now = datetime.utcnow()
+  _expire_stale_library_access(user_id, now)
+  entries = [item for item in LIBRARY_ACCESS if item.get("user_id") == user_id]
+  entries.sort(key=lambda item: (item.get("expires_at") or datetime.min, int(item.get("id") or 0)), reverse=True)
+  return [_library_access_payload(entry, now) for entry in entries]
 
 
 def delete_user(user_id: str) -> dict | None:

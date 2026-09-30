@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from datetime import datetime
+from datetime import datetime, timedelta
 import hashlib
 import json
 from pathlib import Path
@@ -29,6 +29,7 @@ from backend.models import (
   GenreRecord,
   GradeRecord,
   LanguageRecord,
+  LibraryAccessRecord,
   NotificationRecord,
   MovieRecord,
   MovieChangeRequestRecord,
@@ -3249,6 +3250,223 @@ def get_star_conversion_rate(session: Session) -> dict:
     "disc_price_inr": settings["disc_price_inr"],
     "discs_per_star": discs_per_star_from_settings(settings),
   }
+
+
+# Length of one "Pay & Play" Library unlock. Inside this window the viewer can
+# stream the title online as often as they like and download it to the device;
+# a downloaded copy stays on the device for lifetime viewing afterwards.
+LIBRARY_ACCESS_WINDOW_DAYS = 7
+
+
+def _library_access_iso(value: datetime | None) -> str | None:
+  return value.isoformat() if isinstance(value, datetime) else None
+
+
+def _library_access_to_dict(record: LibraryAccessRecord, now: datetime | None = None) -> dict:
+  """Serialise one unlock window; `active` is computed, never trusted from a column."""
+  current = now or datetime.utcnow()
+  expires_at = record.expires_at if isinstance(record.expires_at, datetime) else None
+  remaining = int(max(0, (expires_at - current).total_seconds())) if expires_at else 0
+  is_active = str(record.status or "") == "active" and remaining > 0
+  return {
+    "movie_id": record.movie_id,
+    "quality_code": record.quality_code,
+    "quality_label": record.quality_label,
+    "discs_spent": int(record.discs_spent or 0),
+    "status": "active" if is_active else str(record.status or "expired"),
+    "active": is_active,
+    "started_at": _library_access_iso(record.started_at),
+    "expires_at": _library_access_iso(expires_at),
+    "seconds_remaining": remaining,
+    "window_days": LIBRARY_ACCESS_WINDOW_DAYS,
+  }
+
+
+def _expire_stale_library_access(session: Session, user_id: str, now: datetime | None = None) -> None:
+  """Flip finished windows to `expired` so read paths cannot report a stale unlock."""
+  current = now or datetime.utcnow()
+  updated = (
+    session.query(LibraryAccessRecord)
+    .filter(
+      LibraryAccessRecord.user_id == user_id,
+      LibraryAccessRecord.status == "active",
+      LibraryAccessRecord.expires_at <= current,
+    )
+    .update({"status": "expired", "updated_at": current}, synchronize_session=False)
+  )
+  if updated:
+    session.commit()
+
+
+def _library_purchase_option(
+  session: Session,
+  movie_id: str,
+  quality_code: str,
+  viewer_user_id: str | None,
+) -> tuple[dict | None, dict | None]:
+  """The catalogue view of a Library title plus the disc-priced option the viewer picked."""
+  record = session.get(MovieRecord, movie_id)
+  if record is None or record.archived:
+    return None, None
+  items = _movie_list_to_dicts(session, [record], viewer_user_id=viewer_user_id)
+  if not items:
+    return None, None
+  # Same projection the viewer app sees, so the charged price can never drift
+  # from the price shown in the Pay & Play sheet.
+  view = catalogue_view(items[0], discs_per_star=_current_discs_per_star(session))
+  wanted = str(quality_code or "").strip().lower()
+  disc_options = [
+    option
+    for option in view.get("effective_pricing_options", [])
+    if str(option.get("currency") or "") == "discs"
+  ]
+  option = next(
+    (
+      item
+      for item in disc_options
+      if str(item.get("quality_code") or "").strip().lower() == wanted
+    ),
+    None,
+  )
+  return view, option
+
+
+def purchase_library_access(
+  session: Session,
+  user_id: str,
+  movie_id: str,
+  quality_code: str,
+) -> dict:
+  """Charge the viewer's discs once for a Library title and open its 1-week window.
+
+  A repeat call for a quality the viewer already holds inside the window is free:
+  the charged price is stored with the unlock, so the Pay & Play sheet can be
+  retried without double-charging the wallet. Picking a *different* quality or
+  unlocking after the window closed charges the current disc price again.
+  """
+  ensure_seeded(session)
+  user = session.get(UserRecord, user_id)
+  if user is None:
+    raise ValueError("Your account could not be found. Please sign in again.")
+  view, option = _library_purchase_option(session, movie_id, quality_code, user_id)
+  if view is None:
+    raise ValueError("Movie not found.")
+  if option is None:
+    raise ValueError("This title quality is not priced in discs yet.")
+
+  normalized_quality_code = str(option.get("quality_code") or "").strip().lower()
+  quality_label = str(option.get("quality_label") or normalized_quality_code).strip()
+  cost = int(option.get("amount") or 0)
+  if cost <= 0:
+    raise ValueError("This title quality has no disc price yet.")
+
+  now = datetime.utcnow()
+  record = (
+    session.query(LibraryAccessRecord)
+    .filter(LibraryAccessRecord.user_id == user_id, LibraryAccessRecord.movie_id == movie_id)
+    .first()
+  )
+  wallet = session.query(WalletRecord).filter(WalletRecord.user_id == user.id).first()
+  if wallet is None:
+    wallet = WalletRecord(user_id=user.id, available_stars=0, blocked_stars=0, disks=0)
+    session.add(wallet)
+    session.flush()
+
+  already_unlocked = (
+    record is not None
+    and str(record.status or "") == "active"
+    and isinstance(record.expires_at, datetime)
+    and record.expires_at > now
+    and str(record.quality_code or "").strip().lower() == normalized_quality_code
+  )
+  if already_unlocked:
+    return {
+      "title": view.get("title"),
+      "access": _library_access_to_dict(record, now),
+      "disc_balance": int(wallet.disks or 0),
+      "discs_spent": 0,
+      "charged": False,
+      "message": (
+        f'"{view.get("title")}" is already unlocked until '
+        f'{_library_access_iso(record.expires_at)}. Playing it again is free.'
+      ),
+    }
+
+  disc_balance = int(wallet.disks or 0)
+  if disc_balance < cost:
+    raise ValueError(f"Not enough discs: your balance is {disc_balance}.")
+
+  if record is None:
+    record = LibraryAccessRecord(user_id=user_id, movie_id=movie_id, created_at=now)
+    session.add(record)
+
+  wallet.disks = disc_balance - cost
+  record.quality_code = normalized_quality_code
+  record.quality_label = quality_label
+  record.discs_spent = cost
+  record.status = "active"
+  record.started_at = now
+  record.expires_at = now + timedelta(days=LIBRARY_ACCESS_WINDOW_DAYS)
+  record.updated_at = now
+  session.add(
+    WalletTransactionRecord(
+      user_id=user.id,
+      transaction_type="library_unlock",
+      stars_delta=0,
+      blocked_stars_delta=0,
+      disks_delta=-cost,
+      reference_type="movie",
+      reference_id=movie_id,
+      note=(
+        f'Pay & Play unlock for "{view.get("title")}" ({quality_label}) - '
+        f'{LIBRARY_ACCESS_WINDOW_DAYS} days online + download'
+      ),
+      created_at=now,
+    )
+  )
+  session.commit()
+  session.refresh(record)
+  session.refresh(wallet)
+  return {
+    "title": view.get("title"),
+    "access": _library_access_to_dict(record, now),
+    "disc_balance": int(wallet.disks or 0),
+    "discs_spent": cost,
+    "charged": True,
+    "message": (
+      f'"{view.get("title")}" unlocked for {LIBRARY_ACCESS_WINDOW_DAYS} days. '
+      "Play it online as often as you like or download it to keep on this device."
+    ),
+  }
+
+
+def get_library_access(session: Session, user_id: str, movie_id: str) -> dict | None:
+  """The viewer's Library unlock state for one title, or None when they never bought it."""
+  ensure_seeded(session)
+  now = datetime.utcnow()
+  _expire_stale_library_access(session, user_id, now)
+  record = (
+    session.query(LibraryAccessRecord)
+    .filter(LibraryAccessRecord.user_id == user_id, LibraryAccessRecord.movie_id == movie_id)
+    .first()
+  )
+  if record is None:
+    return None
+  return _library_access_to_dict(record, now)
+
+
+def list_library_accesses(session: Session, user_id: str) -> list[dict]:
+  """Every Library unlock window this viewer has opened, newest first."""
+  ensure_seeded(session)
+  now = datetime.utcnow()
+  _expire_stale_library_access(session, user_id, now)
+  records = (
+    session.query(LibraryAccessRecord)
+    .filter(LibraryAccessRecord.user_id == user_id)
+    .order_by(LibraryAccessRecord.expires_at.desc(), LibraryAccessRecord.id.desc())
+    .all()
+  )
+  return [_library_access_to_dict(record, now) for record in records]
 
 
 def convert_stars_to_discs(session: Session, user_id: str, stars: int) -> dict:

@@ -37,18 +37,39 @@ class TestClient:
   def __init__(self, app):
     self.app = app
 
-  def request(self, method, path, payload=None, params=None):
+  def request(self, method, path, payload=None, params=None, token=None):
     async def run():
       messages = []
       body = json.dumps(payload).encode() if payload is not None else b""
+      headers = [(b"content-type", b"application/json")]
+      if token:
+        # Endpoints behind get_current_user only accept a Bearer header here;
+        # the media endpoints also take ?token= for players that cannot set one.
+        headers.append((b"authorization", f"Bearer {token}".encode()))
+      request_sent = False
+      response_finished = asyncio.Event()
       async def receive():
-        return {"type": "http.request", "body": body, "more_body": False}
+        # A real server hands the app the request body once and then keeps the
+        # channel open until the client goes away. StreamingResponse runs a
+        # listen_for_disconnect() task that returns on "http.disconnect" and
+        # cancels the body iterator when it fires, so replaying the request body
+        # forever hangs the run (the library stream / download endpoints answer
+        # with a StreamingResponse) and disconnecting immediately would truncate
+        # the body. Wait for the last body chunk, then disconnect.
+        nonlocal request_sent
+        if not request_sent:
+          request_sent = True
+          return {"type": "http.request", "body": body, "more_body": False}
+        await response_finished.wait()
+        return {"type": "http.disconnect"}
       async def send(message):
         messages.append(message)
+        if message["type"] == "http.response.body" and not message.get("more_body", False):
+          response_finished.set()
       scope = dict(type="http", asgi={"version": "3.0"}, http_version="1.1",
         method=method, scheme="http", path=path, raw_path=path.encode(), root_path="",
         query_string=urlencode(params or {}).encode(),
-        headers=[(b"content-type", b"application/json")],
+        headers=headers,
         client=("127.0.0.1", 1234), server=("test", 80))
       await self.app(scope, receive, send)
       status = next(m["status"] for m in messages if m["type"] == "http.response.start")
@@ -56,11 +77,11 @@ class TestClient:
       return SimpleNamespace(status_code=status, text=text, json=lambda: json.loads(text))
     return asyncio.run(run())
 
-  def post(self, path, json):
-    return self.request("POST", path, payload=json)
+  def post(self, path, json, token=None):
+    return self.request("POST", path, payload=json, token=token)
 
-  def get(self, path, params=None):
-    return self.request("GET", path, params=params)
+  def get(self, path, params=None, token=None):
+    return self.request("GET", path, params=params, token=token)
 
   def close(self):
     pass
@@ -230,6 +251,136 @@ class CatalogueApiTests(unittest.TestCase):
       item = self.view(movie_id, add_calendar_months(RELEASE, months), "library")
       self.assertEqual(item["effective_pricing_options"][0]["amount"], 7312)
       self.assertEqual(item["library_price_source"], "direct")
+
+  def _create_viewer_with_discs(self, disks, email="payplay@email.com", password="pw12345"):
+    from backend.models import WalletRecord
+    with self.sessions() as session:
+      user = persistence.create_user(session, {
+        "name": "Viewer", "email": email, "password": password,
+        "role": "viewer", "status": "active", "star_balance": 3,
+      })
+      session.query(WalletRecord).filter(WalletRecord.user_id == user["id"]).update({"disks": disks})
+      session.commit()
+    return user["id"], email, password
+
+  def _library_movie_with_disc_price(self, discs=7312):
+    """A published direct-Library title priced in discs, with its raw video registered."""
+    from backend.models import MovieRecord
+    movie_id = self.create("library_paid")
+    self.post(f"/admin/movies/{movie_id}/pricing-config", {"library_pricing_options": [
+      dict(quality_code="4k", quality_label="4K", discs_required=discs)]})
+    self.approve(movie_id)
+    with self.sessions() as session:
+      session.query(MovieRecord).filter(MovieRecord.id == movie_id).update({"source_extension": ".mp4"})
+      session.commit()
+    return movie_id
+
+  def test_library_pay_and_play_charges_discs_and_unlocks_for_one_week(self):
+    from backend.models import LibraryAccessRecord, WalletRecord
+    movie_id = self._library_movie_with_disc_price()
+    user_id, _email, _password = self._create_viewer_with_discs(9000)
+    self.sign_in_as_viewer(user_id)
+
+    # Nothing is unlocked before the purchase.
+    before = self.client.get(f"/api/movies/{movie_id}/library/access")
+    self.assertEqual(before.status_code, 200, before.text)
+    self.assertIsNone(before.json()["access"])
+
+    purchase = self.client.post(f"/api/movies/{movie_id}/library/purchase", json={"quality_code": "4k"})
+    self.assertEqual(purchase.status_code, 200, purchase.text)
+    body = purchase.json()
+    window_days = persistence.LIBRARY_ACCESS_WINDOW_DAYS
+    self.assertEqual(body["disc_balance"], 9000 - 7312)
+    self.assertTrue(body["access"]["active"])
+    self.assertEqual(body["access"]["quality_code"], "4k")
+    self.assertEqual(body["access"]["quality_label"], "4K")
+    self.assertEqual(body["access"]["window_days"], window_days)
+    # The window is 7 days, measured from the purchase.
+    self.assertLess(abs(body["access"]["seconds_remaining"] / 86400 - window_days), 0.01)
+
+    # The charge is persisted with a ledger row, not just returned by the endpoint.
+    with self.sessions() as session:
+      wallet = session.query(WalletRecord).filter(WalletRecord.user_id == user_id).one()
+      self.assertEqual(int(wallet.disks), 9000 - 7312)
+      ledger = session.query(persistence.WalletTransactionRecord).filter(
+        persistence.WalletTransactionRecord.user_id == user_id,
+        persistence.WalletTransactionRecord.transaction_type == "library_unlock").all()
+      self.assertEqual([row.disks_delta for row in ledger], [-7312])
+      self.assertEqual(session.query(LibraryAccessRecord).count(), 1)
+
+    # Re-confirming the same quality inside the window never charges twice.
+    again = self.client.post(f"/api/movies/{movie_id}/library/purchase", json={"quality_code": "4k"})
+    self.assertEqual(again.status_code, 200, again.text)
+    self.assertEqual(again.json()["disc_balance"], 9000 - 7312)
+    self.assertTrue(again.json()["access"]["active"])
+
+    # One read lists every unlock so the app can mark its Library cards.
+    listed = self.client.get("/api/users/library-access")
+    self.assertEqual(listed.status_code, 200, listed.text)
+    self.assertEqual([item["movie_id"] for item in listed.json()["items"]], [movie_id])
+
+  def test_expired_library_window_is_not_active_and_can_be_bought_again(self):
+    from backend.models import LibraryAccessRecord
+    movie_id = self._library_movie_with_disc_price(discs=100)
+    user_id, _email, _password = self._create_viewer_with_discs(500)
+    self.sign_in_as_viewer(user_id)
+    self.client.post(f"/api/movies/{movie_id}/library/purchase", json={"quality_code": "4k"})
+
+    # Move the window into the past: reads must report it expired, not active.
+    with self.sessions() as session:
+      session.query(LibraryAccessRecord).update({"expires_at": datetime.utcnow() - timedelta(minutes=1)})
+      session.commit()
+    expired = self.client.get(f"/api/movies/{movie_id}/library/access").json()["access"]
+    self.assertFalse(expired["active"])
+    self.assertEqual(expired["status"], "expired")
+    self.assertEqual(expired["seconds_remaining"], 0)
+
+    # Buying again re-opens the window and charges the current price.
+    renewed = self.client.post(f"/api/movies/{movie_id}/library/purchase", json={"quality_code": "4k"})
+    self.assertEqual(renewed.status_code, 200, renewed.text)
+    self.assertTrue(renewed.json()["access"]["active"])
+    self.assertEqual(renewed.json()["disc_balance"], 300)
+
+  def test_library_purchase_rejects_an_empty_wallet_and_unknown_quality(self):
+    from backend.models import WalletRecord
+    movie_id = self._library_movie_with_disc_price(discs=7312)
+    user_id, _email, _password = self._create_viewer_with_discs(10)
+    self.sign_in_as_viewer(user_id)
+
+    rejected = self.client.post(f"/api/movies/{movie_id}/library/purchase", json={"quality_code": "4k"})
+    self.assertEqual(rejected.status_code, 400, rejected.text)
+    self.assertIn("Not enough discs", rejected.text)
+    unknown = self.client.post(f"/api/movies/{movie_id}/library/purchase", json={"quality_code": "1080p"})
+    self.assertEqual(unknown.status_code, 400, unknown.text)
+    with self.sessions() as session:
+      self.assertEqual(int(session.query(WalletRecord).filter(WalletRecord.user_id == user_id).one().disks), 10)
+
+  def test_library_download_needs_an_active_unlock(self):
+    movie_id = self._library_movie_with_disc_price(discs=50)
+    _user_id, email, password = self._create_viewer_with_discs(50, email="download@email.com")
+    login = self.client.post("/api/auth/login", json={"email": email, "password": password})
+    self.assertEqual(login.status_code, 200, login.text)
+    token = login.json()["token"]
+
+    # Signed in but not unlocked: the file must not be downloadable.
+    blocked = self.client.get(f"/api/movies/{movie_id}/library/download", params={"token": token})
+    self.assertEqual(blocked.status_code, 403, blocked.text)
+
+    # The purchase endpoint is auth gated by the Bearer header, so a token-only
+    # call would 401 and leave the title locked for the rest of this test.
+    purchase = self.client.post(
+      f"/api/movies/{movie_id}/library/purchase", json={"quality_code": "4k"}, token=token)
+    self.assertEqual(purchase.status_code, 200, purchase.text)
+    with patch.object(routes, "media_object_exists", return_value=True), \
+      patch.object(routes, "verified_media_download_url", return_value=None), \
+      patch.object(routes, "download_media_object", return_value=b"library-mp4-bytes"):
+      streamed = self.client.get(
+        f"/api/movies/{movie_id}/content/stream", params={"token": token, "quality": "4k", "direct": 1})
+      self.assertEqual(streamed.status_code, 200, streamed.text)
+      self.assertTrue(streamed.text.startswith("library-mp4-bytes"))
+      downloaded = self.client.get(f"/api/movies/{movie_id}/library/download", params={"token": token})
+      self.assertEqual(downloaded.status_code, 200, downloaded.text)
+      self.assertTrue(downloaded.text.startswith("library-mp4-bytes"))
 
   def test_upcoming_rejects_direct_disc_override(self):
     from backend.models import MovieRecord, MovieChangeRequestRecord

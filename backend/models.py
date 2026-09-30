@@ -383,6 +383,33 @@ class ReservationRecord(Base):
   updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
 
 
+class LibraryAccessRecord(Base):
+  """One disc-purchased Library unlock window for a viewer.
+
+  "Pay & Play" charges the viewer's disc balance once and opens a fixed-length
+  window (``LIBRARY_ACCESS_WINDOW_DAYS``) in which the title can be streamed
+  online as often as the viewer likes and downloaded to the device. The
+  downloaded file is plain MP4 that the app keeps locally, so it stays playable
+  for life even after this window closes - only the online stream and a fresh
+  download are gated by ``expires_at``.
+  """
+
+  __tablename__ = "library_access"
+  __table_args__ = (UniqueConstraint("user_id", "movie_id", name="uq_library_access_user_movie"),)
+
+  id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+  user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), nullable=False, index=True)
+  movie_id: Mapped[str] = mapped_column(String(120), nullable=False, index=True)
+  quality_code: Mapped[str | None] = mapped_column(String(40), nullable=True)
+  quality_label: Mapped[str | None] = mapped_column(String(60), nullable=True)
+  discs_spent: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+  status: Mapped[str] = mapped_column(String(20), nullable=False, default="active", index=True)
+  started_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+  expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
+  created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+  updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+
+
 class NotificationRecord(Base):
   __tablename__ = "notifications"
 

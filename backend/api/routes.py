@@ -164,6 +164,10 @@ from backend.schemas import (
   LoginResponse,
   MovieInterestRequest,
   MovieInterestResponse,
+  LibraryAccessListResponse,
+  LibraryAccessResponse,
+  LibraryPurchaseRequest,
+  LibraryPurchaseResponse,
   MovieGiftRequest,
   StarTransferRequest,
   StarTransferResponse,
@@ -4502,115 +4506,67 @@ def get_movie_content_manifest(
   return _viewer_content_manifest_payload(manifest)
 
 
-@router.get("/movies/{movie_id}/content/stream")
-def stream_movie_content(
-  movie_id: str,
-  request: Request,
-  db: Session | None = Depends(get_db),
-  token: str | None = None,
-  quality: str | None = None,
-) -> StreamingResponse:
-  """Stream a library title's content.
+def _library_progressive_response(movie_id: str, movie: dict, quality_code: str | None) -> Response:
+  """Serve a Library title as one progressive MP4.
 
-  When adaptive HLS is ready (built in the background after upload), this
-  returns the HLS master playlist whose children point at the authenticated
-  ``/movies/{id}/content/hls/...`` endpoints, so viewers stream small ~6-second
-  segments directly from Cloudflare R2.  Otherwise it falls back to serving the
-  raw .mp4/.mkv file via presigned URL (or proxied bytes).
+  Two upload shapes exist and both must stream here:
 
-  The player apps stream through an in-app <video>/expo-video element that cannot
-  attach an Authorization header, so the signed-in ``token`` query parameter is
-  accepted as a fallback for the Bearer header (and embedded into the rewritten
-  HLS segment URIs).
+  1. A Library Converter package (``package_kind == "library"``) has no single
+     ``main.mp4``: it is chunked per quality, so the requested quality's plain
+     chunks are served in ``chunk_index`` order, which concatenates back into
+     the original MP4.
+  2. A raw ``main.mp4`` / ``main.mkv`` upload, served through a verified public
+     or presigned R2 URL, with a proxied-bytes fallback.
+
+  Callers that need a single progressive stream (the mobile app's expo-video
+  player, and the "download to this device" endpoint) use this; HLS stays on
+  ``/content/stream`` for players that ask for the adaptive playlist.
   """
-  # Authenticate the same way the HLS segment endpoint does: Bearer header (for
-  # the HTTP API / browser players) or the trusted in-app ``token`` query fallback
-  # (for expo-video / native players that cannot set request headers).
-  session_token = token or _extract_auth_token(request)
-  if not session_token:
-    raise HTTPException(status_code=401, detail="Sign in is required.")
-  session = session_auth.get_session(session_token)
-  if session is None:
-    raise HTTPException(status_code=401, detail="Your session has expired. Please sign in again.")
-  if session.status != "active":
-    raise HTTPException(status_code=403, detail="This account is not active.")
-  current_user = session.to_user()
-  viewer_id = current_user["id"]
-  movie_items = persistence.list_movies(db, include_archived=True, viewer_user_id=viewer_id) if db else demo_store.list_movies(include_archived=True, viewer_user_id=viewer_id)
-  movie = next((item for item in movie_items if item["id"] == movie_id), None)
-  if movie is None:
-    raise HTTPException(status_code=404, detail="Movie not found.")
-
-  # Prefer serving the raw .mp4/.mkv directly so viewers get a single progressive
-  # file without going through HLS. HLS (built in the background after upload) is
-  # still available as a fallback when the raw file is missing, but the default
-  # library-playback path is the simple direct file the mobile app expects.
-  source_ext = str(movie.get("source_extension") or "").strip().lower()
-  if source_ext not in {".mp4", ".mkv"}:
-    raise HTTPException(status_code=400, detail="This title does not have a direct-play library video.")
-
-  # Adaptive HLS when the background job already finished: serve the master
-  # playlist whose children point at the authenticated ``/content/hls/...``
-  # endpoints, so players fetch small segments instead of one large file.
-  # This must be checked before the single-object direct play below, otherwise
-  # the direct-play redirect would always win and the HLS build would go unused.
-  if hls_lib.library_hls_ready(movie_id):
-    hls_manifest_data = download_media_object(hls_lib.library_hls_manifest_key(movie_id))
-    if hls_manifest_data is not None:
-      hls_manifest_text = hls_manifest_data.decode("utf-8", errors="replace")
-      auth_token = token or _extract_auth_token(request) or ""
-      rewritten = hls_lib.rewrite_hls_manifest(hls_manifest_text, movie_id, str(request.base_url), auth_token) if auth_token else hls_manifest_text
-      return Response(
-        content=rewritten,
-        media_type="application/vnd.apple.mpegurl",
-        headers={"Cache-Control": "no-cache"},
-      )
-
-  # A stored Library Converter package has no single main.mp4: it is chunked per
-  # quality. Serve the requested quality (default: the best one uploaded) by
-  # streaming its plain chunks in chunk_index order, which concatenates back
-  # into the original MP4.
   manifest = _read_content_manifest(movie_id) or {}
   if str(manifest.get("package_kind") or "").strip().lower() == "library":
     quality_lookup = _content_quality_lookup(manifest)
-    requested = _normalize_quality_code(quality or "")
+    requested = _normalize_quality_code(quality_code or "")
     quality_entry = quality_lookup.get(requested) if requested else None
     if quality_entry is None:
       default_quality = _default_library_quality(manifest)
       quality_entry = quality_lookup.get(default_quality) if default_quality else None
     if quality_entry is None:
       raise HTTPException(status_code=404, detail="Library content package is empty.")
-    quality_code = _normalize_quality_code(str(quality_entry.get("quality_code") or ""))
+    resolved_quality_code = _normalize_quality_code(str(quality_entry.get("quality_code") or ""))
     records = sorted(
       (item for item in (quality_entry.get("files") or []) if isinstance(item, dict)),
       key=lambda item: int(item.get("chunk_index") or 0),
     )
     chunk_keys = [
-      _library_chunk_key(movie_id, quality_code, Path(str(item.get("name") or "")).name)
+      _library_chunk_key(movie_id, resolved_quality_code, Path(str(item.get("name") or "")).name)
       for item in records
       if str(item.get("name") or "").strip()
     ]
-    if chunk_keys:
-      total_bytes = sum(int(item.get("size") or item.get("chunk_size") or 0) for item in records)
+    if not chunk_keys:
+      raise HTTPException(status_code=404, detail="Library content package is empty.")
+    total_bytes = sum(int(item.get("size") or item.get("chunk_size") or 0) for item in records)
 
-      def _iter_library_chunks():
-        for key in chunk_keys:
-          payload = download_media_object(key)
-          if payload is None:
-            return
-          yield payload
+    def _iter_library_chunks():
+      for key in chunk_keys:
+        payload = download_media_object(key)
+        if payload is None:
+          return
+        yield payload
 
-      return StreamingResponse(
-        _iter_library_chunks(),
-        media_type="video/mp4",
-        headers={
-          "Content-Disposition": f'inline; filename="{movie_id}-{quality_code}.mp4"',
-          "Cache-Control": "no-cache",
-          **({"Content-Length": str(total_bytes)} if total_bytes > 0 else {}),
-        },
-      )
+    return StreamingResponse(
+      _iter_library_chunks(),
+      media_type="video/mp4",
+      headers={
+        "Content-Disposition": f'inline; filename="{movie_id}-{resolved_quality_code}.mp4"',
+        "Cache-Control": "no-cache",
+        **({"Content-Length": str(total_bytes)} if total_bytes > 0 else {}),
+      },
+    )
 
-  # Resolve the file on Cloudflare R2.
+  # Raw single-file upload: resolve it on Cloudflare R2.
+  source_ext = str(movie.get("source_extension") or "").strip().lower()
+  if source_ext not in {".mp4", ".mkv"}:
+    raise HTTPException(status_code=400, detail="This title does not have a direct-play library video.")
   object_key = media_object_key(movie_id, "content", f"main{source_ext}")
   if not media_object_exists(object_key):
     # Fallback: try alternate extension and any file under the content prefix.
@@ -4650,9 +4606,182 @@ def stream_movie_content(
     iter([data]),
     media_type=media_type,
     headers={
-      "Content-Disposition": f"inline; filename=\"{filename}\"",
+      "Content-Disposition": f'inline; filename="{filename}"',
       "Cache-Control": "no-cache",
     },
+  )
+
+
+@router.get("/movies/{movie_id}/content/stream")
+def stream_movie_content(
+  movie_id: str,
+  request: Request,
+  db: Session | None = Depends(get_db),
+  token: str | None = None,
+  quality: str | None = None,
+  direct: bool = False,
+) -> StreamingResponse:
+  """Stream a library title's content.
+
+  Default behaviour returns the adaptive HLS master playlist when the background
+  job already built one, so browser players stream small segments straight from
+  Cloudflare R2. ``direct=1`` forces one progressive MP4 instead (raw upload or
+  the concatenated chunk package), which is what the mobile app's expo-video
+  player asks for: it cannot tell an m3u8 from an MP4 by URL, and being told the
+  wrong container makes ExoPlayer fail with a playback error.
+
+  The player apps stream through an in-app <video>/expo-video element that cannot
+  attach an Authorization header, so the signed-in ``token`` query parameter is
+  accepted as a fallback for the Bearer header (and embedded into the rewritten
+  HLS segment URIs).
+  """
+  # Authenticate the same way the HLS segment endpoint does: Bearer header (for
+  # the HTTP API / browser players) or the trusted in-app ``token`` query fallback
+  # (for expo-video / native players that cannot set request headers).
+  session_token = token or _extract_auth_token(request)
+  if not session_token:
+    raise HTTPException(status_code=401, detail="Sign in is required.")
+  session = session_auth.get_session(session_token)
+  if session is None:
+    raise HTTPException(status_code=401, detail="Your session has expired. Please sign in again.")
+  if session.status != "active":
+    raise HTTPException(status_code=403, detail="This account is not active.")
+  current_user = session.to_user()
+  viewer_id = current_user["id"]
+  movie_items = persistence.list_movies(db, include_archived=True, viewer_user_id=viewer_id) if db else demo_store.list_movies(include_archived=True, viewer_user_id=viewer_id)
+  movie = next((item for item in movie_items if item["id"] == movie_id), None)
+  if movie is None:
+    raise HTTPException(status_code=404, detail="Movie not found.")
+
+  # The mobile player asks for one progressive MP4 (`direct=1`) because expo-video
+  # cannot detect the container from this URL. Everything else keeps the adaptive
+  # HLS playlist when the background job already built one: its children point at
+  # the authenticated ``/content/hls/...`` endpoints, so players fetch small
+  # segments instead of one large file.
+  if not direct and hls_lib.library_hls_ready(movie_id):
+    hls_manifest_data = download_media_object(hls_lib.library_hls_manifest_key(movie_id))
+    if hls_manifest_data is not None:
+      hls_manifest_text = hls_manifest_data.decode("utf-8", errors="replace")
+      auth_token = token or _extract_auth_token(request) or ""
+      rewritten = hls_lib.rewrite_hls_manifest(hls_manifest_text, movie_id, str(request.base_url), auth_token) if auth_token else hls_manifest_text
+      return Response(
+        content=rewritten,
+        media_type="application/vnd.apple.mpegurl",
+        headers={"Cache-Control": "no-cache"},
+      )
+
+  # Direct play: a Library Converter package is chunked per quality (streamed in
+  # chunk_index order), a raw upload is one main.mp4/.mkv object.
+  return _library_progressive_response(movie_id, movie, quality)
+
+def _library_access_for_viewer(db: Session | None, user_id: str, movie_id: str) -> dict | None:
+  """The viewer's Pay & Play unlock window for a Library title, or None."""
+  if db:
+    return persistence.get_library_access(db, user_id, movie_id)
+  return demo_store.get_library_access(user_id, movie_id)
+
+
+@router.post("/movies/{movie_id}/library/purchase", response_model=LibraryPurchaseResponse)
+def purchase_library_title(
+  movie_id: str,
+  payload: LibraryPurchaseRequest,
+  db: Session | None = Depends(get_db),
+  current_user: dict[str, str] = Depends(get_current_user),
+) -> LibraryPurchaseResponse:
+  """Pay & Play: charge discs once and own the title's online + download window.
+
+  The wallet charge, its ledger row and the ``library_access`` window are written
+  in one commit, so the balance the app shows is always the balance stored. The
+  window length comes from the backend (``LIBRARY_ACCESS_WINDOW_DAYS``), never
+  from the client.
+  """
+  try:
+    result = (
+      persistence.purchase_library_access(db, current_user["id"], movie_id, payload.quality_code)
+      if db
+      else demo_store.purchase_library_access(current_user["id"], movie_id, payload.quality_code)
+    )
+  except ValueError as error:
+    raise HTTPException(status_code=400, detail=str(error)) from error
+  return LibraryPurchaseResponse(
+    message=str(result.get("message") or "Library title unlocked."),
+    disc_balance=int(result.get("disc_balance") or 0),
+    access=result.get("access") or {},
+  )
+
+
+@router.get("/movies/{movie_id}/library/access", response_model=LibraryAccessResponse)
+def get_library_title_access(
+  movie_id: str,
+  db: Session | None = Depends(get_db),
+  current_user: dict[str, str] = Depends(get_current_user),
+) -> LibraryAccessResponse:
+  """Whether this viewer currently owns the title's 1-week play/download window."""
+  access = _library_access_for_viewer(db, current_user["id"], movie_id)
+  return LibraryAccessResponse(access=access)
+
+
+@router.get("/users/library-access", response_model=LibraryAccessListResponse)
+def list_viewer_library_access(
+  db: Session | None = Depends(get_db),
+  current_user: dict[str, str] = Depends(get_current_user),
+) -> LibraryAccessListResponse:
+  """Every Library unlock window this viewer has opened, newest first.
+
+  The app reads this once with the Library page so the cards and the details
+  screen know which titles are still inside their week without a request per
+  title.
+  """
+  items = (
+    persistence.list_library_accesses(db, current_user["id"])
+    if db
+    else demo_store.list_library_accesses(current_user["id"])
+  )
+  return LibraryAccessListResponse(items=items)
+
+
+@router.get("/movies/{movie_id}/library/download")
+def download_library_title(
+  movie_id: str,
+  request: Request,
+  db: Session | None = Depends(get_db),
+  token: str | None = None,
+  quality: str | None = None,
+) -> Response:
+  """Download the unlocked Library title as one MP4 the app keeps on the device.
+
+  Gated on an active Pay & Play window (or an existing reserve/buy entitlement), so
+  a viewer who never unlocked the title cannot pull the file. The purchased quality
+  wins over the requested one: the viewer paid for that tier, and letting a
+  ``?quality=`` query string pick a higher tier would silently upgrade them.
+  """
+  session_token = token or _extract_auth_token(request)
+  if not session_token:
+    raise HTTPException(status_code=401, detail="Sign in is required.")
+  session = session_auth.get_session(session_token)
+  if session is None:
+    raise HTTPException(status_code=401, detail="Your session has expired. Please sign in again.")
+  if session.status != "active":
+    raise HTTPException(status_code=403, detail="This account is not active.")
+  viewer_id = session.to_user()["id"]
+
+  movie_items = persistence.list_movies(db, include_archived=True, viewer_user_id=viewer_id) if db else demo_store.list_movies(include_archived=True, viewer_user_id=viewer_id)
+  movie = next((item for item in movie_items if item["id"] == movie_id), None)
+  if movie is None:
+    raise HTTPException(status_code=404, detail="Movie not found.")
+
+  access = _library_access_for_viewer(db, viewer_id, movie_id)
+  unlocked = bool(access and access.get("active"))
+  if not unlocked and _delivery_entitlement_status(movie) not in {"blocked", "fulfilled"}:
+    raise HTTPException(
+      status_code=403,
+      detail="Pay & Play this title to unlock its download, or play it with ads online.",
+    )
+
+  return _library_progressive_response(
+    movie_id,
+    movie,
+    str((access or {}).get("quality_code") or quality or ""),
   )
 
 

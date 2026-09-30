@@ -400,6 +400,39 @@ class MovieInterestResponse(BaseModel):
   message: str
 
 
+class LibraryAccessState(BaseModel):
+  """One "Pay & Play" unlock window: 1 week of online playback + download."""
+
+  movie_id: str
+  quality_code: str | None = None
+  quality_label: str | None = None
+  discs_spent: int = 0
+  status: str = "expired"
+  active: bool = False
+  started_at: str | None = None
+  expires_at: str | None = None
+  seconds_remaining: int = 0
+  window_days: int = 7
+
+
+class LibraryAccessResponse(BaseModel):
+  access: LibraryAccessState | None = None
+
+
+class LibraryAccessListResponse(BaseModel):
+  items: list[LibraryAccessState] = []
+
+
+class LibraryPurchaseRequest(BaseModel):
+  quality_code: str = Field(min_length=1, max_length=40)
+
+
+class LibraryPurchaseResponse(BaseModel):
+  message: str
+  disc_balance: int
+  access: LibraryAccessState
+
+
 class StageUpdateRequest(BaseModel):
   stage: str = Field(pattern="^(upcoming|released|library)$")
 

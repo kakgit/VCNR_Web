@@ -169,6 +169,9 @@ from backend.schemas import (
   StarTransferResponse,
   StarPurchaseRequest,
   StarPurchaseResponse,
+  StarConversionRateResponse,
+  StarConversionRequest,
+  StarConversionResponse,
   MovieListResponse,
   PublishMovieRequest,
   MoviePublishRequest,
@@ -3121,6 +3124,49 @@ def stars_purchase(
     star_balance=star_balance,
     stars_purchased=payload.stars,
     payment_reference=reference,
+  )
+
+
+@router.get("/users/stars/conversion-rate", response_model=StarConversionRateResponse)
+def stars_conversion_rate(
+  db: Session | None = Depends(get_db),
+  _: dict[str, str] = Depends(get_current_user),
+) -> StarConversionRateResponse:
+  """Exchange rate shown on the viewer's "Convert Stars to Discs" page.
+
+  Both rupee values come from the admin's saved pricing settings, so the page always
+  quotes the live rate instead of a value compiled into the app.
+  """
+  rate = persistence.get_star_conversion_rate(db) if db else demo_store.get_star_conversion_rate()
+  return StarConversionRateResponse(**rate)
+
+
+@router.post("/users/stars/convert", response_model=StarConversionResponse)
+def stars_convert(
+  payload: StarConversionRequest,
+  db: Session | None = Depends(get_db),
+  current_user: dict[str, str] = Depends(get_current_user),
+) -> StarConversionResponse:
+  """Exchange the signed-in viewer's stars for discs at the admin-set rate."""
+  try:
+    result = (
+      persistence.convert_stars_to_discs(db, current_user["id"], payload.stars)
+      if db
+      else demo_store.convert_stars_to_discs(current_user["id"], payload.stars)
+    )
+  except ValueError as error:
+    raise HTTPException(status_code=400, detail=str(error)) from error
+
+  user = result.get("user") or {}
+  stars_converted = int(result.get("stars_converted", payload.stars) or 0)
+  discs_credited = int(result.get("discs_credited", 0) or 0)
+  return StarConversionResponse(
+    message=f"Converted ★ {stars_converted} into ◎ {discs_credited} discs.",
+    stars_converted=stars_converted,
+    discs_credited=discs_credited,
+    star_balance=int(user.get("star_balance", 0) or 0),
+    disc_balance=int(user.get("disc_balance", 0) or 0),
+    discs_per_star=int(result.get("discs_per_star", 0) or 0),
   )
 
 

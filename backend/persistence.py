@@ -16,7 +16,7 @@ from backend.core.push import (
   normalize_push_token,
   send_push_messages_async,
 )
-from backend.core.catalogue import catalogue_view, pricing_entries, title_origin
+from backend.core.catalogue import catalogue_view, discs_per_star_from_settings, pricing_entries, title_origin
 from backend.core.storage import list_media_keys, media_public_url, r2_enabled
 from backend.core.time_utils import is_app_time_reached, parse_app_datetime
 from backend.data.demo_store import ADMIN_STATE, MOVIES, PUBLISH_QUEUE, USERS
@@ -452,6 +452,9 @@ def _default_star_price_settings() -> dict:
     "price_inr": 50,
     "price_usd": 0.0,
     "price_eur": 0.0,
+    # Rupee value of one disc. Together with price_inr it defines the star → disc
+    # exchange rate the viewers see (Rs 50 / Rs 0.10 = 500 discs per star).
+    "disc_price_inr": 0.10,
     "effective_from": None,
   }
 
@@ -463,6 +466,11 @@ def _normalize_star_price_settings(payload: dict | None) -> dict:
   settings["price_inr"] = float(payload.get("price_inr", settings["price_inr"]) or settings["price_inr"])
   settings["price_usd"] = float(payload.get("price_usd", settings["price_usd"]) or settings["price_usd"])
   settings["price_eur"] = float(payload.get("price_eur", settings["price_eur"]) or settings["price_eur"])
+  # A blank/zero disc price would make the exchange rate undefined, so it falls
+  # back to the shipped default instead of being stored as 0.
+  settings["disc_price_inr"] = float(
+    payload.get("disc_price_inr", settings["disc_price_inr"]) or settings["disc_price_inr"]
+  )
   effective_from = payload.get("effective_from")
   settings["effective_from"] = str(effective_from).strip() if effective_from else None
   return settings
@@ -485,16 +493,29 @@ def _star_price_settings_from_state(state: AdminStateRecord | None) -> dict:
   return _json_load_star_price_settings(state.star_price_settings)
 
 
+def _star_pricing_summary_fields(settings: dict | None) -> dict:
+  """Star pricing snapshot plus the disc value and the derived exchange rate.
+
+  `discs_per_star` is computed, never stored: it is always star price / disc price,
+  so changing either rupee value immediately changes what a conversion pays out.
+  """
+  resolved = _normalize_star_price_settings(settings)
+  return {
+    "star_price_settings": resolved,
+    "star_price_inr": resolved["price_inr"],
+    "star_price_usd": resolved["price_usd"],
+    "star_price_eur": resolved["price_eur"],
+    "star_price_effective_from": resolved["effective_from"],
+    "disc_price_inr": resolved["disc_price_inr"],
+    "discs_per_star": discs_per_star_from_settings(resolved),
+  }
+
+
 def _admin_state_to_dict(state: AdminStateRecord) -> dict:
-  settings = _star_price_settings_from_state(state)
   return {
     "featured_stage": state.featured_stage,
     "reward_campaign_boosts": state.reward_campaign_boosts,
-    "star_price_settings": settings,
-    "star_price_inr": settings["price_inr"],
-    "star_price_usd": settings["price_usd"],
-    "star_price_eur": settings["price_eur"],
-    "star_price_effective_from": settings["effective_from"],
+    **_star_pricing_summary_fields(_star_price_settings_from_state(state)),
   }
 
 
@@ -505,6 +526,11 @@ def _current_star_price_settings(session: Session | None = None) -> dict:
   if state is None:
     return _default_star_price_settings()
   return _star_price_settings_from_state(state)
+
+
+def _current_discs_per_star(session: Session | None = None) -> int:
+  """Discs one star converts into, read from the live admin pricing settings."""
+  return discs_per_star_from_settings(_current_star_price_settings(session))
 
 
 def _current_star_price_snapshot(session: Session | None = None) -> str:
@@ -1844,7 +1870,9 @@ def list_movies(
   if not include_archived:
     items = [item for item in items if _is_viewer_visible_status(item["approval_status"])]
   if not include_archived and not prefer_pending:
-    items = [catalogue_view(item) for item in items]
+    # One settings read for the whole page: the exchange rate is global, not per title.
+    disc_rate = _current_discs_per_star(session)
+    items = [catalogue_view(item, discs_per_star=disc_rate) for item in items]
     if stage:
       items = [item for item in items if item["stage"] == stage]
   return items
@@ -2498,11 +2526,7 @@ def get_admin_summary(session: Session) -> dict:
   summary = _admin_state_to_dict(state) if state is not None else {
     "featured_stage": "upcoming",
     "reward_campaign_boosts": 0,
-    "star_price_settings": _default_star_price_settings(),
-    "star_price_inr": 50,
-    "star_price_usd": 0.0,
-    "star_price_eur": 0.0,
-    "star_price_effective_from": None,
+    **_star_pricing_summary_fields(_default_star_price_settings()),
   }
   return {
     **summary,
@@ -2544,6 +2568,13 @@ def update_star_pricing_settings(session: Session, payload: dict) -> dict:
     state = AdminStateRecord(id=1, featured_stage="upcoming", reward_campaign_boosts=0)
     session.add(state)
     session.flush()
+  # The disc value is optional in the request schema so an older/cached admin page can
+  # still save. Merging over the stored settings means a missing (or null) field keeps
+  # the value that is already live instead of silently reverting to the default.
+  current = _star_price_settings_from_state(state)
+  requested_disc_price = payload.get("disc_price_inr")
+  if requested_disc_price in (None, ""):
+    payload = {**payload, "disc_price_inr": current["disc_price_inr"]}
   state.star_price_settings = json.dumps(_normalize_star_price_settings(payload))
   session.commit()
   return get_star_pricing_settings(session)
@@ -3207,6 +3238,71 @@ def purchase_stars(session: Session, user_id: str, stars: int, payment_method: s
   session.refresh(user)
   session.refresh(wallet)
   return {"user": _user_to_dict(user, wallet)}
+
+
+def get_star_conversion_rate(session: Session) -> dict:
+  """Viewer facing star → disc exchange rate shown on the conversion page."""
+  ensure_seeded(session)
+  settings = _current_star_price_settings(session)
+  return {
+    "star_price_inr": settings["price_inr"],
+    "disc_price_inr": settings["disc_price_inr"],
+    "discs_per_star": discs_per_star_from_settings(settings),
+  }
+
+
+def convert_stars_to_discs(session: Session, user_id: str, stars: int) -> dict:
+  """Exchange a viewer's stars for discs at the admin-set rate.
+
+  The wallet, the legacy points mirror, and a wallet_transactions ledger row are
+  written in one commit, so the discs the app shows in its menu balances are always
+  the discs stored in the database. The rate itself is never hard-coded: it is read
+  from the star/disc rupee values the admin saved.
+  """
+  ensure_seeded(session)
+  amount = int(stars)
+  if amount <= 0:
+    raise ValueError("Choose at least 1 star to convert.")
+  user = session.get(UserRecord, user_id)
+  if user is None:
+    raise ValueError("Your account could not be found. Please sign in again.")
+  rate = get_star_conversion_rate(session)
+  per_star = int(rate["discs_per_star"])
+  wallet = session.query(WalletRecord).filter(WalletRecord.user_id == user.id).first()
+  if wallet is None:
+    wallet = WalletRecord(user_id=user.id, available_stars=0, blocked_stars=0, disks=0)
+    session.add(wallet)
+    session.flush()
+  star_balance = int(wallet.available_stars or 0)
+  if star_balance < amount:
+    raise ValueError(f"Not enough stars: your balance is {star_balance}.")
+  credited = amount * per_star
+  wallet.available_stars = star_balance - amount
+  wallet.disks = int(wallet.disks or 0) + credited
+  # keep legacy points in sync with the wallet until points is fully removed from the model
+  user.points = wallet.available_stars * 100
+  session.add(
+    WalletTransactionRecord(
+      user_id=user.id,
+      transaction_type="star_conversion",
+      stars_delta=-amount,
+      blocked_stars_delta=0,
+      disks_delta=credited,
+      reference_type="star_conversion",
+      note=f"Converted {amount} star(s) into {credited} discs at {per_star} discs per star",
+      created_at=datetime.utcnow(),
+    )
+  )
+  session.commit()
+  session.refresh(user)
+  session.refresh(wallet)
+  return {
+    "user": _user_to_dict(user, wallet),
+    "stars_converted": amount,
+    "discs_credited": credited,
+    "discs_per_star": per_star,
+    "disc_price_inr": rate["disc_price_inr"],
+  }
 
 
 def authenticate_user(session: Session, email: str, password: str) -> dict | None:

@@ -11,7 +11,7 @@ from backend.core.push import (
   normalize_push_token,
   send_push_messages_async,
 )
-from backend.core.catalogue import catalogue_view, pricing_entries, title_origin
+from backend.core.catalogue import catalogue_view, discs_per_star_from_settings, pricing_entries, title_origin
 from backend.core.time_utils import parse_app_datetime
 
 
@@ -35,6 +35,9 @@ DEFAULT_STAR_PRICE_SETTINGS = {
   "price_inr": 50,
   "price_usd": 0.0,
   "price_eur": 0.0,
+  # Rupee value of one disc; with price_inr it defines the star → disc rate
+  # (Rs 50 / Rs 0.10 = 500 discs per star) the viewer conversion page shows.
+  "disc_price_inr": 0.10,
   "effective_from": None,
 }
 MOVIE_NOTIFICATIONS: list[dict] = []
@@ -432,7 +435,9 @@ def list_movies(
     movies = [movie for movie in movies if not movie.get("archived", False)]
     movies = [movie for movie in movies if _is_viewer_visible(movie)]
   if not include_archived and not prefer_pending:
-    movies = [catalogue_view(movie) for movie in movies]
+    # One settings read for the whole page: the exchange rate is global, not per title.
+    disc_rate = discs_per_star_from_settings(get_star_pricing_settings())
+    movies = [catalogue_view(movie, discs_per_star=disc_rate) for movie in movies]
   if stage:
     movies = [movie for movie in movies if movie["stage"] == stage]
   return movies
@@ -641,7 +646,7 @@ def remove_movie_wish(movie_id: str, user_id: str) -> dict | None:
 def get_admin_summary() -> dict:
   queue = list_publish_queue()
   active_movies = [movie for movie in MOVIES if not movie.get("archived", False)]
-  pricing = deepcopy(ADMIN_STATE.get("star_price_settings", DEFAULT_STAR_PRICE_SETTINGS))
+  pricing = _normalized_star_price_settings(ADMIN_STATE.get("star_price_settings"))
   return {
     "featured_stage": ADMIN_STATE["featured_stage"],
     "reward_campaign_boosts": ADMIN_STATE["reward_campaign_boosts"],
@@ -649,6 +654,8 @@ def get_admin_summary() -> dict:
     "star_price_usd": pricing["price_usd"],
     "star_price_eur": pricing["price_eur"],
     "star_price_effective_from": pricing["effective_from"],
+    "disc_price_inr": pricing["disc_price_inr"],
+    "discs_per_star": discs_per_star_from_settings(pricing),
     "tracked_titles": len(active_movies),
     "queue_total": len(queue),
     "queue_ready": len([item for item in queue if item["status"] == "Ready For Review"]),
@@ -656,16 +663,43 @@ def get_admin_summary() -> dict:
   }
 
 
-def get_star_pricing_settings() -> dict:
-  return deepcopy(ADMIN_STATE.get("star_price_settings", DEFAULT_STAR_PRICE_SETTINGS))
-
-
-def update_star_pricing_settings(payload: dict) -> dict:
+def _normalized_star_price_settings(payload: dict | None = None) -> dict:
   settings = deepcopy(DEFAULT_STAR_PRICE_SETTINGS)
+  if not isinstance(payload, dict):
+    return settings
   settings["price_inr"] = float(payload.get("price_inr", settings["price_inr"]) or settings["price_inr"])
   settings["price_usd"] = float(payload.get("price_usd", settings["price_usd"]) or settings["price_usd"])
   settings["price_eur"] = float(payload.get("price_eur", settings["price_eur"]) or settings["price_eur"])
+  # A blank/zero disc price would make the exchange rate undefined, so it keeps the
+  # shipped default instead of being stored as 0.
+  settings["disc_price_inr"] = float(
+    payload.get("disc_price_inr", settings["disc_price_inr"]) or settings["disc_price_inr"]
+  )
   settings["effective_from"] = payload.get("effective_from") or None
+  return settings
+
+
+def get_star_pricing_settings() -> dict:
+  return _normalized_star_price_settings(ADMIN_STATE.get("star_price_settings"))
+
+
+def get_star_conversion_rate() -> dict:
+  """Viewer facing star → disc exchange rate shown on the conversion page."""
+  pricing = get_star_pricing_settings()
+  return {
+    "star_price_inr": pricing["price_inr"],
+    "disc_price_inr": pricing["disc_price_inr"],
+    "discs_per_star": discs_per_star_from_settings(pricing),
+  }
+
+
+def update_star_pricing_settings(payload: dict) -> dict:
+  # Mirrors persistence.update_star_pricing_settings: an omitted (or null) disc price
+  # keeps the live value instead of reverting to the shipped default.
+  requested_disc_price = payload.get("disc_price_inr")
+  if requested_disc_price in (None, ""):
+    payload = {**payload, "disc_price_inr": get_star_pricing_settings()["disc_price_inr"]}
+  settings = _normalized_star_price_settings(payload)
   ADMIN_STATE["star_price_settings"] = settings
   return deepcopy(settings)
 
@@ -1225,7 +1259,7 @@ def list_users() -> list[dict]:
     item = {key: value for key, value in user.items() if key != "password_hash"}
     item["star_balance"] = int(item.get("available_stars", max(item.get("points", 0) // 100, 0)))
     item["blocked_stars"] = int(item.get("blocked_stars", 0))
-    item["disc_balance"] = max(item.get("points", 0) * 10, 0)
+    item["disc_balance"] = int(item.get("disks", max(item.get("points", 0) * 10, 0)))
     items.append(item)
   return items
 
@@ -1342,6 +1376,36 @@ def purchase_stars(user_id: str, stars: int, payment_method: str, payment_refere
   user["points"] = (balance + amount) * 100
   return {
     "user": {key: value for key, value in deepcopy(user).items() if key != "password_hash"},
+  }
+
+
+def convert_stars_to_discs(user_id: str, stars: int) -> dict:
+  """Exchange stars for discs at the admin-set rate (demo/DB-less store).
+
+  Mirrors persistence.convert_stars_to_discs: the star balance drops, the disc
+  balance grows, and both are written back onto the stored user record so the app
+  menu balances and the admin user list read the same numbers.
+  """
+  amount = int(stars)
+  if amount <= 0:
+    raise ValueError("Choose at least 1 star to convert.")
+  user = next((item for item in USERS if item["id"] == user_id), None)
+  if user is None:
+    raise ValueError("Your account could not be found. Please sign in again.")
+  per_star = int(get_star_conversion_rate()["discs_per_star"])
+  balance = int(user.get("available_stars", max(int(user.get("points", 0)) // 100, 0)))
+  if balance < amount:
+    raise ValueError(f"Not enough stars: your balance is {balance}.")
+  credited = amount * per_star
+  user["available_stars"] = balance - amount
+  user["points"] = (balance - amount) * 100
+  user["disks"] = int(user.get("disks", balance * 10)) + credited
+  return {
+    "user": {key: value for key, value in deepcopy(user).items() if key != "password_hash"},
+    "stars_converted": amount,
+    "discs_credited": credited,
+    "discs_per_star": per_star,
+    "disc_price_inr": float(get_star_conversion_rate()["disc_price_inr"]),
   }
 
 

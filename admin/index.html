@@ -573,17 +573,31 @@
                 <strong id="adminStarPriceSummary">Rs 50</strong>
                 <p>New titles snapshot this base rate when they are created.</p>
               </article>
+              <article class="admin-summary-card">
+                <span>1 Disc Value</span>
+                <strong id="adminDiscPriceSummary">Rs 0.10</strong>
+                <p>What one disc is worth in rupees for the viewer wallet.</p>
+              </article>
+              <article class="admin-summary-card">
+                <span>Star To Disc Exchange</span>
+                <strong id="adminDiscConversionSummary">1 Star = 500 Discs</strong>
+                <p>Calculated as star price / disc value, so saving either value updates the rate.</p>
+              </article>
             </div>
 
             <article class="workspace-panel admin-panel-card">
               <p class="section-kicker">Star Pricing</p>
-              <h2>Set the active per-star price for newly created titles</h2>
-              <p class="helper-text">This value is saved as the live pricing snapshot. Existing titles keep their own stored pricing.</p>
+              <h2>Set the active per-star price and the per-disc value</h2>
+              <p class="helper-text">These values are saved as the live pricing snapshot. Existing titles keep their own stored pricing. The disc value decides how many discs a viewer receives when they convert one star.</p>
               <form id="adminStarPricingForm" class="admin-user-editor-form">
                 <div class="admin-user-editor-grid">
                   <label class="field">
                     <span>1 Star Price - INR</span>
                     <input id="adminStarPriceInr" type="number" min="1" step="1" value="50">
+                  </label>
+                  <label class="field">
+                    <span>1 Disc Value - INR</span>
+                    <input id="adminDiscPriceInr" type="number" min="0.01" step="0.01" value="0.10">
                   </label>
                   <label class="field">
                     <span>1 Star Price - USD</span>
@@ -598,6 +612,7 @@
                     <input id="adminStarPriceEffectiveFrom" type="datetime-local">
                   </label>
                 </div>
+                <p class="helper-text" id="adminStarDiscRatePreview">1 Star = 500 Discs at the saved values.</p>
                 <div class="taxonomy-form-actions">
                   <button type="submit" class="primary-btn">Save Star Pricing</button>
                 </div>

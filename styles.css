@@ -1116,6 +1116,113 @@ body.creator-entry #guestEntryButton {
   color: #e4ebf8;
 }
 
+/* Star → disc exchange: rate pill, entry points, and the conversion sheet. */
+.meta-pill-rate {
+  cursor: pointer;
+  border-color: rgba(124, 84, 255, 0.42);
+  background: linear-gradient(135deg, rgba(65, 22, 74, 0.95), rgba(88, 19, 106, 0.95));
+  color: #ffe9c9;
+  font-size: 0.92rem;
+  white-space: nowrap;
+}
+
+.meta-pill-rate:hover {
+  border-color: rgba(255, 196, 81, 0.6);
+}
+
+.viewer-convert-link {
+  display: block;
+  width: 100%;
+  margin-top: 18px;
+  padding: 14px 16px;
+  border-radius: 16px;
+  border: 1px solid rgba(124, 84, 255, 0.42);
+  background: rgba(124, 84, 255, 0.12);
+  color: #fff7ef;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.viewer-convert-link strong {
+  display: block;
+  font-size: 1rem;
+}
+
+.viewer-convert-link span {
+  display: block;
+  margin-top: 4px;
+  color: #d9e2f3;
+  font-size: 0.88rem;
+  font-weight: 500;
+}
+
+.viewer-convert-link:hover {
+  border-color: rgba(255, 196, 81, 0.6);
+}
+
+.viewer-convert-row {
+  display: grid;
+  gap: 14px;
+  margin-top: 20px;
+}
+
+.viewer-convert-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.viewer-convert-chip {
+  min-height: 40px;
+  padding: 0 16px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: #1a2433;
+  color: #e4ebf8;
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.viewer-convert-chip:hover {
+  border-color: rgba(255, 196, 81, 0.6);
+}
+
+.viewer-convert-feedback {
+  margin: 16px 0 0;
+  color: #cfe7c6;
+  font-size: 0.95rem;
+  line-height: 1.6;
+}
+
+.viewer-convert-feedback:empty {
+  display: none;
+}
+
+.viewer-convert-feedback.is-error {
+  color: #ffb8b8;
+}
+
+.account-exchange {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-top: 20px;
+  padding: 18px 20px;
+  border-radius: 18px;
+  border: 1px solid rgba(124, 84, 255, 0.32);
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.account-exchange-rate {
+  margin: 0;
+  color: #d9e2f3;
+  font-size: 0.98rem;
+}
+
 .admin-movie-action-reserve-start.is-active {
   color: #ffd76d;
   border-color: rgba(255, 196, 81, 0.34);

@@ -374,6 +374,27 @@ class StarPurchaseResponse(BaseModel):
   payment_reference: str | None = None
 
 
+class StarConversionRequest(BaseModel):
+  stars: int = Field(ge=1, le=100000)
+
+
+class StarConversionRateResponse(BaseModel):
+  """Star → disc exchange rate the viewer's conversion page displays."""
+
+  star_price_inr: float = 50
+  disc_price_inr: float = 0.10
+  discs_per_star: int = 500
+
+
+class StarConversionResponse(BaseModel):
+  message: str
+  stars_converted: int
+  discs_credited: int
+  star_balance: int
+  disc_balance: int
+  discs_per_star: int = 500
+
+
 class MovieInterestResponse(BaseModel):
   item: MovieResponse
   message: str
@@ -923,6 +944,8 @@ class AdminSummaryResponse(BaseModel):
   star_price_usd: float = 0.0
   star_price_eur: float = 0.0
   star_price_effective_from: str | None = None
+  disc_price_inr: float = 0.10
+  discs_per_star: int = 500
   tracked_titles: int
   queue_total: int
   queue_ready: int
@@ -943,6 +966,9 @@ class StarPricingSettingsResponse(BaseModel):
   price_inr: float = 50
   price_usd: float = 0.0
   price_eur: float = 0.0
+  # Rupee value of one disc. The star → disc exchange rate is price_inr /
+  # disc_price_inr, i.e. Rs 50 / Rs 0.10 = 500 discs per star.
+  disc_price_inr: float = 0.10
   effective_from: str | None = None
 
 
@@ -950,6 +976,9 @@ class StarPricingSettingsRequest(BaseModel):
   price_inr: float = Field(ge=1)
   price_usd: float = Field(ge=0)
   price_eur: float = Field(ge=0)
+  # Optional so an already-cached admin page can still save; a missing value keeps
+  # the stored disc price instead of overwriting it.
+  disc_price_inr: float | None = Field(default=None, gt=0)
   effective_from: str | None = None
 
 

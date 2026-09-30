@@ -14,6 +14,13 @@ const SAMPLE_CONFIG_PATH = "/sample-config.json";
 const API_BASE = "/api";
 const entryMode = document.body.dataset.entry || "viewer";
 
+// Disc economy defaults, mirroring backend.core.catalogue. The admin sets the star
+// price and the per-disc value; the exchange rate (discs per star) is always derived
+// as star price / disc value, e.g. Rs 50 / Rs 0.10 = 500 discs.
+const DEFAULT_STAR_PRICE_INR = 50;
+const DEFAULT_DISC_PRICE_INR = 0.1;
+const DEFAULT_DISCS_PER_STAR = 500;
+
 const movieSeed = [];
 
 let movies = movieSeed.map((movie) => ({ ...movie }));
@@ -31,6 +38,10 @@ let activeAccountEntry = "account";
 let activeWishMovieId = "";
 let activeReserveMovieId = "";
 let activeReserveAction = "reserve";
+// Live star → disc exchange rate (star price, disc value, discs per star). It is
+// never stored client side: the admin owns both rupee values, so the rate always
+// comes from /users/stars/conversion-rate.
+let viewerStarConversionRate = null;
 let activeAdminPanel = "users";
 let adminSessionProfile = {
   role: window.localStorage.getItem("cineproxima_session_role") || "",
@@ -140,6 +151,20 @@ const viewerReserveModal = document.getElementById("viewerReserveModal");
 const viewerReserveModalMovie = document.getElementById("viewerReserveModalMovie");
 const viewerReserveModalCopy = document.getElementById("viewerReserveModalCopy");
 const viewerReserveConfirmButton = document.getElementById("viewerReserveConfirmButton");
+const viewerReserveConvertLink = document.getElementById("viewerReserveConvertLink");
+// Star → disc exchange: the rate pill in the top bar balances, the wallet panel
+// entry, and the conversion sheet itself.
+const viewerExchangeRateButton = document.getElementById("viewerExchangeRateButton");
+const viewerExchangeRateLabel = document.getElementById("viewerExchangeRateLabel");
+const accountWalletRate = document.getElementById("accountWalletRate");
+const accountWalletConvertButton = document.getElementById("accountWalletConvertButton");
+const viewerConvertModal = document.getElementById("viewerConvertModal");
+const viewerConvertModalRate = document.getElementById("viewerConvertModalRate");
+const viewerConvertModalCopy = document.getElementById("viewerConvertModalCopy");
+const viewerConvertStarsInput = document.getElementById("viewerConvertStarsInput");
+const viewerConvertPreview = document.getElementById("viewerConvertPreview");
+const viewerConvertConfirmButton = document.getElementById("viewerConvertConfirmButton");
+const viewerConvertFeedback = document.getElementById("viewerConvertFeedback");
 const metricTitles = document.getElementById("metricTitles");
 const metricWish = document.getElementById("metricWish");
 const metricRevenue = document.getElementById("metricRevenue");
@@ -161,6 +186,11 @@ const adminStarPriceUsd = document.getElementById("adminStarPriceUsd");
 const adminStarPriceEur = document.getElementById("adminStarPriceEur");
 const adminStarPriceEffectiveFrom = document.getElementById("adminStarPriceEffectiveFrom");
 const adminStarPricingFeedback = document.getElementById("adminStarPricingFeedback");
+// Disc economy: per-disc rupee value plus the derived star → disc exchange rate.
+const adminDiscPriceInr = document.getElementById("adminDiscPriceInr");
+const adminDiscPriceSummary = document.getElementById("adminDiscPriceSummary");
+const adminDiscConversionSummary = document.getElementById("adminDiscConversionSummary");
+const adminStarDiscRatePreview = document.getElementById("adminStarDiscRatePreview");
 const adminMovieList = document.getElementById("adminMovieList");
 const adminArchiveMovieList = document.getElementById("adminArchiveMovieList");
 const adminLibrarySearch = document.getElementById("adminLibrarySearch");
@@ -1287,6 +1317,9 @@ function syncViewerHeader() {
   if (viewerAccountButton) {
     viewerAccountButton.textContent = viewerSessionProfile ? "My Account" : "Sign In";
   }
+  // The exchange rate sits next to both balances in the top bar, so the menu always
+  // shows what one star is currently worth in discs.
+  syncViewerExchangeRate();
 }
 
 function formatCurrencyInr(value) {
@@ -1394,7 +1427,10 @@ function renderAccountView() {
   setText(accountSidebarStars, formatNumber(stars));
   setText(accountSidebarDiscs, formatNumber(discs));
   setText(accountOverviewStars, formatNumber(stars));
-  setText(accountOverviewStarsValue, `${formatCurrencyInr(stars * 100)} value`);
+  // Star and disc values are admin editable, so the rupee figures shown to the
+  // viewer come from the live rate instead of a hard coded multiplier.
+  const starValueInr = stars * getViewerStarPriceInr();
+  setText(accountOverviewStarsValue, `${formatCurrencyInr(starValueInr)} value`);
   setText(accountOverviewDiscs, formatNumber(discs));
   setText(accountOverviewDiscsValue, `${formatNumber(discs)} disks`);
   setText(accountOverviewLibrary, formatNumber(collectionTitles.length));
@@ -1405,10 +1441,12 @@ function renderAccountView() {
   setText(accountWalletStars, formatNumber(stars));
   setText(accountWalletBlockedStars, formatNumber(blockedStars));
   setText(accountWalletDiscs, formatNumber(discs));
-  setText(accountWalletValue, formatCurrencyInr(stars * 100));
+  setText(accountWalletValue, formatCurrencyInr(starValueInr));
   setText(accountSettingsRole, formatRoleLabel(profile?.role || "viewer"));
   setText(accountSettingsStatus, String(profile?.status || "guest"));
   setText(accountSettingsEmail, profile?.email || "Not signed in");
+  // Wallet panel keeps the live exchange rate in view next to both balances.
+  syncViewerExchangeRate();
 
   renderAccountList(
     accountMoviesList,
@@ -1445,6 +1483,7 @@ function handleViewerSignout() {
   closeViewerAssetModal();
   closeViewerWishModal();
   closeViewerReserveModal();
+  closeViewerConvertModal();
   closeSignupFlow();
   setAccountPanel("profile");
   setView("auth");
@@ -2236,6 +2275,9 @@ async function loadViewerSessionFromApi() {
   const profile = await apiRequest("/auth/me");
   viewerSessionProfile = profile;
   viewerMovieDetails.clear();
+  // Star pricing is admin editable, so the star/disc rate is re-quoted with every
+  // session read instead of being cached for the life of the tab.
+  void loadViewerStarConversionRate();
   await loadMoviesFromApi();
   syncViewerHeader();
   renderAccountView();
@@ -2373,6 +2415,41 @@ function applyAdminSummary(summary) {
   setText(adminQueueTotal, String(summary.queue_total));
   setText(adminStarPriceSummary, `Rs ${formatNumber(summary.star_price_inr || 0)}`);
   setText(adminStarPricingNavValue, `Rs ${formatNumber(summary.star_price_inr || 0)}`);
+  setText(adminDiscPriceSummary, `Rs ${formatDiscPrice(summary.disc_price_inr ?? DEFAULT_DISC_PRICE_INR)}`);
+  setText(adminDiscConversionSummary, buildStarDiscRateLabel(summary.star_price_inr, summary.disc_price_inr));
+}
+
+/**
+ * Whole discs one star converts into, mirroring backend.core.catalogue.compute_discs_per_star.
+ * The rate is never stored: it is always star price / disc value, so the admin sees
+ * the exact number the viewers will be paid before saving.
+ */
+function computeDiscsPerStar(starPriceInr = DEFAULT_STAR_PRICE_INR, discPriceInr = DEFAULT_DISC_PRICE_INR) {
+  const star = Number(starPriceInr);
+  const disc = Number(discPriceInr);
+  if (!Number.isFinite(star) || !Number.isFinite(disc) || star <= 0 || disc <= 0) {
+    return DEFAULT_DISCS_PER_STAR;
+  }
+  return Math.max(1, Math.round(star / disc));
+}
+
+function buildStarDiscRateLabel(starPriceInr, discPriceInr) {
+  return `1 Star = ${formatNumber(computeDiscsPerStar(starPriceInr, discPriceInr))} Discs`;
+}
+
+function formatDiscPrice(value) {
+  const numericValue = Number(value ?? DEFAULT_DISC_PRICE_INR);
+  return Number.isFinite(numericValue) ? numericValue.toFixed(2) : DEFAULT_DISC_PRICE_INR.toFixed(2);
+}
+
+/** Live preview under the form so the operator sees the payout before saving. */
+function syncAdminDiscRatePreview() {
+  if (!adminStarDiscRatePreview) {
+    return;
+  }
+  const star = Number(adminStarPriceInr?.value || DEFAULT_STAR_PRICE_INR);
+  const disc = Number(adminDiscPriceInr?.value || DEFAULT_DISC_PRICE_INR);
+  adminStarDiscRatePreview.textContent = `${buildStarDiscRateLabel(star, disc)} at the values above.`;
 }
 
 function applyAdminStarPricing(settings) {
@@ -2382,7 +2459,10 @@ function applyAdminStarPricing(settings) {
 
   adminStarPricingState = settings;
   if (adminStarPriceInr) {
-    adminStarPriceInr.value = String(settings.price_inr ?? 50);
+    adminStarPriceInr.value = String(settings.price_inr ?? DEFAULT_STAR_PRICE_INR);
+  }
+  if (adminDiscPriceInr) {
+    adminDiscPriceInr.value = String(settings.disc_price_inr ?? DEFAULT_DISC_PRICE_INR);
   }
   if (adminStarPriceUsd) {
     adminStarPriceUsd.value = String(settings.price_usd ?? 0);
@@ -2393,6 +2473,7 @@ function applyAdminStarPricing(settings) {
   if (adminStarPriceEffectiveFrom) {
     adminStarPriceEffectiveFrom.value = toDateTimeLocalValue(settings.effective_from);
   }
+  syncAdminDiscRatePreview();
 }
 
 function getSelectedMovie() {
@@ -3836,6 +3917,158 @@ function closeViewerReserveModal() {
   }
   viewerReserveModal.classList.add("hidden");
   viewerReserveModal.setAttribute("aria-hidden", "true");
+}
+
+/* ---------------------------------------------------------------------------
+ * Convert Stars to Discs
+ *
+ * The admin panel owns two numbers: the price of one star and the rupee value of
+ * one disc (default Rs 50 and Rs 0.10). The backend derives the payout from them,
+ * so this page only ever quotes what the server will actually credit.
+ * ------------------------------------------------------------------------- */
+
+function getViewerDiscsPerStar() {
+  const rate = Number(viewerStarConversionRate?.discs_per_star);
+  return Number.isFinite(rate) && rate > 0 ? Math.round(rate) : DEFAULT_DISCS_PER_STAR;
+}
+
+function getViewerStarPriceInr() {
+  const rate = Number(viewerStarConversionRate?.star_price_inr);
+  return Number.isFinite(rate) && rate > 0 ? rate : DEFAULT_STAR_PRICE_INR;
+}
+
+function getViewerDiscPriceInr() {
+  const rate = Number(viewerStarConversionRate?.disc_price_inr);
+  return Number.isFinite(rate) && rate > 0 ? rate : DEFAULT_DISC_PRICE_INR;
+}
+
+/** Kept in the top bar balances and the wallet panel so the rate is always visible. */
+function syncViewerExchangeRate() {
+  const discsPerStar = getViewerDiscsPerStar();
+  setText(viewerExchangeRateLabel, `1 ★ = ${formatNumber(discsPerStar)} ◎`);
+  setText(accountWalletRate, buildStarDiscRateLabel(getViewerStarPriceInr(), getViewerDiscPriceInr()));
+}
+
+async function loadViewerStarConversionRate() {
+  if (!sessionToken) {
+    viewerStarConversionRate = null;
+    syncViewerExchangeRate();
+    return null;
+  }
+  try {
+    const rate = await apiRequest("/users/stars/conversion-rate");
+    viewerStarConversionRate = rate;
+    syncViewerExchangeRate();
+    updateViewerConvertPreview();
+    return rate;
+  } catch (error) {
+    // A signed-out or offline viewer keeps the shipped default rate on screen; the
+    // server re-checks the real rate when the conversion is submitted.
+    syncViewerExchangeRate();
+    return null;
+  }
+}
+
+function getViewerConvertStars() {
+  const typedStars = Number.parseInt(String(viewerConvertStarsInput?.value ?? "").replace(/\D/g, ""), 10);
+  return Number.isFinite(typedStars) ? typedStars : 0;
+}
+
+function setViewerConvertFeedback(message, isError = false) {
+  setText(viewerConvertFeedback, message || "");
+  if (viewerConvertFeedback) {
+    viewerConvertFeedback.classList.toggle("is-error", Boolean(message) && isError);
+  }
+}
+
+function updateViewerConvertPreview() {
+  const discsPerStar = getViewerDiscsPerStar();
+  const stars = Math.max(0, getViewerConvertStars());
+  if (viewerConvertPreview) {
+    viewerConvertPreview.textContent = discsPerStar
+      ? `You will receive ◎ ${formatNumber(discsPerStar * stars)} discs.`
+      : "Your disc payout appears once the exchange rate loads.";
+  }
+  if (viewerConvertConfirmButton) {
+    const starBalance = Number(viewerSessionProfile?.star_balance ?? 0);
+    viewerConvertConfirmButton.disabled = stars < 1 || stars > starBalance;
+  }
+}
+
+function openViewerConvertModal() {
+  if (!viewerSessionProfile) {
+    setView("auth");
+    setAuthMessage("Sign in to convert your stars into discs.", true);
+    return;
+  }
+  if (!viewerConvertModal) {
+    return;
+  }
+  setViewerConvertFeedback("");
+  if (viewerConvertStarsInput && !viewerConvertStarsInput.value) {
+    viewerConvertStarsInput.value = "1";
+  }
+  setText(viewerConvertModalRate, buildStarDiscRateLabel(getViewerStarPriceInr(), getViewerDiscPriceInr()));
+  setText(
+    viewerConvertModalCopy,
+    `1 Star costs Rs ${formatDiscPrice(getViewerStarPriceInr())} and 1 Disc is worth Rs ${formatDiscPrice(getViewerDiscPriceInr())}, both set by Cine Vault in the admin panel.`
+  );
+  updateViewerConvertPreview();
+  viewerConvertModal.classList.remove("hidden");
+  viewerConvertModal.setAttribute("aria-hidden", "false");
+  // Always re-quote the live rate: an admin may have changed either rupee value
+  // since the viewer last signed in.
+  void loadViewerStarConversionRate();
+}
+
+function closeViewerConvertModal() {
+  if (!viewerConvertModal) {
+    return;
+  }
+  viewerConvertModal.classList.add("hidden");
+  viewerConvertModal.setAttribute("aria-hidden", "true");
+  setViewerConvertFeedback("");
+}
+
+async function submitViewerStarConversion() {
+  if (!viewerSessionProfile) {
+    openViewerConvertModal();
+    return;
+  }
+  const stars = getViewerConvertStars();
+  const starBalance = Number(viewerSessionProfile?.star_balance ?? 0);
+  if (stars < 1) {
+    setViewerConvertFeedback("Enter at least 1 star to convert.", true);
+    return;
+  }
+  if (stars > starBalance) {
+    setViewerConvertFeedback(`You have ★ ${formatNumber(starBalance)}. Enter ${formatNumber(starBalance)} or fewer.`, true);
+    return;
+  }
+
+  if (viewerConvertConfirmButton) {
+    viewerConvertConfirmButton.disabled = true;
+  }
+  setViewerConvertFeedback("Converting your stars...");
+  try {
+    const result = await apiRequest("/users/stars/convert", {
+      method: "POST",
+      body: JSON.stringify({ stars }),
+    });
+    setViewerConvertFeedback(result?.message || "Stars converted into discs.");
+    if (viewerConvertStarsInput) {
+      viewerConvertStarsInput.value = "1";
+    }
+    // The response carries the authoritative wallets, so the whole page is
+    // re-read instead of trusting a locally computed balance.
+    await loadViewerSessionFromApi();
+    await loadViewerStarConversionRate();
+    setStatus(result?.message || "Stars converted into discs.");
+  } catch (error) {
+    setViewerConvertFeedback(error?.message || "The conversion could not be completed.", true);
+  } finally {
+    updateViewerConvertPreview();
+  }
 }
 
 async function submitMovieInterest(movieId, kind, wishMode = "") {
@@ -6848,6 +7081,7 @@ async function updateAdminStarPricingRemote(payload) {
     method: "PUT",
     body: JSON.stringify({
       price_inr: payload.priceInr,
+      disc_price_inr: payload.discPriceInr,
       price_usd: payload.priceUsd,
       price_eur: payload.priceEur,
       effective_from: payload.effectiveFrom || null,
@@ -6858,7 +7092,8 @@ async function updateAdminStarPricingRemote(payload) {
   applyAdminStarPricing(response);
   await loadAdminSummaryFromApi();
   if (adminStarPricingFeedback) {
-    adminStarPricingFeedback.textContent = "Star pricing updated and saved successfully.";
+    const rate = computeDiscsPerStar(response.price_inr, response.disc_price_inr);
+    adminStarPricingFeedback.textContent = `Star pricing updated and saved — 1 Star = ${formatNumber(rate)} Discs.`;
     adminStarPricingFeedback.style.color = "var(--accent-color)";
   }
   adminHelper.textContent = "Star pricing saved for newly created titles.";
@@ -8059,6 +8294,46 @@ document.querySelectorAll("[data-viewer-reserve-close]").forEach((button) => {
   });
 });
 
+document.querySelectorAll("[data-viewer-convert-close]").forEach((button) => {
+  button.addEventListener("click", () => {
+    closeViewerConvertModal();
+  });
+});
+
+// Three entry points into the same sheet: the Pay & Play modal, the wallet panel,
+// and the exchange rate pill printed next to the top bar balances.
+[viewerReserveConvertLink, accountWalletConvertButton, viewerExchangeRateButton].forEach((button) => {
+  button?.addEventListener("click", () => {
+    // The purchase modal stays mounted underneath, so it is closed first to keep
+    // only one dialog on screen.
+    closeViewerReserveModal();
+    openViewerConvertModal();
+  });
+});
+
+viewerConvertModal?.addEventListener("click", (event) => {
+  const chip = event.target.closest("[data-convert-stars]");
+  if (!chip) {
+    return;
+  }
+  const starBalance = Number(viewerSessionProfile?.star_balance ?? 0);
+  const requested = chip.dataset.convertStars === "all"
+    ? starBalance
+    : Number.parseInt(chip.dataset.convertStars || "0", 10);
+  if (viewerConvertStarsInput) {
+    viewerConvertStarsInput.value = String(Math.max(0, requested || 0));
+  }
+  updateViewerConvertPreview();
+});
+
+viewerConvertStarsInput?.addEventListener("input", () => {
+  updateViewerConvertPreview();
+});
+
+viewerConvertConfirmButton?.addEventListener("click", () => {
+  void submitViewerStarConversion();
+});
+
 if (viewerAssetModalBody) {
   viewerAssetModalBody.addEventListener("click", (event) => {
     const contentActionButton = event.target.closest("[data-viewer-content-action]");
@@ -9040,13 +9315,17 @@ if (adminStarPricingForm) {
         adminStarPricingFeedback.textContent = "";
       }
       const payload = {
-        priceInr: Number(adminStarPriceInr?.value || 50),
+        priceInr: Number(adminStarPriceInr?.value || DEFAULT_STAR_PRICE_INR),
+        discPriceInr: Number(adminDiscPriceInr?.value || DEFAULT_DISC_PRICE_INR),
         priceUsd: Number(adminStarPriceUsd?.value || 0),
         priceEur: Number(adminStarPriceEur?.value || 0),
         effectiveFrom: adminStarPriceEffectiveFrom?.value || "",
       };
       if (!Number.isFinite(payload.priceInr) || payload.priceInr < 1) {
         throw new Error("1 Star Price - INR must be at least 1.");
+      }
+      if (!Number.isFinite(payload.discPriceInr) || payload.discPriceInr <= 0) {
+        throw new Error("1 Disc Value - INR must be greater than 0.");
       }
       if (!Number.isFinite(payload.priceUsd) || payload.priceUsd < 0) {
         throw new Error("1 Star Price - USD must be zero or higher.");
@@ -9062,6 +9341,11 @@ if (adminStarPricingForm) {
       }
       adminHelper.textContent = error instanceof Error ? error.message : "Unable to save star pricing.";
     }
+  });
+
+  // Live "1 Star = N Discs" preview while the operator edits either rupee value.
+  [adminStarPriceInr, adminDiscPriceInr].forEach((input) => {
+    input?.addEventListener("input", () => syncAdminDiscRatePreview());
   });
 }
 

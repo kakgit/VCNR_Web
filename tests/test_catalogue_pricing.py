@@ -23,6 +23,13 @@ from backend.models import Base
 RELEASE = datetime(2030, 1, 31, 18, 30, tzinfo=APP_TIMEZONE)
 PRICES = [dict(quality_code=q, quality_label=q, stars_required=s, sort_order=i)
           for i, (q, s) in enumerate((("720p", 5), ("1080p", 10), ("2k", 15), ("4k", 20)))]
+# Released titles are priced in discs at the admin's exchange rate (default Rs 50 per
+# star / Rs 0.10 per disc = 500 discs per star) instead of a hard-coded multiple.
+DISCS_PER_STAR = 500
+
+
+def disc_amounts(star_amounts, percent=100):
+  return [amount * DISCS_PER_STAR * percent // 100 for amount in star_amounts]
 
 
 class TestClient:
@@ -72,6 +79,7 @@ class CatalogueApiTests(unittest.TestCase):
     app.dependency_overrides[get_db] = db
     app.dependency_overrides[routes.require_admin] = lambda: {"id": "test", "role": "super_admin"}
     app.dependency_overrides[routes.require_admin_or_creator] = lambda: {"id": "test", "role": "super_admin"}
+    self.app = app
     # Seeding creates demo accounts and media: unrelated to these isolated tests.
     self.seed = patch.object(persistence, "ensure_seeded")
     self.seed.start()
@@ -91,6 +99,11 @@ class CatalogueApiTests(unittest.TestCase):
 
   def post(self, path, payload):
     response = self.client.post("/api" + path, json=payload)
+    self.assertEqual(response.status_code, 200, response.text)
+    return response.json()
+
+  def put(self, path, payload):
+    response = self.client.request("PUT", "/api" + path, payload=payload)
     self.assertEqual(response.status_code, 200, response.text)
     return response.json()
 
@@ -133,20 +146,74 @@ class CatalogueApiTests(unittest.TestCase):
           self.assertEqual(loaded[field], options)
           self.assertEqual(loaded["catalog_origin"], "upcoming" if stage == "upcoming" else "library")
 
+  def sign_in_as_viewer(self, user_id="viewer"):
+    """Viewer endpoints are auth gated, so the test client needs a signed-in viewer."""
+    self.app.dependency_overrides[routes.get_current_user] = lambda: {"id": user_id, "role": "viewer"}
+    self.addCleanup(self.app.dependency_overrides.pop, routes.get_current_user, None)
+
+  def test_disc_value_drives_the_star_conversion_rate(self):
+    self.sign_in_as_viewer()
+    # Rs 50 per star / Rs 0.10 per disc is the shipped default: 500 discs per star.
+    rate = self.client.get("/api/users/stars/conversion-rate")
+    self.assertEqual(rate.status_code, 200, rate.text)
+    self.assertEqual(rate.json(), {"star_price_inr": 50, "disc_price_inr": 0.10, "discs_per_star": DISCS_PER_STAR})
+    # Changing only the disc value in the admin panel changes the payout immediately.
+    saved = self.put("/admin/star-pricing", {"price_inr": 50, "price_usd": 0, "price_eur": 0, "disc_price_inr": 0.25})
+    self.assertEqual(saved["disc_price_inr"], 0.25)
+    self.assertEqual(persistence.discs_per_star_from_settings(saved), 200)
+    self.assertEqual(self.client.get("/api/users/stars/conversion-rate").json()["discs_per_star"], 200)
+    # A request that omits the new field keeps the stored disc price.
+    kept = self.put("/admin/star-pricing", {"price_inr": 50, "price_usd": 0, "price_eur": 0})
+    self.assertEqual(kept["disc_price_inr"], 0.25)
+    self.put("/admin/star-pricing", {"price_inr": 50, "price_usd": 0, "price_eur": 0, "disc_price_inr": 0.10})
+    self.assertEqual(self.client.get("/api/users/stars/conversion-rate").json()["discs_per_star"], DISCS_PER_STAR)
+
+  def test_converting_stars_credits_disks_at_the_live_rate(self):
+    from backend.models import UserRecord, WalletRecord
+    with self.sessions() as session:
+      user = persistence.create_user(session, {"name": "Viewer", "email": "convert@email.com",
+        "password": "pw12345", "role": "viewer", "status": "active", "star_balance": 3})
+      session.query(WalletRecord).filter(WalletRecord.user_id == user["id"]).update({"disks": 10})
+      session.commit()
+    self.sign_in_as_viewer(user["id"])
+    result = self.client.post("/api/users/stars/convert", json={"stars": 2})
+    self.assertEqual(result.status_code, 200, result.text)
+    body = result.json()
+    self.assertEqual(body["discs_credited"], 2 * DISCS_PER_STAR)
+    self.assertEqual(body["discs_per_star"], DISCS_PER_STAR)
+    self.assertEqual((body["star_balance"], body["disc_balance"]), (1, 10 + 2 * DISCS_PER_STAR))
+    # The conversion is written to the ledger, not just returned by the endpoint.
+    with self.sessions() as session:
+      ledger = session.query(persistence.WalletTransactionRecord).filter(
+        persistence.WalletTransactionRecord.user_id == user["id"],
+        persistence.WalletTransactionRecord.transaction_type == "star_conversion").all()
+      self.assertEqual([(row.stars_delta, row.disks_delta) for row in ledger], [(-2, 2 * DISCS_PER_STAR)])
+      # The legacy points mirror stays in sync with the reduced star balance.
+      self.assertEqual(session.get(UserRecord, user["id"]).points, 100)
+    # Overdrawing the balance is rejected and leaves the wallet untouched.
+    rejected = self.client.post("/api/users/stars/convert", json={"stars": 5})
+    self.assertEqual(rejected.status_code, 400, rejected.text)
+    with self.sessions() as session:
+      wallet = session.query(WalletRecord).filter(WalletRecord.user_id == user["id"]).one()
+      self.assertEqual(int(wallet.disks), 10 + 2 * DISCS_PER_STAR)
+      self.assertEqual(int(wallet.available_stars), 1)
+
 
   def test_lifecycle_and_exact_discount_boundaries(self):
     movie_id = self.create()
     self.post(f"/admin/movies/{movie_id}/pricing-config", {"online_pricing_options": PRICES, "stars_required_theatre": 3})
     self.approve(movie_id)
-    cases = [(RELEASE - timedelta(seconds=1), "upcoming", [5, 10, 15, 20]),
-             (RELEASE, "released", [5, 10, 15, 20]),
-             (RELEASE + timedelta(days=1), "released", [5, 10, 15, 20])]
-    for months, amounts in [(1, [5000, 10000, 15000, 20000]), (4, [4000, 8000, 12000, 16000]),
-                            (6, [2500, 5000, 7500, 10000]), (12, [500, 1000, 1500, 2000])]:
+    star_prices = [5, 10, 15, 20]
+    cases = [(RELEASE - timedelta(seconds=1), "upcoming", star_prices),
+             (RELEASE, "released", star_prices),
+             (RELEASE + timedelta(days=1), "released", star_prices)]
+    # Months after release mapped to the disc-price percentage that band applies.
+    for months, percent in [(1, 100), (4, 80), (6, 50), (12, 10)]:
       boundary = add_calendar_months(RELEASE, months)
+      expected = disc_amounts(star_prices, percent)
       previous = self.view(movie_id, boundary - timedelta(seconds=1), "released" if months == 1 else "library")
-      self.assertNotEqual([p["amount"] for p in previous["effective_pricing_options"]], amounts)
-      cases.append((boundary, "library", amounts))
+      self.assertNotEqual([p["amount"] for p in previous["effective_pricing_options"]], expected)
+      cases.append((boundary, "library", expected))
     for now, stage, amounts in cases:
       with self.subTest(now=now):
         item = self.view(movie_id, now, stage)

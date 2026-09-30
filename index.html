@@ -34,6 +34,14 @@
           <span id="viewerStarBalance">0</span>
           <span class="meta-pill-icon" aria-hidden="true">&#9733;</span>
         </span>
+        <!--
+          Star → disc exchange rate. Both rupee values are admin editable, so the label is
+          always filled from the API and the pill doubles as the shortcut into the
+          "Convert Stars to Discs" page.
+        -->
+        <button type="button" class="meta-pill meta-pill-rate" id="viewerExchangeRateButton" aria-label="Convert stars to discs">
+          <span id="viewerExchangeRateLabel">1 &#9733; = 500 &#9678;</span>
+        </button>
       </div>
       <div class="topbar-actions">
         <button class="ghost-btn" type="button" id="viewerAccountButton">My Account</button>
@@ -352,6 +360,15 @@
                     <strong id="accountWalletValue">₹0</strong>
                   </article>
                 </div>
+                <!--
+                  Star → disc exchange. The rate is never hard coded here: an admin sets the
+                  star price and the per-disc value in the admin panel and the backend derives
+                  "1 Star = N Discs" from them.
+                -->
+                <div class="account-exchange">
+                  <p class="account-exchange-rate" id="accountWalletRate">1 Star = 500 Discs</p>
+                  <button type="button" class="ghost-btn" id="accountWalletConvertButton">Convert Stars to Discs</button>
+                </div>
               </article>
             </section>
 
@@ -578,10 +595,54 @@
             </div>
           </div>
           <p class="viewer-choice-copy" id="viewerReserveModalCopy">Stars will be blocked until the release date.</p>
+          <!--
+            This modal is the web client's "Pay & Play" step: a viewer who cannot cover the
+            title yet gets the star → disc exchange here instead of a dead end.
+          -->
+          <button type="button" class="viewer-convert-link" id="viewerReserveConvertLink">
+            <strong>Convert Stars to Discs</strong>
+            <span>Trade your stars for reward discs to unlock this title.</span>
+          </button>
           <div class="viewer-choice-actions viewer-choice-actions-single">
             <button type="button" class="viewer-choice-btn is-theatre" id="viewerReserveConfirmButton">Confirm Reserve Now</button>
           </div>
           <button type="button" class="viewer-choice-cancel" data-viewer-reserve-close>Close</button>
+        </section>
+      </div>
+
+      <div id="viewerConvertModal" class="viewer-choice-modal hidden" aria-hidden="true">
+        <div class="viewer-choice-backdrop" data-viewer-convert-close></div>
+        <section class="viewer-choice-dialog" role="dialog" aria-modal="true" aria-labelledby="viewerConvertModalTitle">
+          <div class="viewer-choice-header">
+            <div>
+              <p class="section-kicker">Wallet Exchange</p>
+              <h2 id="viewerConvertModalTitle">Convert Stars to Discs</h2>
+              <p id="viewerConvertModalRate">1 Star = 500 Discs</p>
+            </div>
+          </div>
+          <!-- Filled from the live admin rate so the quoted rupees are never hard coded. -->
+          <p class="viewer-choice-copy" id="viewerConvertModalCopy">The exchange rate is set by Cine Vault in the admin panel.</p>
+
+          <div class="viewer-convert-row">
+            <label class="field" for="viewerConvertStarsInput">
+              <span>Stars to convert</span>
+              <input id="viewerConvertStarsInput" type="number" min="1" step="1" value="1">
+            </label>
+            <div class="viewer-convert-chips">
+              <button type="button" class="viewer-convert-chip" data-convert-stars="1">&#9733; 1</button>
+              <button type="button" class="viewer-convert-chip" data-convert-stars="5">&#9733; 5</button>
+              <button type="button" class="viewer-convert-chip" data-convert-stars="10">&#9733; 10</button>
+              <button type="button" class="viewer-convert-chip" data-convert-stars="all">All</button>
+            </div>
+          </div>
+
+          <p class="viewer-choice-copy" id="viewerConvertPreview">You will receive &#9678; 500 discs.</p>
+
+          <div class="viewer-choice-actions viewer-choice-actions-single">
+            <button type="button" class="viewer-choice-btn is-theatre" id="viewerConvertConfirmButton">Convert Stars</button>
+          </div>
+          <p class="viewer-convert-feedback" id="viewerConvertFeedback"></p>
+          <button type="button" class="viewer-choice-cancel" data-viewer-convert-close>Close</button>
         </section>
       </div>
 
